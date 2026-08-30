@@ -1,0 +1,5 @@
+Run ruff check .
+src/packages/shared/utils.py:24:5: F401 `os` imported but unused
+src/packages/shared/utils.py:42:1: E302 Expected 2 blank lines, found 1
+Found 2 errors.
+##[error]Process completed with exit code 1.

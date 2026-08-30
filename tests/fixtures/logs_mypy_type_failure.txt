@@ -1,0 +1,5 @@
+Run mypy --strict src/
+src/packages/sdk/client.py:45: error: Incompatible return value type (got "int", expected "str")  [return-value]
+src/packages/sdk/client.py:52: error: Item "None" of "Optional[str]" has no attribute "strip"  [union-attr]
+Found 2 errors in 1 file (checked 12 source files)
+##[error]Process completed with exit code 1.

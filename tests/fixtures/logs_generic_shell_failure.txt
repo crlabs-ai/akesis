@@ -1,0 +1,5 @@
+Run bash ./build.sh
+Compiling native assets...
+FATAL: command failed: gcc -o output main.c
+Exit code 127: gcc command not found
+##[error]Process completed with exit code 127.

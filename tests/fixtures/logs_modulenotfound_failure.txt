@@ -1,0 +1,6 @@
+Run python -m src.apps.api.main
+Traceback (most recent call last):
+  File "/home/runner/work/akesis/src/apps/api/main.py", line 4, in <module>
+    import non_existent_package
+ModuleNotFoundError: No module named 'non_existent_package'
+##[error]Process completed with exit code 1.

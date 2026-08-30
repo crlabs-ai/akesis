@@ -1,0 +1,5 @@
+Run uv pip install -r requirements.txt
+Auditing dependencies...
+ERROR: ResolutionImpossible: for package 'pydantic-core'
+Could not find a version that satisfies the requirement pydantic-core==99.0.0
+##[error]Process completed with exit code 1.

@@ -1,0 +1,22 @@
+{
+  "action": "completed",
+  "workflow_run": {
+    "id": 987654321,
+    "name": "CI / Test Suite",
+    "head_branch": "feat/payment-processor",
+    "head_sha": "a1b2c3d4e5f67890123456789abcdef012345678",
+    "status": "completed",
+    "conclusion": "failure",
+    "html_url": "https://github.com/crlabs-ai/akesis/actions/runs/987654321",
+    "event": "push"
+  },
+  "repository": {
+    "name": "akesis",
+    "owner": {
+      "login": "crlabs-ai"
+    }
+  },
+  "sender": {
+    "login": "octocat"
+  }
+}
