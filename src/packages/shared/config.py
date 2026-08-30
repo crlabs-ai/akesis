@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     )
     gemini_model: str = Field(
         default="gemini-1.5-flash",
-        description="Gemini model identifier for diagnostic analysis",
+        description="Gemini model identifier for diagnostic and fix analysis",
     )
     gemini_api_url: str = Field(
         default="https://generativelanguage.googleapis.com/v1beta",
@@ -66,6 +66,24 @@ class Settings(BaseSettings):
     max_total_source_chars: int = Field(
         default=8_000,
         description="Hard character budget for all combined source evidence snippets",
+    )
+
+    # Fix Proposal Engine Limits
+    max_fix_target_files: int = Field(
+        default=2,
+        description="Maximum number of target files a single fix proposal may modify",
+    )
+    max_patch_lines: int = Field(
+        default=100,
+        description="Maximum total lines allowed in a unified diff patch",
+    )
+    max_patch_chars: int = Field(
+        default=4_000,
+        description="Maximum total characters allowed in a unified diff patch",
+    )
+    min_fix_confidence_threshold: float = Field(
+        default=0.60,
+        description="Minimum diagnostic confidence required to attempt fix generation",
     )
 
 
