@@ -112,6 +112,24 @@ class Settings(BaseSettings):
         description="Base directory on host for ephemeral sandbox workspaces",
     )
 
+    # Human-in-the-Loop & Slack Integration Settings
+    slack_webhook_url: str = Field(
+        default="",
+        description="Slack Incoming Webhook URL for posting approval cards",
+    )
+    slack_signing_secret: str = Field(
+        default="test_slack_signing_secret",
+        description="Signing secret to verify Slack interaction webhook requests",
+    )
+    slack_channel_id: str = Field(
+        default="",
+        description="Default Slack channel for approval cards",
+    )
+    approval_ttl_hours: int = Field(
+        default=24,
+        description="Hours before a pending human approval request expires",
+    )
+
 
 # Singleton settings instance
 settings = Settings()

@@ -1,11 +1,19 @@
 import hashlib
 import hmac
+import json
 import uuid
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from src.packages.sdk.github_client import GitHubClient, GitHubResourceNotFoundError
+from src.packages.sdk.slack_client import verify_slack_signature
+from src.packages.shared.approval_service import (
+    ApprovalNotFoundError,
+    IllegalStateTransitionError,
+    approval_service,
+)
 from src.packages.shared.config import settings
 from src.packages.shared.log_parser import filter_and_extract_signal
 from src.packages.shared.logging import get_logger
@@ -16,7 +24,7 @@ from src.packages.shared.models import (
     WorkflowRunEvent,
 )
 
-logger = get_logger("akesis.api.webhook")
+logger = get_logger("akesis.api.routes")
 router = APIRouter()
 
 
@@ -189,3 +197,92 @@ async def handle_github_webhook(
         category=signal.category,
         message=f"Failure successfully diagnosed: {signal.error_type} in {target_display}",
     )
+
+
+@router.post(
+    "/v1/slack/interactions",
+    status_code=status.HTTP_200_OK,
+    summary="Handle Slack interactive component callbacks",
+)
+async def handle_slack_interaction(
+    request: Request,
+    x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),
+    x_slack_request_timestamp: str | None = Header(default=None, alias="X-Slack-Request-Timestamp"),
+) -> dict[str, Any]:
+    """Receives and verifies Slack button interactions (Approve / Reject)."""
+    raw_body = await request.body()
+
+    # 1. Verify Slack HMAC-SHA256 Signature
+    is_valid = verify_slack_signature(
+        raw_body=raw_body,
+        timestamp=x_slack_request_timestamp,
+        signature=x_slack_signature,
+        signing_secret=settings.slack_signing_secret,
+    )
+    if not is_valid:
+        logger.warning("Rejected Slack interaction due to invalid HMAC signature")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired Slack signature",
+        )
+
+    # 2. Parse form-urlencoded payload containing 'payload' JSON
+    try:
+        body_str = raw_body.decode("utf-8")
+        parsed_form = parse_qs(body_str)
+        payload_raw = parsed_form.get("payload", [""])[0]
+        if not payload_raw:
+            raise ValueError("Missing 'payload' parameter in form data")
+        payload_data = json.loads(payload_raw)
+    except Exception as err:
+        logger.error("Failed to parse Slack interaction payload", error=str(err))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Malformed Slack interaction payload: {err}",
+        ) from err
+
+    actions = payload_data.get("actions", [])
+    if not actions:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No actions found in payload",
+        )
+
+    action = actions[0]
+    action_id = action.get("action_id", "")
+    approval_id = action.get("value", "")
+    user = payload_data.get("user", {})
+    user_name = user.get("username") or user.get("name") or user.get("id", "unknown_user")
+    response_url = payload_data.get("response_url")
+
+    if not approval_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing approval ID in action value",
+        )
+
+    decision = "approve" if action_id == "approve_fix" else "reject"
+
+    try:
+        record, is_duplicate = await approval_service.record_decision(
+            approval_id=approval_id,
+            decision=decision,
+            decided_by=user_name,
+            response_url=response_url,
+        )
+        return {
+            "status": "ok",
+            "approval_id": record.approval_id,
+            "decision": record.status,
+            "is_duplicate": is_duplicate,
+        }
+    except ApprovalNotFoundError as err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(err),
+        ) from err
+    except IllegalStateTransitionError as err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(err),
+        ) from err
