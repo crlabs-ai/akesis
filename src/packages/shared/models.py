@@ -242,6 +242,143 @@ class DiagnosticResult(BaseModel):
     )
 
 
+class PatchHunk(BaseModel):
+    """Parsed single hunk of a unified diff."""
+
+    old_start: int = Field(..., description="Starting line in original file")
+    old_lines: int = Field(..., description="Number of lines in original file hunk")
+    new_start: int = Field(..., description="Starting line in modified file")
+    new_lines: int = Field(..., description="Number of lines in modified file hunk")
+    header: str = Field(..., description="Hunk header string e.g. @@ -1,5 +1,6 @@")
+    lines: list[str] = Field(..., description="Individual hunk lines with +/-/ prefix")
+
+
+class FilePatch(BaseModel):
+    """Structured patch representation for an individual file."""
+
+    path: str = Field(..., description="Repository-relative target file path")
+    old_path: str | None = Field(default=None, description="Source path in diff header")
+    new_path: str | None = Field(default=None, description="Target path in diff header")
+    hunks: list[PatchHunk] = Field(default_factory=list, description="Parsed diff hunks")
+    raw_diff: str = Field(..., description="Unified diff text for this specific file")
+
+
+class RawFixProposal(BaseModel):
+    """Strict schema requested from LLM for fix generation."""
+
+    explanation: str = Field(..., description="Technical rationale for the proposed fix")
+    target_files: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=2,
+        description="List of repository-relative file paths modified by the patch",
+    )
+    unified_diff: str = Field(..., description="Standard unified diff format patch")
+    assumptions: list[str] = Field(
+        default_factory=list,
+        description="Key assumptions made by the model when constructing the fix",
+    )
+    risk_assessment: str = Field(
+        ..., description="Assessment of potential regression risks or side effects"
+    )
+    estimated_risk_level: Literal["low", "medium", "high"] = Field(
+        ..., description="Estimated risk tier of the proposed change"
+    )
+    confidence_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Model confidence in the correctness of this proposed fix",
+    )
+
+
+class FixProposal(BaseModel):
+    """Authoritative, validated fix proposal ready for sandbox validation."""
+
+    proposal_id: str = Field(..., description="Deterministic proposal identifier")
+    incident_id: str = Field(..., description="Associated Akesis incident identifier")
+    diagnosis_id: str | None = Field(
+        default=None, description="Associated diagnosis identifier if available"
+    )
+    commit_sha: str = Field(..., description="Target commit SHA")
+    status: Literal["proposed", "rejected", "ineligible"] = Field(
+        ..., description="Validation and eligibility status of the proposal"
+    )
+    is_valid: bool = Field(..., description="True if patch passes all deterministic safety checks")
+    rejection_reasons: list[str] = Field(
+        default_factory=list,
+        description="List of reasons if the proposal was rejected or deemed ineligible",
+    )
+    unified_diff: str = Field(default="", description="Validated canonical unified diff patch")
+    file_patches: list[FilePatch] = Field(
+        default_factory=list, description="Parsed structured per-file patches"
+    )
+    target_files: list[str] = Field(
+        default_factory=list, description="List of validated target file paths"
+    )
+    rationale: str = Field(..., description="Human-readable technical rationale")
+    assumptions: list[str] = Field(
+        default_factory=list, description="Key assumptions underlying the fix"
+    )
+    risk_level: Literal["low", "medium", "high"] = Field(..., description="Evaluated risk tier")
+    has_dependency_changes: bool = Field(
+        default=False, description="True if the patch touches dependencies or package configuration"
+    )
+    confidence_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Bounded confidence score between 0.0 and 1.0",
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of proposal generation",
+    )
+
+
+class ValidationCommand(StrEnum):
+    """Allowlisted deterministic commands supported in sandbox validation."""
+
+    PYTEST = "pytest"
+    RUFF = "ruff"
+    MYPY = "mypy"
+    PYTHON_SYNTAX = "python_syntax"
+
+
+class ValidationStatus(StrEnum):
+    """Outcome status of sandbox validation."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    PATCH_REJECTED = "patch_rejected"
+    UNSUPPORTED = "unsupported"
+    INFRASTRUCTURE_ERROR = "infrastructure_error"
+
+
+class ValidationResult(BaseModel):
+    """Authoritative structured result of sandbox fix validation."""
+
+    validation_id: str = Field(..., description="Deterministic validation identifier")
+    proposal_id: str = Field(..., description="Associated FixProposal identifier")
+    incident_id: str = Field(..., description="Associated incident identifier")
+    commit_sha: str = Field(..., description="Target commit SHA validated")
+    status: ValidationStatus = Field(..., description="Outcome status of validation")
+    command_executed: str = Field(..., description="Allowlisted command identifier")
+    exit_code: int | None = Field(default=None, description="Process exit code")
+    stdout: str = Field(default="", description="Bounded stdout output")
+    stderr: str = Field(default="", description="Bounded stderr output")
+    duration_ms: float = Field(..., description="Total validation execution latency")
+    timed_out: bool = Field(default=False, description="True if execution exceeded timeout")
+    failure_reason: str | None = Field(
+        default=None, description="Summary explanation of failure if any"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of validation completion",
+    )
+
+
 class IngestionResponse(BaseModel):
     """HTTP response payload returned by the webhook ingestion gateway."""
 

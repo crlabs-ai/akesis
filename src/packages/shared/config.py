@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     )
     gemini_model: str = Field(
         default="gemini-1.5-flash",
-        description="Gemini model identifier for diagnostic analysis",
+        description="Gemini model identifier for diagnostic and fix analysis",
     )
     gemini_api_url: str = Field(
         default="https://generativelanguage.googleapis.com/v1beta",
@@ -66,6 +66,50 @@ class Settings(BaseSettings):
     max_total_source_chars: int = Field(
         default=8_000,
         description="Hard character budget for all combined source evidence snippets",
+    )
+
+    # Fix Proposal Engine Limits
+    max_fix_target_files: int = Field(
+        default=2,
+        description="Maximum number of target files a single fix proposal may modify",
+    )
+    max_patch_lines: int = Field(
+        default=100,
+        description="Maximum total lines allowed in a unified diff patch",
+    )
+    max_patch_chars: int = Field(
+        default=4_000,
+        description="Maximum total characters allowed in a unified diff patch",
+    )
+    min_fix_confidence_threshold: float = Field(
+        default=0.60,
+        description="Minimum diagnostic confidence required to attempt fix generation",
+    )
+
+    # Docker Sandbox Validation Settings
+    sandbox_image: str = Field(
+        default="akesis-validator:v1",
+        description="Dedicated Docker image containing pre-installed validation tools",
+    )
+    sandbox_timeout_seconds: float = Field(
+        default=30.0,
+        description="Maximum execution timeout for validation container in seconds",
+    )
+    sandbox_memory_limit: str = Field(
+        default="512m",
+        description="Memory limit for validation container",
+    )
+    sandbox_cpu_limit: float = Field(
+        default=1.0,
+        description="CPU core quota for validation container",
+    )
+    sandbox_max_output_chars: int = Field(
+        default=4_000,
+        description="Maximum character limit for captured stdout and stderr",
+    )
+    sandbox_base_dir: str = Field(
+        default="/tmp/akesis/sandbox",
+        description="Base directory on host for ephemeral sandbox workspaces",
     )
 
 
