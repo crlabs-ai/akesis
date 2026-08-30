@@ -1,15 +1,13 @@
-# Local Development Environment Setup: Akesis
-
-This document details the workstation setup, tools, and commands required to develop Akesis locally.
+# Local Development Environment Setup: Akesis V1
 
 ---
 
 ## 1. Prerequisites
-*   **Operating System:** Linux (Ubuntu 22.04+ / Debian 12+) or macOS (Sonoma+).
-*   **Python:** Version 3.12 or higher.
-*   **Package Manager:** `poetry` (>= 1.8.0) or `uv`.
-*   **Container Runtime:** Docker Engine (>= 24.0) with Docker Compose v2.
-*   **Git:** Version 2.40+ configured with SSH keys.
+* **Operating System:** Linux (Ubuntu 22.04+ / Debian 12+) or macOS (Sonoma+).
+* **Python:** Version 3.12 or higher.
+* **Package Manager:** **`uv`** (>= 0.4.0). *(Poetry is not supported).*
+* **Container Runtime:** Docker Engine (>= 24.0).
+* **Git:** Version 2.40+ configured with SSH keys.
 
 ---
 
@@ -20,8 +18,8 @@ This document details the workstation setup, tools, and commands required to dev
 git clone git@github-crlabs:crlabs-ai/akesis.git
 cd akesis
 
-# 2. Configure Python Virtual Environment
-poetry install --with dev
+# 2. Sync virtual environment with uv
+uv sync
 
 # 3. Setup local environment variables
 cp .env.example .env
@@ -29,21 +27,21 @@ cp .env.example .env
 
 ---
 
-## 3. Standard Verification Commands
+## 3. Canonical Quality Gate Commands
 
 ```bash
 # Run automated test suite
-poetry run pytest tests/ -v
+uv run pytest tests/ -v
 
 # Run test coverage report
-poetry run pytest --cov=src --cov-report=term-missing tests/
+uv run pytest --cov=src --cov-report=term-missing tests/
 
-# Run code formatter
-poetry run black src/ tests/
+# Run code formatter check
+uv run ruff format --check .
 
 # Run linter
-poetry run ruff check src/ tests/
+uv run ruff check .
 
 # Run strict type checking
-poetry run mypy --strict src/
+uv run mypy .
 ```

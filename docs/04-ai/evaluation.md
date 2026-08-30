@@ -1,22 +1,19 @@
-# AI Evaluation Methodology: Akesis
+# AI Evaluation Methodology: Akesis V1
 
 ---
 
-## 1. Evaluation Hierarchy & Separation
-
-To ensure scientific rigor, AI performance in Akesis is evaluated across four decoupled layers:
-
-```text
-[Layer 1: Log Triage Accuracy] ──> [Layer 2: Root Cause Accuracy] ──> [Layer 3: Sandbox Pass Rate] ──> [Layer 4: User Acceptance Rate]
-```
-
-1.  **Layer 1 (Log Triage):** Evaluates whether the parser correctly identifies error category (`LINT`, `DEPENDENCY`, `FLAKY`).
-2.  **Layer 2 (Root Cause):** Evaluates whether the identified file, line number, and error explanation match ground truth.
-3.  **Layer 3 (Sandbox Pass Rate):** Measures whether the synthesized patch compiles and passes test suites in Docker.
-4.  **Layer 4 (User Acceptance):** Measures the percentage of delivered PRs accepted and merged by human developers.
+## 1. V1 Evaluation Scope: 10–12 Representative Scenarios
+Akesis V1 evaluates remediation accuracy against **10–12 carefully designed representative test scenarios** covering the approved V1 capabilities:
+1. **Lint Remediation:** Formatting and style errors in Python (Ruff/Black) and TypeScript (ESLint/Prettier).
+2. **Dependency Resolution:** Missing package imports and lockfile discrepancies in `uv` and `npm`.
+3. **Flaky-Test Quarantine:** Non-deterministic test assertions evaluated across repeated runs.
 
 ---
 
-## 2. Golden Benchmark Dataset
-*   Akesis maintains a version-controlled benchmark dataset (`tests/benchmarks/golden_dataset/`) containing **200 real-world CI failure traces** with verified human patches across Python, Node.js, and Go repositories.
-*   CI runs benchmark regressions on every prompt or model strategy update.
+## 2. Evaluation Layers
+* **Layer 1 (Diagnosis Correctness):** Measures accuracy of error classification, file target, and line identification.
+* **Layer 2 (Patch Correctness):** Measures whether the synthesized diff compiles and resolves the error.
+* **Layer 3 (Sandbox Validation Success):** Verifies that the containerized build exits with code 0.
+* **Layer 4 (Human Acceptance):** Tracks acceptance rate of delivered PRs.
+
+*(Note: Large-scale 200+ case golden benchmark suites are documented under [`docs/future-scaling.md`](../future-scaling.md)).*

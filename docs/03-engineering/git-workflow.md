@@ -3,32 +3,19 @@
 ---
 
 ## 1. Branching Model: Trunk-Based Development
-*   **Primary Branch:** `main` (Protected; direct pushes prohibited).
-*   **Feature Branches:** Short-lived branches (< 72 hours) branched from `main`.
-*   **Naming Convention:**
-    *   `feat/<ticket-or-short-desc>`
-    *   `fix/<ticket-or-short-desc>`
-    *   `docs/<ticket-or-short-desc>`
-    *   `chore/<ticket-or-short-desc>`
+* **Main Branch:** `main` (Protected; direct pushes prohibited).
+* **Feature Branches:** Short-lived branches (< 72 hours) branching from `main`.
+* **Naming:** `feat/<desc>`, `fix/<desc>`, `docs/<desc>`, `chore/<desc>`.
 
 ---
 
-## 2. Commit Message Standard: Conventional Commits 1.0.0
-All commit messages must follow the format:
-```text
-<type>(<scope>): <short summary>
-
-[optional body explaining rationale]
-
-[optional footer(s)]
-```
-*   **Allowed Types:** `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `ci`.
-*   **Example:** `feat(agent): implement AST context extractor for python files`
+## 2. Conventional Commits 1.0.0
+Format: `<type>(<scope>): <summary>`
+* Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `ci`.
+* Example: `feat(sandbox): implement network toggle policy for dependency installs`
 
 ---
 
 ## 3. Pull Request Quality Gates
-Before merging a Pull Request into `main`:
-1.  All automated CI checks (lint, format, mypy, pytest) must pass green.
-2.  PR size must ideally be $< 400$ lines of code.
-3.  Squash-and-Merge is the mandatory merge strategy to maintain a clean linear history.
+1. All automated checks (`uv run ruff check .`, `uv run mypy .`, `uv run pytest`) pass green.
+2. Squash-and-merge is the standard merge strategy.

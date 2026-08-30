@@ -3,8 +3,10 @@
 Welcome to the authoritative engineering knowledge base for **Akesis**.
 
 ```text
-Status: Approved Architectural Baseline
+Status: Approved V1 Baseline (Vertical Slice)
 Governance: Level 2 / Level 3 Document Authority
+Tooling: Python 3.12+ / uv
+Observability: structlog with Correlation IDs
 ```
 
 ---
@@ -58,9 +60,11 @@ docs/
 │   ├── phase-plan.md
 │   └── local-development.md
 │
-└── 06-decisions/         # Architecture Decision Records (ADRs)
-    ├── README.md
-    └── ADR-0001-project-foundation.md
+├── 06-decisions/         # Architecture Decision Records (ADRs)
+│   ├── README.md
+│   └── ADR-0001-project-foundation.md
+│
+└── future-scaling.md     # Future Production Scaling Roadmap (NOT V1)
 ```
 
 ---

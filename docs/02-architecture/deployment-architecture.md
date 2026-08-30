@@ -1,31 +1,22 @@
-# Deployment Architecture: Akesis
+# Deployment Architecture: Akesis V1
 
 ---
 
-## 1. V1 Deployment Model (Target Baseline)
-For the V1 release, Akesis deploys as containerized services managed via Docker Compose or AWS ECS:
+## 1. V1 Deployment Model
+Akesis V1 deploys as a straightforward containerized service:
 
 ```text
 [Internet]
     │
     ▼
-[AWS ALB / Cloudflare Ingress (TLS 1.3)]
+[Reverse Proxy / Ingress (TLS 1.3)]
     │
-    ├──> [FastAPI Ingestion Gateway (2 Replicas)]
-    │         │
-    │         ▼
-    │    [Redis Cluster (Event Queue & State Cache)]
-    │         ▲
-    │         │
-    └──> [Orchestration & Agent Workers (3 Replicas)]
-              │
-              ├──> [PostgreSQL 16 (RDS / Managed DB)]
-              └──> [Dedicated Sandbox Worker Node (Docker Engine Pool)]
+    ▼
+[Akesis Application Service (FastAPI / Python 3.12+)]
+    │
+    ├──> [Structured Logs (structlog)]
+    └──> [Local Docker Daemon (Ephemeral Sandboxes)]
 ```
 
----
-
-## 2. Future Production Scaling (Post-V1)
-*   **Kubernetes Orchestration:** Migrate worker pools to Amazon EKS / GKE with Horizontal Pod Autoscaling (HPA) triggered by Redis queue depth.
-*   **MicroVM Sandboxes:** Transition from Docker containers to Firecracker / gVisor microVMs for sub-second boot times and hardware-level isolation.
-*   **Multi-Region Webhook Edge:** Deploy Ingestion gateways at edge locations to minimize webhook receipt latency.
+* **Simplicity:** Single container deployment containing the FastAPI gateway, diagnostic agent, and Docker runner.
+* **Scalability Path:** For distributed worker pools, Redis queues, and Kubernetes orchestration, refer to [`docs/future-scaling.md`](../future-scaling.md).

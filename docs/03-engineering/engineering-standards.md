@@ -1,23 +1,20 @@
-# Engineering Standards & Principles: Akesis
-
-Every software engineer and AI agent contributing to the Akesis codebase must strictly adhere to these standards.
+# Engineering Standards: Akesis V1
 
 ---
 
-### 1. Type Safety & Strict Verification
-All Python code must include full type annotations. Code must pass `mypy --strict` with zero errors. Avoid `Any` types; use explicit Pydantic models or Generics.
+### 1. Canonical Tooling & Runtime
+* **Python Runtime:** **Python 3.12+**
+* **Package & Environment Manager:** **`uv`** (all dependency management and tool invocation uses `uv`).
 
-### 2. Design for Failure
-Assume external APIs, database connections, and LLM endpoints will fail. Implement explicit timeouts, retry policies with jitter, and circuit breakers. Never allow an unhandled exception to crash worker processes.
+### 2. Type Safety & Strict Verification
+All Python code must include complete type annotations and pass `mypy --strict` with zero errors.
 
-### 3. Modularity & Clean Boundaries
-Maintain strict separation of concerns:
-*   `src/apps/`: Interface adapters (FastAPI, CLI).
-*   `src/packages/`: Pure domain logic with zero circular dependencies.
-*   `src/infra/`: Declarative infrastructure specifications.
+### 3. Structured Logging (structlog)
+V1 uses `structlog` for structured JSON logging. Every log entry must include contextual correlation IDs (`incident_id`, `repo_id`, `workflow_run_id`). (OpenTelemetry is reserved for future production scaling).
 
-### 4. Structured Observability
-Use structured JSON logging for all log events. Every log entry must include `incident_id`, `repo_id`, and standard OpenTelemetry correlation IDs (`trace_id`, `span_id`).
+### 4. Design for Failure
+Implement timeouts on external GitHub API and LLM provider calls. Never allow unhandled exceptions to crash the application.
 
-### 5. Deterministic Dependency Management
-Use `poetry` or `uv` with checked-in lockfiles. Dependencies must be pinned to exact versions. Adding third-party packages requires explicit justification and architectural sign-off.
+### 5. Modularity & Clean Boundaries
+* `src/apps/`: Interface adapters (FastAPI, CLI).
+* `src/packages/`: Pure domain logic and models.

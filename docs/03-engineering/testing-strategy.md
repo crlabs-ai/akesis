@@ -1,25 +1,15 @@
-# Testing Strategy: Akesis
-
-This document outlines the testing pyramids, evaluation harnesses, and coverage requirements.
+# Testing Strategy: Akesis V1
 
 ---
 
 ## 1. Testing Pyramid
-
-```text
-        / \
-       / E2E \         (10% - Full GitHub Webhook to Mock PR verification)
-      /-------\
-     / Integration\   (30% - Postgres, Redis, Docker Sandbox testcontainers)
-    /-------------\
-   /   Unit Tests  \  (60% - Fast, deterministic pure functions & AST parsing)
-  /-----------------\
-```
+* **Unit Tests (60%):** Test log parsing, diff formatting, Pydantic schema validation, and confidence calculations using `pytest`. Fast, deterministic, zero external calls.
+* **Integration Tests (30%):** Test Docker sandbox lifecycle and local API endpoints.
+* **End-to-End Tests (10%):** Mock GitHub webhook ingestion through to mock PR generation.
 
 ---
 
-## 2. Test Suites & Execution
-*   **Unit Tests (`tests/unit/`):** Test pure business logic, AST parsing, and prompt schema serialization. Target execution speed: $< 5$ seconds for full suite.
-*   **Integration Tests (`tests/integration/`):** Test database persistence, Redis queue consumers, and real Docker container sandbox runs using `testcontainers-python`.
-*   **Mocking Policy:** All external HTTP calls to GitHub API and LLM providers must be mocked using `respx` or `pytest-mock`. Real API keys must never be used in standard CI test suites.
-*   **Code Coverage Baseline:** Minimum **85% statement coverage** enforced by `pytest-cov` in CI quality gates.
+## 2. Execution & Coverage
+* **Command:** `uv run pytest tests/`
+* **Coverage Baseline:** Minimum **85% statement coverage** enforced by `pytest-cov`.
+* **Mocking Policy:** Mock all external HTTP calls (GitHub API, LLM providers) using `respx` or `pytest-mock`.

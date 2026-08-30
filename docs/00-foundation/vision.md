@@ -1,23 +1,21 @@
 # Product Vision: Akesis
 
 ## 1. The Future State
-Akesis will become the autonomous reliability and remediation backbone of modern software engineering organizations.
+Akesis will become the autonomous reliability layer of modern software development organizations.
 
-In the future state of software delivery:
-*   Pipelines do not stay broken.
-*   Trivial syntax, formatting, dependency, and configuration errors are resolved autonomously in seconds.
-*   Flaky tests are isolated, diagnosed, and quarantined before they disrupt delivery velocity.
-*   Developers spend their cognitive energy purely on system design, core business logic, and product architecture.
+In this future state:
+* Pipelines do not stay broken.
+* Syntax, formatting, dependency, and configuration errors are resolved in seconds.
+* Flaky tests are isolated, diagnosed, and quarantined before disrupting delivery velocity.
+* Developers focus entirely on system architecture, product logic, and engineering design.
 
 ## 2. Beyond In-Editor Copilots
-First-generation AI coding tools focus exclusively on the *typing phase* (in-editor autocomplete). However, software engineering is predominantly an *integration, validation, and operational* discipline. 
+First-generation AI coding tools focus exclusively on code generation in the editor. Akesis operates at the integration and validation phase, combining runtime logs with deterministic containerized validation.
 
-Akesis operates at the intersection of runtime telemetry, execution sandboxes, and autonomous reasoning. We bridge the gap between speculative code generation and deterministic system verification.
-
-## 3. Progressive Evolution
+## 3. Evolutionary Phases
 ```
-[Phase 1: CI Triage & Safe Remediation] ──> [Phase 2: Monorepo Refactoring] ──> [Phase 3: Autonomous Runtime Reliability]
+[Phase 1 (V1): CI Triage & Safe Remediation] ──> [Phase 2: Monorepo Refactoring] ──> [Phase 3: Autonomous Runtime Reliability]
 ```
-1.  **Phase 1 (Current):** Closed-loop CI/CD triage and safe patch delivery for standard build, lint, and dependency failures.
-2.  **Phase 2:** Monorepo-wide architectural migrations, automated dependency upgrades, and backward-compatible API refactoring.
-3.  **Phase 3:** Integration with production observability platforms (APMs) to diagnose, reproduce, and patch production defects before user impact occurs.
+1. **Phase 1 (Current V1 Vertical Slice):** Closed-loop CI/CD triage and safe patch delivery for lint, dependency, and flaky-test failures in GitHub Actions.
+2. **Phase 2 (Future):** Monorepo-wide architectural migrations, automated dependency upgrades, and backward-compatible API refactoring.
+3. **Phase 3 (Future):** Integration with production APMs (Datadog/Sentry) for automated staging and production failure diagnosis.

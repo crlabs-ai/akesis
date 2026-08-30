@@ -1,53 +1,58 @@
-# System Architecture: Akesis
+# System Architecture: Akesis V1
 
 ```text
-Status: Approved Architectural Baseline
-Security Boundary: Tier 1 Zero-Trust Container Isolation
+Status: Approved V1 Baseline (Vertical Slice)
+Architecture Style: Modular Monolith / Single-Service Control Plane
+Tooling: Python 3.12+ / uv
+Logging: structlog with Correlation IDs
 ```
 
 ---
 
 ## 1. High-Level System Landscape
 
-Akesis is designed as a distributed, event-driven remediation platform.
+Akesis V1 is architected as a complete, robust vertical slice centered around a direct pipeline:
+
+```
+Event Ingestion ──> Context Collection ──> Diagnosis ──> Remediation ──> Validation ──> Human Decision ──> Resolution
+```
 
 ```mermaid
 graph TD
-    subgraph "External Ecosystem"
+    subgraph "External Systems"
         GH[GitHub / GitHub Actions]
-        LLM[Frontier LLM Provider]
+        LLM[Configured LLM Provider<br/>OpenAI / Anthropic / Gemini]
     end
 
-    subgraph "Akesis Ingress & Control Plane"
-        Gateway[API Ingestion Gateway<br/>FastAPI / TLS 1.3]
-        Queue[(Redis Event Queue<br/>BullMQ / Celery)]
-        Orch[Orchestration Engine<br/>Python State Machine]
-        DB[(PostgreSQL 16<br/>Audit & State Store)]
+    subgraph "Akesis V1 Service (FastAPI / Python 3.12)"
+        Gateway[Webhook Ingestion Gateway]
+        ContextEngine[Context & Log Extractor]
+        AgentEngine[Diagnostic Agent Runtime]
+        DeliveryEngine[GitHub PR Delivery Service]
+        Logger[Structured Logger<br/>structlog + Correlation IDs]
     end
 
-    subgraph "Akesis Execution & AI Plane"
-        Agent[Diagnostic Agent Runtime<br/>LangGraph / Structured JSON]
-        Context[Context & AST Engine<br/>Tree-sitter / Log Parser]
-        SandboxPool[Sandbox Container Pool<br/>Docker / gVisor Micro-Runtimes]
+    subgraph "Local Isolation Boundary"
+        DockerBox[Ephemeral Docker Sandbox<br/>Non-Root / Resource-Capped]
     end
 
-    GH -->|1. Webhook Event| Gateway
-    Gateway -->|2. Enqueue Incident| Queue
-    Queue -->|3. Consume Task| Orch
-    Orch -->|4. Store Event State| DB
-    Orch -->|5. Fetch AST & Logs| Context
-    Orch -->|6. Reason & Patch| Agent
-    Agent -->|7. API Inference| LLM
-    Agent -->|8. Dispatch Validation| SandboxPool
-    SandboxPool -->|9. Return Compile Status| Orch
-    Orch -->|10. Open PR with Scoped Token| GH
+    GH -->|1. Webhook: workflow_run| Gateway
+    Gateway -->|2. Log Event| Logger
+    Gateway -->|3. Fetch Trace & Files| ContextEngine
+    ContextEngine -->|4. Extract Signals| AgentEngine
+    AgentEngine -->|5. Structured Prompt / Schema| LLM
+    LLM -->|6. Return Unified Diff| AgentEngine
+    AgentEngine -->|7. Execute Patch & Verify| DockerBox
+    DockerBox -->|8. Report Exit Code| AgentEngine
+    AgentEngine -->|9. Open PR on Pass| DeliveryEngine
+    DeliveryEngine -->|10. Submit PR with Evidence| GH
 ```
 
 ---
 
-## 2. Trust & Security Boundaries
+## 2. V1 Architectural Decisions
 
-1.  **Ingress Boundary:** Public-facing API Gateway terminating TLS 1.3. Validates HMAC-SHA256 signatures before parsing webhooks.
-2.  **Internal Control Plane:** Orchestration service, PostgreSQL database, and Redis queue reside in an isolated Virtual Private Cloud (VPC) with no public ingress.
-3.  **Execution Sandbox Boundary (Strict Isolation):** Docker sandbox containers execute untrusted code in an unprivileged, capability-dropped runtime with dedicated CPU/memory limits and read-only host mounts.
-4.  **Egress Boundary:** Outbound calls to GitHub API and LLM providers use scoped, ephemeral tokens with strict rate limiting.
+1. **Modular Single Service:** The ingestion gateway, context extractor, agent coordinator, and delivery engine run as a clean, modular Python application. No distributed task queues or microservices are required for V1.
+2. **Provider-Agnostic LLM Interface:** A clean abstraction layer wraps the primary configured model (e.g. Claude 3.5 Sonnet or GPT-4o) using Pydantic schemas. No multi-tier routing or dynamic model selection agents in V1.
+3. **Structured Contextual Logging:** All components log via `structlog` with correlation IDs (`incident_id`, `repo_id`, `run_id`).
+4. **Pragmatic Docker Sandboxing:** Ephemeral container spawned on the host Docker daemon. Network access is disabled by default, enabled only during dependency installation steps.

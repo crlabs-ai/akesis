@@ -1,18 +1,18 @@
-# AI Safety Rules & Boundaries: Akesis
+# AI Safety Rules & Boundaries: Akesis V1
 
 ---
 
 ### Rule 1: Zero Host Execution
-Generated code is never executed on the host system or control plane. All compilation, execution, and testing occur strictly inside sandboxed Docker/gVisor containers with dropped privileges.
+Generated code is never executed on the host system. All compilation and testing occur inside sandboxed Docker containers.
 
 ### Rule 2: Schema Validation Gate
-Raw model outputs are parsed through strict Pydantic validators before downstream processing. If an LLM returns malformed JSON or unparseable diffs, the response is discarded.
+Model outputs must validate against strict Pydantic schemas before downstream processing.
 
 ### Rule 3: Secrets & Token Protection
-Prompts must never include raw environment variables, API tokens, or user credentials. Automated token sanitizers scrub logs prior to model invocation.
+Logs are scrubbed of secrets prior to being sent to the LLM interface.
 
 ### Rule 4: Mandatory Human Review Gate (V1)
-Akesis V1 will never push code directly to user production branches. All patches require human sign-off via Pull Request reviews.
+Akesis V1 will never push code directly to production branches. All patches require human review via Pull Requests.
 
 ### Rule 5: Fail-Closed Design
-If an AI agent encounters unresolvable ambiguity or fails sandbox verification twice, it must terminate execution cleanly, log the diagnostic context, and refrain from speculative PR generation.
+If an agent encounters ambiguity or fails sandbox verification, it terminates cleanly and logs diagnostic context without opening a PR.

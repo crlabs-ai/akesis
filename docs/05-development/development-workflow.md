@@ -1,7 +1,5 @@
 # Development Workflow & Engineering Lifecycle
 
-This document outlines the step-by-step workflow for contributors implementing features or bug fixes in Akesis.
-
 ---
 
 ## The 10-Step Development Loop
@@ -12,13 +10,13 @@ This document outlines the step-by-step workflow for contributors implementing f
 [10. Open PR] <── [9. Conventional Commit] <── [8. Review Diff] <── [7. Quality Gates] <── [6. Write Tests] <──┘
 ```
 
-1.  **Understand Task:** Review requirements, user personas, and acceptance criteria.
-2.  **Read Docs & ADRs:** Check `docs/` and `docs/06-decisions/` for relevant architectural constraints.
-3.  **Inspect Existing Code:** Check existing implementations, interfaces, and test fixtures.
-4.  **Formulate Plan:** Plan the minimal necessary changes. Avoid speculative additions.
-5.  **Implement:** Write clean, modular Python 3.12+ code with complete type annotations.
-6.  **Write Tests:** Add unit and integration tests with pytest to maintain coverage $\ge 85\%$.
-7.  **Quality Gates:** Run local linters and type checkers (`black`, `ruff`, `mypy`).
-8.  **Review Diff:** Run `git diff` to verify only intended files and lines were modified.
-9.  **Conventional Commit:** Create an atomic commit following Conventional Commits 1.0.0.
-10. **Open PR:** Submit Pull Request with a clear summary linking relevant issue tickets.
+1. **Understand Task:** Review requirements, scope, and acceptance criteria.
+2. **Read Docs & ADRs:** Check `docs/` and `docs/06-decisions/` for architectural constraints.
+3. **Inspect Existing Code:** Review existing modules and test fixtures.
+4. **Formulate Plan:** Plan minimal necessary changes within V1 scope.
+5. **Implement:** Write clean, modular Python 3.12+ code with full type annotations.
+6. **Write Tests:** Add unit/integration tests with `pytest` (maintain coverage $\ge 85\%$).
+7. **Quality Gates:** Run `uv run ruff check .`, `uv run ruff format .`, `uv run mypy .`.
+8. **Review Diff:** Run `git diff` to verify zero unintended changes.
+9. **Conventional Commit:** Create an atomic commit following Conventional Commits 1.0.0.
+10. **Open PR:** Submit Pull Request with clear summary.

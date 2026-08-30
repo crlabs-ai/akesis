@@ -1,38 +1,33 @@
-# Component Architecture: Akesis
+# Component Architecture: Akesis V1
 
-This document details the internal modules, interfaces, and responsibilities across the Akesis platform.
+This document details the internal modules, interfaces, and responsibilities across the Akesis V1 platform.
 
 ---
 
 ## 1. Ingestion Gateway (`src/apps/api`)
-*   **Responsibility:** Receives inbound webhooks from GitHub Actions; validates HMAC-SHA256 signatures; normalizes event payloads into `IncidentEvent` domain models; pushes tasks to the Redis queue.
-*   **Technology:** Python 3.12, FastAPI, Uvicorn.
-*   **Interfaces:** `POST /v1/webhooks/github`, `GET /health/liveness`, `GET /health/readiness`.
+* **Responsibility:** Receives inbound webhooks from GitHub Actions (`POST /v1/webhooks/github`); validates HMAC-SHA256 signatures; normalizes event payloads into `IncidentEvent` domain models.
+* **Technology:** Python 3.12, FastAPI, Uvicorn.
+* **Observability:** Logs request lifecycle with correlation IDs using `structlog`.
 
 ---
 
-## 2. Orchestration & State Machine (`src/packages/agent-runtime`)
-*   **Responsibility:** Manages the deterministic lifecycle of an incident across states (`INGESTED` $ightarrow$ `DIAGNOSING` $ightarrow$ `SYNTHESIZING` $ightarrow$ `VALIDATING` $ightarrow$ `DELIVERING` $ightarrow$ `COMPLETED` / `FAILED`).
-*   **Technology:** Python state machine / LangGraph coordinator.
+## 2. Context & Log Extractor (`src/packages/shared`)
+* **Responsibility:** Parses raw CI logs to extract error blocks, stack traces, file paths, and line numbers. Fetches relevant source file context from the repository without building a complex AST platform.
+* **Strategy:** Traceback regex parsing + targeted line range extraction.
 
 ---
 
 ## 3. Diagnostic & Patch Agent (`src/packages/agent-runtime`)
-*   **Responsibility:** Implements reasoning loops that parse sanitized logs, query syntax trees (ASTs), construct prompt schemas, invoke LLM providers, and generate structured unified diffs.
-*   **Technology:** Pydantic structured output models, Instructor / LiteLLM abstraction.
+* **Responsibility:** Implements a deterministic state machine that formats context, calls the configured LLM provider interface, validates Pydantic JSON output, and constructs minimal unified diffs.
+* **Technology:** Pydantic V2, LiteLLM / direct client interface.
 
 ---
 
-## 4. Context & AST Engine (`src/packages/rag`)
-*   **Responsibility:** Extracts targeted code snippets around failing lines using Tree-sitter AST parsing; analyzes dependency manifests (`package.json`, `pyproject.toml`, `go.mod`); strips ANSI codes from logs.
+## 4. Sandbox Execution Engine (`src/packages/shared` / Docker)
+* **Responsibility:** Manages ephemeral Docker containers; applies unified diffs; executes build/lint/test commands; asserts exit code 0; enforces non-root execution and default network isolation.
+* **Technology:** `docker-py` / Docker Engine API.
 
 ---
 
-## 5. Sandbox Execution Engine (`src/packages/shared` / Docker)
-*   **Responsibility:** Manages the lifecycle of ephemeral Docker containers; mounts the target codebase snapshot; applies unified diffs; executes build/lint/test commands; captures stdout/stderr and exit codes.
-*   **Technology:** Docker Engine API / `docker-py`, gVisor runtime.
-
----
-
-## 6. PR Delivery Service (`src/packages/sdk`)
-*   **Responsibility:** Communicates with the GitHub REST API using GitHub App installation tokens; creates remote branches; commits validated diffs; opens formatted Pull Requests.
+## 5. PR Delivery Service (`src/packages/sdk`)
+* **Responsibility:** Communicates with GitHub REST API using GitHub App installation tokens; creates fix branches; commits validated diffs; opens Pull Requests with diagnostic evidence.
