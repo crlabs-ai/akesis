@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -108,6 +109,96 @@ class FailureContext(BaseModel):
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp of context creation",
+    )
+
+
+class EvidenceItem(BaseModel):
+    """Specific verifiable piece of factual evidence extracted from logs or context."""
+
+    source: str = Field(..., description="Source location (e.g. log_traceback, test_summary)")
+    observation: str = Field(..., description="Verifiable factual statement from the context")
+    file_path: str | None = Field(
+        default=None, description="Associated file if explicitly identified"
+    )
+    line_number: int | None = Field(
+        default=None, description="Associated line number if explicitly identified"
+    )
+
+
+class RemediationDirection(BaseModel):
+    """Recommended remediation guidance for human engineer review."""
+
+    summary: str = Field(..., description="Concise overview of proposed fix approach")
+    suggested_action: str = Field(..., description="Specific recommended change")
+    risk_assessment: str = Field(
+        ..., description="Potential side effects or regressions to watch for"
+    )
+
+
+class DiagnosisProposal(BaseModel):
+    """Strict schema returned by LLM diagnostic baseline."""
+
+    category: FailureCategory = Field(
+        ...,
+        description="Diagnosed category based on evidence",
+    )
+    root_cause: str = Field(
+        ...,
+        description="Clear, evidence-backed explanation of why the CI job failed",
+    )
+    evidence: list[EvidenceItem] = Field(
+        ...,
+        min_length=1,
+        description="Explicit verifiable facts supporting this diagnosis",
+    )
+    target_file: str | None = Field(
+        default=None,
+        description="Primary source file requiring remediation if determinable",
+    )
+    target_line: int | None = Field(
+        default=None,
+        description="Primary line number requiring remediation if determinable",
+    )
+    remediation_direction: RemediationDirection = Field(
+        ...,
+        description="Proposed direction for resolving the failure",
+    )
+    is_fixable: bool = Field(
+        ...,
+        description="Whether this failure is deterministically remediable",
+    )
+    confidence_score: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Model-reported confidence score between 0.0 and 1.0",
+    )
+    evidence_sufficiency: Literal["sufficient", "partial", "insufficient"] = Field(
+        ...,
+        description="Assessment of whether supplied context was adequate for root cause diagnosis",
+    )
+    reasoning: str = Field(
+        ...,
+        description="Logical chain of reasoning connecting evidence to root cause",
+    )
+
+
+class DiagnosticResult(BaseModel):
+    """Complete validated diagnostic result produced by DiagnosticService."""
+
+    incident_id: str = Field(..., description="Associated Akesis incident identifier")
+    proposal: DiagnosisProposal = Field(..., description="Validated diagnosis proposal")
+    human_review_required: bool = Field(
+        default=True,
+        description="Always true in V1: human engineer must review and approve all proposals",
+    )
+    model_name: str = Field(..., description="Identifier of the model used for diagnosis")
+    execution_time_ms: float = Field(
+        ..., description="End-to-end diagnostic latency in milliseconds"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of diagnostic completion",
     )
 
 
