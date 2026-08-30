@@ -86,6 +86,32 @@ class Settings(BaseSettings):
         description="Minimum diagnostic confidence required to attempt fix generation",
     )
 
+    # Docker Sandbox Validation Settings
+    sandbox_image: str = Field(
+        default="akesis-validator:v1",
+        description="Dedicated Docker image containing pre-installed validation tools",
+    )
+    sandbox_timeout_seconds: float = Field(
+        default=30.0,
+        description="Maximum execution timeout for validation container in seconds",
+    )
+    sandbox_memory_limit: str = Field(
+        default="512m",
+        description="Memory limit for validation container",
+    )
+    sandbox_cpu_limit: float = Field(
+        default=1.0,
+        description="CPU core quota for validation container",
+    )
+    sandbox_max_output_chars: int = Field(
+        default=4_000,
+        description="Maximum character limit for captured stdout and stderr",
+    )
+    sandbox_base_dir: str = Field(
+        default="/tmp/akesis/sandbox",
+        description="Base directory on host for ephemeral sandbox workspaces",
+    )
+
 
 # Singleton settings instance
 settings = Settings()

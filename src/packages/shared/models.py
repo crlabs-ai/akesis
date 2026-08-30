@@ -336,6 +336,49 @@ class FixProposal(BaseModel):
     )
 
 
+class ValidationCommand(StrEnum):
+    """Allowlisted deterministic commands supported in sandbox validation."""
+
+    PYTEST = "pytest"
+    RUFF = "ruff"
+    MYPY = "mypy"
+    PYTHON_SYNTAX = "python_syntax"
+
+
+class ValidationStatus(StrEnum):
+    """Outcome status of sandbox validation."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    PATCH_REJECTED = "patch_rejected"
+    UNSUPPORTED = "unsupported"
+    INFRASTRUCTURE_ERROR = "infrastructure_error"
+
+
+class ValidationResult(BaseModel):
+    """Authoritative structured result of sandbox fix validation."""
+
+    validation_id: str = Field(..., description="Deterministic validation identifier")
+    proposal_id: str = Field(..., description="Associated FixProposal identifier")
+    incident_id: str = Field(..., description="Associated incident identifier")
+    commit_sha: str = Field(..., description="Target commit SHA validated")
+    status: ValidationStatus = Field(..., description="Outcome status of validation")
+    command_executed: str = Field(..., description="Allowlisted command identifier")
+    exit_code: int | None = Field(default=None, description="Process exit code")
+    stdout: str = Field(default="", description="Bounded stdout output")
+    stderr: str = Field(default="", description="Bounded stderr output")
+    duration_ms: float = Field(..., description="Total validation execution latency")
+    timed_out: bool = Field(default=False, description="True if execution exceeded timeout")
+    failure_reason: str | None = Field(
+        default=None, description="Summary explanation of failure if any"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of validation completion",
+    )
+
+
 class IngestionResponse(BaseModel):
     """HTTP response payload returned by the webhook ingestion gateway."""
 
