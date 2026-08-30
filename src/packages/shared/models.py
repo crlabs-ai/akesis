@@ -112,10 +112,46 @@ class FailureContext(BaseModel):
     )
 
 
+class CodeEvidence(BaseModel):
+    """Bounded, line-numbered source code snippet extracted from repository."""
+
+    path: str = Field(..., description="Repository-relative file path")
+    start_line: int = Field(..., description="1-indexed starting line number")
+    end_line: int = Field(..., description="1-indexed ending line number")
+    target_line: int | None = Field(default=None, description="Target line of interest if any")
+    content: str = Field(..., description="Formatted source code lines with line numbers")
+    total_file_lines: int = Field(..., description="Total line count of source file")
+    language: str = Field(default="python", description="Programming language of source file")
+
+
+class EvidencePackage(BaseModel):
+    """Combined evidence package containing CI failure signal and verified repository code."""
+
+    incident_id: str = Field(..., description="Associated Akesis incident identifier")
+    commit_sha: str = Field(..., description="Exact checked out commit SHA")
+    failure_context: FailureContext = Field(..., description="Normalized CI failure context")
+    code_evidences: list[CodeEvidence] = Field(
+        default_factory=list,
+        description="Extracted repository source snippets relevant to failure",
+    )
+    retrieval_status: Literal["success", "partial", "unavailable", "empty"] = Field(
+        default="unavailable",
+        description="Status of codebase context resolution",
+    )
+    retrieval_notes: list[str] = Field(
+        default_factory=list,
+        description="Audit notes explaining file discovery and security decisions",
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of evidence package creation",
+    )
+
+
 class EvidenceItem(BaseModel):
     """Specific verifiable piece of factual evidence extracted from logs or context."""
 
-    source: str = Field(..., description="Source location (e.g. log_traceback, test_summary)")
+    source: str = Field(..., description="Source location (e.g. log_traceback, source_code)")
     observation: str = Field(..., description="Verifiable factual statement from the context")
     file_path: str | None = Field(
         default=None, description="Associated file if explicitly identified"
@@ -195,6 +231,10 @@ class DiagnosticResult(BaseModel):
     model_name: str = Field(..., description="Identifier of the model used for diagnosis")
     execution_time_ms: float = Field(
         ..., description="End-to-end diagnostic latency in milliseconds"
+    )
+    evidence_package: EvidencePackage | None = Field(
+        default=None,
+        description="Attached codebase evidence package if context resolution was active",
     )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(UTC),

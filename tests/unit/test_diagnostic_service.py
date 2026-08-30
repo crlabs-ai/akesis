@@ -134,3 +134,39 @@ async def test_diagnostic_service_fallback_on_timeout(
     assert result.proposal.confidence_score == 0.0
     assert result.human_review_required is True
     assert result.model_name == "deterministic-fallback"
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_service_with_codebase_evidence(
+    sample_failure_context: FailureContext,
+) -> None:
+    expected_proposal = DiagnosisProposal(
+        category=FailureCategory.TEST,
+        root_cause="Division by zero in test_math.py",
+        evidence=[
+            EvidenceItem(
+                source="source_code",
+                observation="Zero division line in code snippet",
+                file_path="tests/test_math.py",
+                line_number=20,
+            )
+        ],
+        target_file="tests/test_math.py",
+        target_line=20,
+        remediation_direction=RemediationDirection(
+            summary="Prevent zero division",
+            suggested_action="Add input validation",
+            risk_assessment="Minimal risk",
+        ),
+        is_fixable=True,
+        confidence_score=0.98,
+        evidence_sufficiency="sufficient",
+        reasoning="Traceback matches verified code evidence.",
+    )
+
+    service = DiagnosticService(llm_client=MockLLMClient(proposal=expected_proposal))
+    result = await service.diagnose_failure(sample_failure_context)
+
+    assert result.evidence_package is not None
+    assert result.proposal.confidence_score == 0.98
+    assert result.human_review_required is True

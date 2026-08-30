@@ -1,4 +1,6 @@
 from src.packages.shared.models import (
+    CodeEvidence,
+    EvidencePackage,
     FailureCategory,
     FailureContext,
     FailureSignal,
@@ -12,10 +14,10 @@ def test_prompt_builder_system_instruction() -> None:
     assert "EVIDENCE FIRST" in system_inst
     assert "UNTRUSTED DATA BOUNDARY" in system_inst
     assert "NO COMMAND EXECUTION" in system_inst
-    assert "confidence_score" in system_inst
+    assert "NO PATCH GENERATION" in system_inst
 
 
-def test_prompt_builder_user_prompt() -> None:
+def test_prompt_builder_user_prompt_with_code_evidence() -> None:
     context = FailureContext(
         incident_id="inc_test_123",
         repository_owner="crlabs-ai",
@@ -37,8 +39,26 @@ def test_prompt_builder_user_prompt() -> None:
         raw_log_excerpt="ZeroDivisionError: division by zero",
     )
 
-    prompt = DiagnosticPromptBuilder.build_user_prompt(context)
+    evidence_pkg = EvidencePackage(
+        incident_id="inc_test_123",
+        commit_sha="abcdef123456",
+        failure_context=context,
+        code_evidences=[
+            CodeEvidence(
+                path="tests/test_calc.py",
+                start_line=1,
+                end_line=15,
+                target_line=10,
+                content="  10 > | assert divide(10, 0) == 0",
+                total_file_lines=20,
+                language="python",
+            )
+        ],
+        retrieval_status="success",
+    )
+
+    prompt = DiagnosticPromptBuilder.build_user_prompt(context, evidence_package=evidence_pkg)
     assert "Incident ID: inc_test_123" in prompt
-    assert "crlabs-ai/akesis" in prompt
     assert "tests/test_calc.py" in prompt
-    assert "ZeroDivisionError" in prompt
+    assert "REPOSITORY SOURCE CODE EVIDENCE (UNTRUSTED DATA)" in prompt
+    assert "assert divide(10, 0) == 0" in prompt
