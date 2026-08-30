@@ -46,6 +46,28 @@ class Settings(BaseSettings):
         description="HTTP request timeout for LLM provider requests in seconds",
     )
 
+    # Codebase Context Retrieval Limits
+    repo_checkout_base_dir: str = Field(
+        default="/tmp/akesis/repos",
+        description="Directory where git repositories are checked out",
+    )
+    max_context_window_lines: int = Field(
+        default=40,
+        description="Maximum lines of source code extracted around target line",
+    )
+    max_file_size_bytes: int = Field(
+        default=500_000,
+        description="Maximum file size in bytes to inspect (default 500KB)",
+    )
+    max_evidence_files: int = Field(
+        default=3,
+        description="Maximum number of relevant source files to extract per incident",
+    )
+    max_total_source_chars: int = Field(
+        default=8_000,
+        description="Hard character budget for all combined source evidence snippets",
+    )
+
 
 # Singleton settings instance
 settings = Settings()
