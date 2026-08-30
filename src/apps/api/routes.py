@@ -94,7 +94,7 @@ async def handle_github_webhook(
 
     if not workflow_run_data or not repo_data:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Payload missing required 'workflow_run' or 'repository' objects",
         )
 

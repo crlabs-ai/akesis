@@ -38,6 +38,7 @@ except SandboxTimeoutError as err:
 ```python
 from pydantic import BaseModel, Field
 
+
 class PatchDiagnosis(BaseModel):
     category: str = Field(..., description="Failure category")
     root_cause: str = Field(..., description="Explanation of error")
