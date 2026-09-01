@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     # Database Configuration
     database_url: str = Field(
-        default="postgresql+asyncpg://postgres:postgrespassword@localhost:5432/akesis",
+        default="postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis",
         description="Async connection URL for PostgreSQL database",
     )
 
