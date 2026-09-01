@@ -9,6 +9,7 @@ from src.packages.sdk.llm_client import (
     LLMRateLimitError,
     LLMResponseValidationError,
     LLMTimeoutError,
+    dereference_json_schema,
 )
 from src.packages.shared.models import DiagnosisProposal, FailureCategory
 
@@ -51,7 +52,10 @@ async def test_gemini_client_successful_structured_generation() -> None:
     }
 
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=200,
             json=mock_payload,
         )
@@ -73,7 +77,10 @@ async def test_gemini_client_rate_limit_handled() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=429,
             json={"error": {"message": "Resource has been exhausted"}},
         )
@@ -88,7 +95,10 @@ async def test_gemini_client_auth_failure_handled() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=invalid_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "invalid_key"},
+        ).respond(
             status_code=401,
             json={"error": {"message": "API key not valid"}},
         )
@@ -103,7 +113,10 @@ async def test_gemini_client_empty_candidates_handled() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=200,
             json={"candidates": []},
         )
@@ -119,7 +132,10 @@ async def test_gemini_client_empty_parts_handled() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=200,
             json={"candidates": [{"content": {"parts": []}}]},
         )
@@ -135,7 +151,10 @@ async def test_gemini_client_malformed_json_raises_validation_error() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=200,
             json={"candidates": [{"content": {"parts": [{"text": "not valid json {"}]}}]},
         )
@@ -151,9 +170,10 @@ async def test_gemini_client_timeout_error_handled() -> None:
         timeout=0.01,
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").mock(
-            side_effect=httpx.TimeoutException("Timeout")
-        )
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).mock(side_effect=httpx.TimeoutException("Timeout"))
         with pytest.raises(LLMTimeoutError):
             await client.generate_structured("prompt", DiagnosisProposal)
 
@@ -165,10 +185,31 @@ async def test_gemini_client_server_error_handled() -> None:
         base_url="https://generativelanguage.googleapis.com/v1beta",
     )
     with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
-        respx_mock.post("/models/gemini-1.5-flash:generateContent?key=mock_key").respond(
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
             status_code=503,
             json={"error": {"message": "Service unavailable"}},
         )
         with pytest.raises(LLMError) as exc_info:
             await client.generate_structured("prompt", DiagnosisProposal)
         assert exc_info.value.status_code == 503
+
+
+def test_dereference_json_schema_inlines_defs() -> None:
+    schema = {
+        "$defs": {
+            "StatusEnum": {
+                "enum": ["pending", "active"],
+                "type": "string",
+            }
+        },
+        "properties": {"status": {"$ref": "#/$defs/StatusEnum"}},
+        "type": "object",
+    }
+    resolved = dereference_json_schema(schema)
+    assert "$defs" not in resolved
+    assert "$ref" not in resolved["properties"]["status"]
+    assert resolved["properties"]["status"]["enum"] == ["pending", "active"]
+    assert resolved["properties"]["status"]["type"] == "string"

@@ -1,3 +1,4 @@
+import copy
 import json
 from typing import Any, Protocol, TypeVar
 
@@ -57,6 +58,29 @@ class LLMClientProtocol(Protocol):
         ...
 
 
+def dereference_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively inlines $defs references into an OpenAPI 3.0-compatible schema for Gemini."""
+    schema_copy = copy.deepcopy(schema)
+    defs = schema_copy.pop("$defs", {})
+
+    def _resolve(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                ref_key = str(node["$ref"]).split("/")[-1]
+                if ref_key in defs:
+                    resolved = _resolve(copy.deepcopy(defs[ref_key]))
+                    for k, v in node.items():
+                        if k != "$ref":
+                            resolved[k] = _resolve(v)
+                    return resolved
+            return {k: _resolve(v) for k, v in node.items()}
+        elif isinstance(node, list):
+            return [_resolve(item) for item in node]
+        return node
+
+    return _resolve(schema_copy)  # type: ignore[no-any-return]
+
+
 class GeminiClient:
     """Google Gemini REST API adapter implementing LLMClientProtocol."""
 
@@ -68,7 +92,10 @@ class GeminiClient:
         timeout: float | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else settings.gemini_api_key
-        self.model_name = model_name or settings.gemini_model
+        model = model_name or settings.gemini_model
+        if model in ("gemini-1.5-flash", "gemini-1.5-pro"):
+            model = "gemini-2.5-flash" if "flash" in model else "gemini-2.5-pro"
+        self.model_name = model
         self.base_url = (base_url or settings.gemini_api_url).rstrip("/")
         self.timeout = timeout or settings.gemini_timeout_seconds
 
@@ -83,8 +110,9 @@ class GeminiClient:
         if not self.api_key:
             raise LLMAuthError("Gemini API key is not configured (GEMINI_API_KEY missing)")
 
-        url = f"{self.base_url}/models/{self.model_name}:generateContent?key={self.api_key}"
-        schema_dict = response_model.model_json_schema()
+        url = f"{self.base_url}/models/{self.model_name}:generateContent"
+        raw_schema = response_model.model_json_schema()
+        response_schema = dereference_json_schema(raw_schema)
 
         payload: dict[str, Any] = {
             "contents": [
@@ -96,19 +124,24 @@ class GeminiClient:
             "generationConfig": {
                 "temperature": temperature,
                 "responseMimeType": "application/json",
-                "responseSchema": schema_dict,
+                "responseSchema": response_schema,
             },
         }
 
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 response = await client.post(
                     url,
                     json=payload,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
 
                 if response.status_code in (401, 403):
@@ -128,12 +161,15 @@ class GeminiClient:
                     f"Gemini API request timed out after {self.timeout}s"
                 ) from err
             except httpx.HTTPStatusError as err:
+                # Sanitize error message to prevent leaking any credentials
+                sanitized_msg = str(err).replace(self.api_key, "[REDACTED]")
                 raise LLMError(
-                    f"Gemini API HTTP error {err.response.status_code}: {err}",
+                    f"Gemini API HTTP error {err.response.status_code}: {sanitized_msg}",
                     status_code=err.response.status_code,
                 ) from err
             except httpx.RequestError as err:
-                raise LLMError(f"Network error connecting to Gemini API: {err}") from err
+                sanitized_msg = str(err).replace(self.api_key, "[REDACTED]")
+                raise LLMError(f"Network error connecting to Gemini API: {sanitized_msg}") from err
 
         try:
             body = response.json()

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -227,7 +227,7 @@ class PipelineModel(Base):
         doc="Repository name",
     )
     run_id: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         nullable=False,
         index=True,
         doc="GitHub Actions workflow run identifier",
