@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import FastAPI, Request, Response
 
 from src.apps.api.routes import router as webhook_router
+from src.packages.database.session import get_engine
 from src.packages.shared.config import settings
 from src.packages.shared.logging import configure_logging, get_logger
 
@@ -21,7 +22,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=settings.environment,
         log_level=settings.log_level,
     )
+    engine = get_engine()
     yield
+    await engine.dispose()
     logger.info("Akesis Ingestion Gateway shutting down")
 
 

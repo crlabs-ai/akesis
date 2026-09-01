@@ -67,7 +67,7 @@ class GeminiClient:
         base_url: str | None = None,
         timeout: float | None = None,
     ) -> None:
-        self.api_key = api_key or settings.gemini_api_key
+        self.api_key = api_key if api_key is not None else settings.gemini_api_key
         self.model_name = model_name or settings.gemini_model
         self.base_url = (base_url or settings.gemini_api_url).rstrip("/")
         self.timeout = timeout or settings.gemini_timeout_seconds

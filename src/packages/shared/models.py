@@ -379,6 +379,45 @@ class ValidationResult(BaseModel):
     )
 
 
+class ApprovalStatus(StrEnum):
+    """Authoritative state machine states for human review."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+class ApprovalRecord(BaseModel):
+    """Authoritative domain representation of an approval gate entity."""
+
+    approval_id: str = Field(..., description="Deterministic approval identifier")
+    incident_id: str = Field(..., description="Associated incident identifier")
+    diagnosis_id: str | None = Field(default=None, description="Associated diagnosis ID")
+    proposal_id: str = Field(..., description="Associated FixProposal identifier")
+    commit_sha: str = Field(..., description="Target commit SHA")
+    status: ApprovalStatus = Field(default=ApprovalStatus.PENDING, description="Approval state")
+    slack_channel_id: str | None = Field(default=None, description="Posted Slack channel")
+    slack_message_ts: str | None = Field(default=None, description="Posted Slack message timestamp")
+    requested_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp when human review was requested",
+    )
+    decided_at: datetime | None = Field(default=None, description="Timestamp of human decision")
+    decided_by: str | None = Field(default=None, description="Reviewer identity")
+    decision_reason: str | None = Field(default=None, description="Reviewer explanation or notes")
+    expires_at: datetime | None = Field(default=None, description="Timestamp of expiration")
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Record creation timestamp",
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Record last updated timestamp",
+    )
+
+
 class IngestionResponse(BaseModel):
     """HTTP response payload returned by the webhook ingestion gateway."""
 
