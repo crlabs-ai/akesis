@@ -84,8 +84,8 @@ ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 * **Idempotency & Deduplication:** Guard against duplicate webhook deliveries and concurrent approval callbacks using database constraints.
 * **Safety Invariant:** Human approval remains mandatory; zero autonomous mutation or auto-merging.
 
-### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off (NEXT)
-* [ ] **Status:** `SCHEDULED`
+### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off
+* [x] **Status:** `COMPLETE` (ADR-0009)
 * **Benchmark Evaluation Suite:** 10–12 realistic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), and Test (pytest assertion) errors.
 * **Resilience & Latency Testing:** Verify timeout handling, sandbox resource limits, and error diagnostics across all pipeline stages.
 * **Audit Trail Verification:** Ensure complete traceability from failing GitHub Actions run $
