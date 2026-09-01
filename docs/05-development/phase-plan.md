@@ -86,8 +86,9 @@ ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 
 ### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off
 * [x] **Automated Benchmark Validation:** `COMPLETE` (ADR-0009)
+* [x] **Local Runtime Smoke Testing:** `COMPLETE` (HTTP 200/202/401 verified on local runtime)
 * [ ] **Live Integration Smoke Test:** `READY / PENDING OPERATOR EXECUTION`
 * **Benchmark Evaluation Suite:** 12 deterministic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), Test (pytest assertion), Low Confidence, Malformed Patch, Protected Path, Sandbox Failure, Human Rejection, Approval Expiry, Stale Commit, Duplicate Webhook, and End-to-End Mocked Delivery.
 * **Resilience & Latency Testing:** Verify timeout handling, sandbox resource limits, and error diagnostics across all pipeline stages.
-* **Operations Runbook:** Comprehensive manual created at `docs/07-operations/v1-validation-runbook.md`.
+* **Operations Runbook & Matrix:** Comprehensive manual and release matrix created at `docs/07-operations/v1-validation-runbook.md`.
 * **V1 Release Sign-Off:** Automated quality gates pass 100%; final V1 release sign-off occurs upon operator verification of live smoke test.
