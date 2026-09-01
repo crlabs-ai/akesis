@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", description="Runtime environment")
     log_level: str = Field(default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR")
 
+    # Database Configuration
+    database_url: str = Field(
+        default="postgresql+asyncpg://postgres:postgrespassword@localhost:5432/akesis",
+        description="Async connection URL for PostgreSQL database",
+    )
+
     # GitHub Integration
     github_webhook_secret: str = Field(
         default="test_webhook_secret",

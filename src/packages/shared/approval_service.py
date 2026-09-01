@@ -1,6 +1,12 @@
-import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
+from src.packages.database.repositories import (
+    ApprovalRepository,
+    ApprovalRepositoryProtocol,
+)
+from src.packages.database.session import get_session_factory
 from src.packages.sdk.slack_client import SlackClient, SlackClientProtocol
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
@@ -40,18 +46,28 @@ class ApprovalNotFoundError(ApprovalError):
     pass
 
 
+@asynccontextmanager
+async def default_repository_factory() -> AsyncIterator[ApprovalRepositoryProtocol]:
+    """Default repository factory creating an async database session."""
+    factory = get_session_factory()
+    async with factory() as session:
+        yield ApprovalRepository(session)
+
+
 class ApprovalService:
     """Orchestrates approval gate lifecycle, eligibility, and atomic state transitions."""
 
     def __init__(
         self,
+        repository_factory: (
+            Callable[[], AbstractAsyncContextManager[ApprovalRepositoryProtocol]] | None
+        ) = None,
         slack_client: SlackClientProtocol | None = None,
         ttl_hours: int | None = None,
     ) -> None:
+        self.repository_factory = repository_factory or default_repository_factory
         self.slack_client = slack_client or SlackClient()
         self.ttl_hours = ttl_hours or settings.approval_ttl_hours
-        self._records: dict[str, ApprovalRecord] = {}
-        self._lock = asyncio.Lock()
 
     def check_eligibility(
         self,
@@ -80,7 +96,7 @@ class ApprovalService:
         proposal: FixProposal,
         validation: ValidationResult,
     ) -> ApprovalRecord:
-        """Creates an approval record and posts interactive card to Slack if eligible."""
+        """Creates a durable PostgreSQL approval record and posts card to Slack if eligible."""
         is_eligible, reason = self.check_eligibility(proposal, validation)
         if not is_eligible:
             logger.info(
@@ -106,26 +122,33 @@ class ApprovalService:
             updated_at=now,
         )
 
-        async with self._lock:
-            self._records[approval_id] = record
+        # 1. Persist authoritative record in database
+        async with self.repository_factory() as repo:
+            persisted_record = await repo.create_approval(record)
 
-        # Post interactive Block Kit card to Slack
+        # 2. Post interactive Block Kit card to Slack
         try:
             slack_meta = await self.slack_client.post_approval_card(
-                approval=record,
+                approval=persisted_record,
                 context=context,
                 proposal=proposal,
                 validation=validation,
             )
-            async with self._lock:
-                record.slack_channel_id = slack_meta.get("channel_id")
-                record.slack_message_ts = slack_meta.get("message_ts")
-                record.updated_at = datetime.now(UTC)
+            persisted_record.slack_channel_id = slack_meta.get("channel_id")
+            persisted_record.slack_message_ts = slack_meta.get("message_ts")
         except Exception as err:
-            logger.warning("slack_card_post_error", approval_id=approval_id, error=str(err))
+            logger.warning(
+                "slack_card_post_error",
+                approval_id=approval_id,
+                error=str(err),
+            )
 
-        logger.info("approval_requested", approval_id=approval_id, status=record.status)
-        return record
+        logger.info(
+            "approval_requested",
+            approval_id=approval_id,
+            status=persisted_record.status.value,
+        )
+        return persisted_record
 
     async def record_decision(
         self,
@@ -135,74 +158,73 @@ class ApprovalService:
         decision_reason: str | None = None,
         response_url: str | None = None,
     ) -> tuple[ApprovalRecord, bool]:
-        """Atomically transitions approval record status and updates Slack card."""
+        """Atomically transitions approval record status in database and updates Slack card."""
         target_status = (
             ApprovalStatus.APPROVED if decision == "approve" else ApprovalStatus.REJECTED
         )
 
-        async with self._lock:
-            record = self._records.get(approval_id)
-            if not record:
+        async with self.repository_factory() as repo:
+            # 1. Fetch current record to check existence and expiration
+            current = await repo.get_approval(approval_id)
+            if not current:
                 raise ApprovalNotFoundError(f"Approval record '{approval_id}' not found.")
 
-            # Check expiration
             now = datetime.now(UTC)
-            is_expired = record.expires_at and now > record.expires_at
-            if is_expired and record.status == ApprovalStatus.PENDING:
-                record.status = ApprovalStatus.EXPIRED
-                record.updated_at = now
+            is_expired = current.expires_at and now > current.expires_at
+            if is_expired and current.status == ApprovalStatus.PENDING:
+                await repo.expire_approval(approval_id)
                 raise IllegalStateTransitionError(
                     f"Approval '{approval_id}' has expired and cannot be decided."
                 )
 
-            # Idempotency check
-            if record.status == target_status:
-                logger.info(
-                    "approval_decision_idempotent_duplicate",
-                    approval_id=approval_id,
-                    status=record.status,
-                )
-                return record, True
+            # 2. Atomic database state transition
+            record, is_duplicate = await repo.record_decision(
+                approval_id=approval_id,
+                target_status=target_status,
+                reviewer=decided_by,
+                reason=decision_reason,
+            )
 
-            # Reject conflicting transitions from terminal states
-            if record.status != ApprovalStatus.PENDING:
+            if record is None:
+                raise ApprovalNotFoundError(f"Approval record '{approval_id}' not found.")
+
+            # If not duplicate and record status is not target_status -> illegal transition
+            if not is_duplicate and record.status != target_status:
                 logger.warning(
                     "approval_illegal_transition_attempted",
                     approval_id=approval_id,
-                    current_status=record.status,
-                    attempted_status=target_status,
+                    current_status=record.status.value,
+                    attempted_status=target_status.value,
                 )
                 raise IllegalStateTransitionError(
-                    f"Cannot transition from terminal state '{record.status}' to '{target_status}'"
+                    f"Cannot transition '{record.status.value}' to '{target_status.value}'"
                 )
-
-            # Atomic State Transition
-            record.status = target_status
-            record.decided_at = now
-            record.decided_by = decided_by
-            record.decision_reason = decision_reason
-            record.updated_at = now
 
         logger.info(
             "approval_decision_recorded",
             approval_id=approval_id,
-            status=record.status,
+            status=record.status.value,
             decided_by=decided_by,
+            is_duplicate=is_duplicate,
         )
 
-        # Update Slack card if response_url is present
+        # 3. Update Slack card via response_url if provided
         if response_url:
             try:
                 await self.slack_client.update_approval_card(response_url, record)
             except Exception as err:
-                logger.warning("slack_card_update_error", approval_id=approval_id, error=str(err))
+                logger.warning(
+                    "slack_card_update_error",
+                    approval_id=approval_id,
+                    error=str(err),
+                )
 
-        return record, False
+        return record, is_duplicate
 
     async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
-        """Retrieves an approval record by ID."""
-        async with self._lock:
-            return self._records.get(approval_id)
+        """Retrieves an approval record by ID from database."""
+        async with self.repository_factory() as repo:
+            return await repo.get_approval(approval_id)
 
 
 # Global approval service singleton for API usage

@@ -394,6 +394,7 @@ class ApprovalRecord(BaseModel):
 
     approval_id: str = Field(..., description="Deterministic approval identifier")
     incident_id: str = Field(..., description="Associated incident identifier")
+    diagnosis_id: str | None = Field(default=None, description="Associated diagnosis ID")
     proposal_id: str = Field(..., description="Associated FixProposal identifier")
     commit_sha: str = Field(..., description="Target commit SHA")
     status: ApprovalStatus = Field(default=ApprovalStatus.PENDING, description="Approval state")

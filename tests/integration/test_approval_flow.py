@@ -41,14 +41,14 @@ def create_slack_signature(body: bytes, timestamp: str, secret: str) -> str:
 
 @pytest.mark.asyncio
 async def test_slack_interaction_approve_endpoint(app: Any) -> None:
-    # Setup pending approval record
+    now_ts = int(time.time())
     context = FailureContext(
-        incident_id="inc_api_01",
+        incident_id=f"inc_flow_{now_ts}",
         repository_owner="crlabs-ai",
         repository_name="akesis",
         run_id=202,
         workflow_name="CI",
-        commit_sha="aabbccddeeff",
+        commit_sha=f"aabbcc{now_ts}"[:12],
         branch="main",
         run_url="https://ci",
         conclusion=WorkflowRunConclusion.FAILURE,
@@ -56,9 +56,9 @@ async def test_slack_interaction_approve_endpoint(app: Any) -> None:
         raw_log_excerpt="err",
     )
     proposal = FixProposal(
-        proposal_id="prop_api_01",
-        incident_id="inc_api_01",
-        commit_sha="aabbccddeeff",
+        proposal_id=f"prop_flow_{now_ts}",
+        incident_id=context.incident_id,
+        commit_sha=context.commit_sha,
         status="proposed",
         is_valid=True,
         unified_diff="--- a/a.py\n+++ b/a.py\n",
@@ -68,10 +68,10 @@ async def test_slack_interaction_approve_endpoint(app: Any) -> None:
         confidence_score=0.90,
     )
     validation = ValidationResult(
-        validation_id="val_api_01",
-        proposal_id="prop_api_01",
-        incident_id="inc_api_01",
-        commit_sha="aabbccddeeff",
+        validation_id=f"val_flow_{now_ts}",
+        proposal_id=proposal.proposal_id,
+        incident_id=context.incident_id,
+        commit_sha=context.commit_sha,
         status=ValidationStatus.PASSED,
         command_executed="pytest",
         exit_code=0,
