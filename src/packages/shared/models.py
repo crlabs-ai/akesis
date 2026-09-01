@@ -418,6 +418,64 @@ class ApprovalRecord(BaseModel):
     )
 
 
+class MutationStatus(StrEnum):
+    """State machine states for Git mutation and Pull Request lifecycle."""
+
+    PENDING = "pending"
+    APPLYING = "applying"
+    VALIDATED = "validated"
+    COMMITTED = "committed"
+    PUSHED = "pushed"
+    PR_CREATED = "pr_created"
+    FAILED = "failed"
+
+
+class PRMetadata(BaseModel):
+    """Structured metadata returned from GitHub Pull Request creation."""
+
+    pr_number: int = Field(..., description="GitHub PR sequential identifier")
+    pr_url: str = Field(..., description="REST API URL for PR resource")
+    html_url: str = Field(..., description="Web URL for viewing PR in browser")
+    title: str = Field(..., description="PR display title")
+    head_branch: str = Field(..., description="Source branch for PR")
+    base_branch: str = Field(..., description="Target base branch for PR")
+
+
+class MutationRecord(BaseModel):
+    """Authoritative representation of a Git mutation and PR creation lifecycle entity."""
+
+    mutation_id: str = Field(..., description="Deterministic mutation identifier")
+    proposal_id: str = Field(..., description="Associated FixProposal identifier")
+    approval_id: str = Field(..., description="Associated ApprovalRecord identifier")
+    incident_id: str = Field(..., description="Associated CI incident identifier")
+    repository_owner: str = Field(..., description="Owner of the target repository")
+    repository_name: str = Field(..., description="Name of the target repository")
+    base_commit_sha: str = Field(..., description="Exact base commit SHA mutated")
+    branch_name: str = Field(..., description="Deterministic fix branch created")
+    resulting_commit_sha: str | None = Field(
+        default=None, description="Resulting commit SHA produced by the mutation"
+    )
+    validation_status: ValidationStatus | None = Field(
+        default=None, description="Pre-push sandbox validation outcome"
+    )
+    pr_number: int | None = Field(default=None, description="Sequential number of created PR")
+    pr_url: str | None = Field(default=None, description="Web URL of created Pull Request")
+    status: MutationStatus = Field(
+        default=MutationStatus.PENDING, description="Current mutation status"
+    )
+    failure_reason: str | None = Field(
+        default=None, description="Detailed explanation if mutation failed"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of mutation initialization",
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Timestamp of mutation last update",
+    )
+
+
 class IngestionResponse(BaseModel):
     """HTTP response payload returned by the webhook ingestion gateway."""
 
