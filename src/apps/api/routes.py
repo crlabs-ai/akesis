@@ -5,7 +5,7 @@ import uuid
 from typing import Any
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 
 from src.packages.sdk.github_client import GitHubClient, GitHubResourceNotFoundError
 from src.packages.sdk.slack_client import verify_slack_signature
@@ -23,13 +23,31 @@ from src.packages.shared.models import (
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
-from src.packages.shared.mutation_service import (
-    GitMutationService,
+from src.packages.shared.remediation_orchestrator import (
+    RemediationOrchestrator,
 )
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
-mutation_service = GitMutationService()
+orchestrator = RemediationOrchestrator()
+
+
+async def _safe_process_failure(context: FailureContext) -> None:
+    """Executes failure processing in background, catching all exceptions."""
+    try:
+        await orchestrator.process_failure(context)
+    except Exception as err:
+        logger.error(
+            "background_process_failure_error", error=str(err), incident_id=context.incident_id
+        )
+
+
+async def _safe_resume_approval(approval_id: str) -> None:
+    """Executes approval resumption in background, catching all exceptions."""
+    try:
+        await orchestrator.resume_approval(approval_id)
+    except Exception as err:
+        logger.error("background_resume_approval_error", error=str(err), approval_id=approval_id)
 
 
 def verify_github_signature(
@@ -57,15 +75,16 @@ def verify_github_signature(
 @router.post(
     "/v1/webhooks/github",
     response_model=IngestionResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Ingest GitHub webhook events",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest GitHub webhook events and trigger remediation asynchronously",
 )
 async def handle_github_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
     x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
 ) -> IngestionResponse:
-    """Receives, verifies, and normalizes GitHub webhook events for CI failure remediation."""
+    """Receives and verifies webhook events, launching orchestration asynchronously."""
     payload_bytes = await request.body()
 
     # 1. Security Check: HMAC Signature Verification
@@ -186,34 +205,30 @@ async def handle_github_webhook(
         raw_log_excerpt=signal.extracted_snippet,
     )
 
-    logger.info(
-        "Constructed failure context",
-        incident_id=failure_context.incident_id,
-        category=signal.category,
-        error_type=signal.error_type,
-        target_file=signal.target_file,
-    )
+    # 8. Schedule Orchestration Pipeline Non-Blockingly in Background Task
+    background_tasks.add_task(_safe_process_failure, failure_context)
 
     target_display = signal.target_file or "unknown file"
     return IngestionResponse(
         status="accepted",
         incident_id=incident_id,
         category=signal.category,
-        message=f"Failure successfully diagnosed: {signal.error_type} in {target_display}",
+        message=f"Remediation pipeline scheduled for {signal.error_type} in {target_display}",
     )
 
 
 @router.post(
     "/v1/slack/interactions",
     status_code=status.HTTP_200_OK,
-    summary="Handle Slack interactive component callbacks",
+    summary="Handle Slack interactive component callbacks and resume orchestration",
 )
 async def handle_slack_interaction(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),
     x_slack_request_timestamp: str | None = Header(default=None, alias="X-Slack-Request-Timestamp"),
 ) -> dict[str, Any]:
-    """Receives and verifies Slack button interactions (Approve / Reject)."""
+    """Receives and verifies Slack button interactions, resuming orchestration on approval."""
     raw_body = await request.body()
 
     is_valid = verify_slack_signature(
@@ -266,12 +281,21 @@ async def handle_slack_interaction(
     decision = "approve" if action_id == "approve_fix" else "reject"
 
     try:
+        # 1. Authoritative decision recorded in PostgreSQL
         record, is_duplicate = await approval_service.record_decision(
             approval_id=approval_id,
             decision=decision,
             decided_by=user_name,
             response_url=response_url,
         )
+
+        # 2. Resume pipeline in background task if approved
+        if not is_duplicate and record.status.value == "approved":
+            background_tasks.add_task(
+                _safe_resume_approval,
+                approval_id=record.approval_id,
+            )
+
         return {
             "status": "ok",
             "approval_id": record.approval_id,

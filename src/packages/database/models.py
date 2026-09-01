@@ -197,3 +197,119 @@ class MutationModel(Base):
     )
 
     __table_args__ = (Index("ix_mutations_proposal_commit", "proposal_id", "base_commit_sha"),)
+
+
+class PipelineModel(Base):
+    """Durable database model for end-to-end remediation pipeline orchestration state."""
+
+    __tablename__ = "pipelines"
+
+    pipeline_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        doc="Unique pipeline identifier",
+    )
+    incident_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+        doc="Associated CI incident identifier",
+    )
+    repository_owner: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        doc="Repository owner",
+    )
+    repository_name: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        doc="Repository name",
+    )
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        index=True,
+        doc="GitHub Actions workflow run identifier",
+    )
+    commit_sha: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        doc="Target failing commit SHA",
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="received",
+        index=True,
+        doc="Pipeline status e.g. received, diagnosing, awaiting_approval, completed, failed",
+    )
+    diagnosis_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="Associated diagnosis identifier",
+    )
+    proposal_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+        doc="Associated fix proposal identifier",
+    )
+    approval_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+        doc="Associated approval identifier",
+    )
+    mutation_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        doc="Associated mutation identifier",
+    )
+    pr_number: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        doc="Created Pull Request number if completed",
+    )
+    pr_url: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        doc="Created Pull Request URL if completed",
+    )
+    failure_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Summary explanation if pipeline stopped or failed",
+    )
+    failure_context_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Durable JSON serialization of FailureContext",
+    )
+    proposal_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Durable JSON serialization of validated FixProposal",
+    )
+    validation_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc="Durable JSON serialization of ValidationResult",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        doc="Timestamp of pipeline initialization",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        doc="Timestamp of last pipeline update",
+    )
+
+    __table_args__ = (
+        Index("ix_pipelines_repo_run", "repository_owner", "repository_name", "run_id"),
+    )

@@ -51,7 +51,8 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 * [x] **Status:** `COMPLETE` (ADR-0005)
 * Dedicated validator image (`docker/Dockerfile.validator` → `akesis-validator:v1`).
 * Isolated execution (`--network none`, `--cap-drop ALL`, non-root, read-only mounts).
-* Verbatim patch application (`git apply --check` $ightarrow$ `git apply` without whitespace fixing).
+* Verbatim patch application (`git apply --check` $
+ightarrow$ `git apply` without whitespace fixing).
 * Deterministic command selection matrix (`pytest`, `ruff`, `mypy`, `python -m compileall`).
 
 ### Phase 6: Human-in-the-Loop Approval Gate & PostgreSQL Persistence
@@ -59,7 +60,8 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 * Durable PostgreSQL persistence (`approvals` table, `ApprovalModel`, `ApprovalRepository`).
 * Alembic async migration setup (`0001_create_approvals.py`).
 * Slack interactive Block Kit card dispatch and HMAC-SHA256 signature verification.
-* Atomic conditional state transitions (`pending` $ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
+* Atomic conditional state transitions (`pending` $
+ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 
 ### Phase 7: Controlled Git Mutation & GitHub PR Creation
 * [x] **Status:** `COMPLETE` (ADR-0007)
@@ -74,17 +76,20 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 
 ## Upcoming Phases
 
-### Phase 8: End-to-End Orchestrator Pipeline (NEXT)
-* [ ] **Status:** `READY FOR IMPLEMENTATION`
+### Phase 8: End-to-End Orchestrator Pipeline
+* [x] **Status:** `COMPLETE` (ADR-0008)
 * **RemediationOrchestrator:** Coordinate the end-to-end pipeline across all Phase 1–7 components.
 * **Non-Blocking Ingestion:** Webhook gateway immediately returns `202 Accepted` and delegates pipeline execution to an asynchronous background task.
 * **Approval Pause & Resume:** Pipeline dispatches Slack interactive cards and pauses; human decision at `/v1/slack/interactions` resumes `GitMutationService` to create the PR.
 * **Idempotency & Deduplication:** Guard against duplicate webhook deliveries and concurrent approval callbacks using database constraints.
 * **Safety Invariant:** Human approval remains mandatory; zero autonomous mutation or auto-merging.
 
-### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off
+### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off (NEXT)
 * [ ] **Status:** `SCHEDULED`
 * **Benchmark Evaluation Suite:** 10–12 realistic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), and Test (pytest assertion) errors.
 * **Resilience & Latency Testing:** Verify timeout handling, sandbox resource limits, and error diagnostics across all pipeline stages.
-* **Audit Trail Verification:** Ensure complete traceability from failing GitHub Actions run $ightarrow$ Slack card $ightarrow$ PostgreSQL state $ightarrow$ Pull Request.
+* **Audit Trail Verification:** Ensure complete traceability from failing GitHub Actions run $
+ightarrow$ Slack card $
+ightarrow$ PostgreSQL state $
+ightarrow$ Pull Request.
 * **V1 Release Sign-Off:** Final quality gate execution and production runbook validation.

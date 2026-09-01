@@ -55,7 +55,7 @@ def test_webhook_unsupported_event() -> None:
             "Content-Type": "application/json",
         },
     )
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     assert response.json()["status"] == "ignored"
 
 
@@ -104,7 +104,7 @@ def test_webhook_non_failure_conclusion_ignored() -> None:
             "Content-Type": "application/json",
         },
     )
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     assert response.json()["status"] == "ignored"
     assert "not a failure" in response.json()["message"]
 
@@ -134,7 +134,7 @@ def test_webhook_successful_ingestion_and_diagnosis() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["incident_id"] is not None
@@ -164,7 +164,7 @@ def test_webhook_logs_not_found_handled_safely() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["category"] == "unknown"
@@ -192,7 +192,7 @@ def test_webhook_api_error_handled_safely() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["category"] == "unknown"
