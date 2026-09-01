@@ -85,11 +85,9 @@ ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 * **Safety Invariant:** Human approval remains mandatory; zero autonomous mutation or auto-merging.
 
 ### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off
-* [x] **Status:** `COMPLETE` (ADR-0009)
-* **Benchmark Evaluation Suite:** 10–12 realistic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), and Test (pytest assertion) errors.
+* [x] **Automated Benchmark Validation:** `COMPLETE` (ADR-0009)
+* [ ] **Live Integration Smoke Test:** `READY / PENDING OPERATOR EXECUTION`
+* **Benchmark Evaluation Suite:** 12 deterministic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), Test (pytest assertion), Low Confidence, Malformed Patch, Protected Path, Sandbox Failure, Human Rejection, Approval Expiry, Stale Commit, Duplicate Webhook, and End-to-End Mocked Delivery.
 * **Resilience & Latency Testing:** Verify timeout handling, sandbox resource limits, and error diagnostics across all pipeline stages.
-* **Audit Trail Verification:** Ensure complete traceability from failing GitHub Actions run $
-ightarrow$ Slack card $
-ightarrow$ PostgreSQL state $
-ightarrow$ Pull Request.
-* **V1 Release Sign-Off:** Final quality gate execution and production runbook validation.
+* **Operations Runbook:** Comprehensive manual created at `docs/07-operations/v1-validation-runbook.md`.
+* **V1 Release Sign-Off:** Automated quality gates pass 100%; final V1 release sign-off occurs upon operator verification of live smoke test.
