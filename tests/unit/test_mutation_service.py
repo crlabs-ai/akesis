@@ -26,6 +26,8 @@ from src.packages.shared.models import (
 )
 from src.packages.shared.mutation_service import (
     GitMutationService,
+    GitPushError,
+    MutationError,
     PreflightCheckError,
     PrePushValidationError,
     StaleCommitError,
@@ -558,3 +560,100 @@ async def test_existing_remote_pr_returns_record(
     record = await service.create_pull_request(context, proposal, validation, approval)
     assert record.status == MutationStatus.PR_CREATED
     assert record.pr_number == 55
+
+
+@pytest.mark.asyncio
+async def test_patch_apply_failure_aborts(
+    mock_git_repo: tuple[Path, str],
+    sample_mutation_data: tuple[FailureContext, FixProposal, ValidationResult, ApprovalRecord],
+) -> None:
+    repo_dir, _ = mock_git_repo
+    context, proposal, validation, approval = sample_mutation_data
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+
+    @asynccontextmanager
+    async def mock_repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo)
+
+    # Corrupt the diff to make git apply fail
+    proposal.unified_diff = "--- a/src.py\n+++ b/src.py\n@@ -100,1 +100,1 @@\n-x = 999\n+x = 1000\n"
+
+    service = GitMutationService(
+        repository_factory=mock_repo_factory,
+        github_client=MockGitHubClient(),
+        repo_checkout=MockRepoCheckout(repo_dir),
+        sandbox_runner=MockSandboxRunner(),
+    )
+
+    with pytest.raises(MutationError):
+        await service.create_pull_request(context, proposal, validation, approval)
+
+
+@pytest.mark.asyncio
+async def test_push_failure_prevents_pr(
+    mock_git_repo: tuple[Path, str],
+    sample_mutation_data: tuple[FailureContext, FixProposal, ValidationResult, ApprovalRecord],
+) -> None:
+    repo_dir, _ = mock_git_repo
+    context, proposal, validation, approval = sample_mutation_data
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+
+    @asynccontextmanager
+    async def mock_repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo)
+
+    gh_client = MockGitHubClient()
+    service = GitMutationService(
+        repository_factory=mock_repo_factory,
+        github_client=gh_client,
+        repo_checkout=MockRepoCheckout(repo_dir),
+        sandbox_runner=MockSandboxRunner(),
+    )
+
+    # Force git push to fail
+    def failing_push(repo: Any, branch_name: str) -> None:
+        raise GitPushError("Remote rejected push")
+
+    service._push_branch_safely = failing_push  # type: ignore[method-assign]
+
+    with pytest.raises(GitPushError):
+        await service.create_pull_request(context, proposal, validation, approval)
+
+    # Assert no PR was created
+    assert len(gh_client.created_prs) == 0
+
+
+@pytest.mark.asyncio
+async def test_github_permission_error_handled(
+    mock_git_repo: tuple[Path, str],
+    sample_mutation_data: tuple[FailureContext, FixProposal, ValidationResult, ApprovalRecord],
+) -> None:
+    repo_dir, _ = mock_git_repo
+    context, proposal, validation, approval = sample_mutation_data
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+
+    @asynccontextmanager
+    async def mock_repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo)
+
+    gh_client = MockGitHubClient(should_fail_perm=True)
+    service = GitMutationService(
+        repository_factory=mock_repo_factory,
+        github_client=gh_client,
+        repo_checkout=MockRepoCheckout(repo_dir),
+        sandbox_runner=MockSandboxRunner(),
+    )
+
+    from src.packages.sdk.github_client import GitHubPermissionError
+
+    with pytest.raises(GitHubPermissionError):
+        await service.create_pull_request(context, proposal, validation, approval)
