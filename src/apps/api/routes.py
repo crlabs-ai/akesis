@@ -23,9 +23,13 @@ from src.packages.shared.models import (
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
+from src.packages.shared.mutation_service import (
+    GitMutationService,
+)
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
+mutation_service = GitMutationService()
 
 
 def verify_github_signature(
@@ -212,7 +216,6 @@ async def handle_slack_interaction(
     """Receives and verifies Slack button interactions (Approve / Reject)."""
     raw_body = await request.body()
 
-    # 1. Verify Slack HMAC-SHA256 Signature
     is_valid = verify_slack_signature(
         raw_body=raw_body,
         timestamp=x_slack_request_timestamp,
@@ -226,7 +229,6 @@ async def handle_slack_interaction(
             detail="Invalid or expired Slack signature",
         )
 
-    # 2. Parse form-urlencoded payload containing 'payload' JSON
     try:
         body_str = raw_body.decode("utf-8")
         parsed_form = parse_qs(body_str)
