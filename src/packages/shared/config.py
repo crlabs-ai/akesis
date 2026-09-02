@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         description="Base REST URL for Gemini API",
     )
     gemini_timeout_seconds: float = Field(
-        default=30.0,
+        default=60.0,
         description="HTTP request timeout for LLM provider requests in seconds",
     )
 

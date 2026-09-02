@@ -213,3 +213,62 @@ def test_dereference_json_schema_inlines_defs() -> None:
     assert "$ref" not in resolved["properties"]["status"]
     assert resolved["properties"]["status"]["enum"] == ["pending", "active"]
     assert resolved["properties"]["status"]["type"] == "string"
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_network_failure_handled() -> None:
+    client = GeminiClient(
+        api_key="mock_key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).mock(side_effect=httpx.ConnectError("Connection refused"))
+        with pytest.raises(LLMError) as exc_info:
+            await client.generate_structured("prompt", DiagnosisProposal)
+        assert "network error" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_invalid_structured_schema_handled() -> None:
+    client = GeminiClient(
+        api_key="mock_key",
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    # Valid JSON but missing mandatory DiagnosisProposal fields
+    with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": "mock_key"},
+        ).respond(
+            status_code=200,
+            json={"candidates": [{"content": {"parts": [{"text": '{"wrong_key": 123}'}]}}]},
+        )
+        with pytest.raises(LLMResponseValidationError) as exc_info:
+            await client.generate_structured("prompt", DiagnosisProposal)
+        assert (
+            "validation error" in str(exc_info.value).lower()
+            or "failed to parse" in str(exc_info.value).lower()
+        )
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_error_never_leaks_api_key() -> None:
+    secret_key = "AIzaSySecretApiKey12345"
+    client = GeminiClient(
+        api_key=secret_key,
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    with respx.mock(base_url="https://generativelanguage.googleapis.com/v1beta") as respx_mock:
+        respx_mock.post(
+            f"/models/{client.model_name}:generateContent",
+            headers={"x-goog-api-key": secret_key},
+        ).respond(
+            status_code=400,
+            json={"error": {"message": f"Bad request for key {secret_key}"}},
+        )
+        with pytest.raises(LLMError) as exc_info:
+            await client.generate_structured("prompt", DiagnosisProposal)
+        assert secret_key not in str(exc_info.value)

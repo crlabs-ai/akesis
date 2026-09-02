@@ -854,3 +854,98 @@ async def test_orchestrator_mutation_failure_produces_failed_state(
     final_rec = await orch.resume_approval(approval_id=approval_id)
     assert final_rec.status == PipelineStatus.FAILED
     assert "Git push rejected" in (final_rec.failure_reason or "")
+
+
+# 14. Expired approval halts pipeline resumption.
+@pytest.mark.asyncio
+async def test_orchestrator_expired_approval_rejected(
+    sample_context: FailureContext,
+) -> None:
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+    pipe_repo = MockPipelineRepo()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[
+            ApprovalRepositoryProtocol,
+            MutationRepositoryProtocol,
+            PipelineRepositoryProtocol,
+        ]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=MockContextResolver(),
+        fix_service=MockFixService(),
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+
+    pipe_rec = await orch.process_failure(sample_context)
+    approval_id = pipe_rec.approval_id
+    assert approval_id is not None
+    await appr_repo.expire_approval(approval_id)
+
+    with pytest.raises(OrchestrationError, match="must be 'approved'"):
+        await orch.resume_approval(approval_id=approval_id)
+
+
+# 15. Protected target path causes proposal rejection.
+@pytest.mark.asyncio
+async def test_orchestrator_protected_target_rejection(
+    sample_context: FailureContext,
+) -> None:
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+    pipe_repo = MockPipelineRepo()
+
+    class ProtectedFixService:
+        async def generate_fix_proposal(self, *args: Any, **kwargs: Any) -> FixProposal:
+            return FixProposal(
+                proposal_id="prop_protected",
+                incident_id="inc_test_123",
+                diagnosis_id="diag_123",
+                commit_sha=sample_context.commit_sha,
+                status="rejected",
+                is_valid=False,
+                rejection_reasons=[
+                    "Target path '.github/workflows/ci.yml' matches protected security pattern."
+                ],
+                unified_diff="",
+                file_patches=[],
+                target_files=[".github/workflows/ci.yml"],
+                rationale="cannot modify workflow",
+                assumptions=[],
+                risk_level="high",
+                has_dependency_changes=False,
+                confidence_score=0.0,
+                created_at=datetime.now(UTC),
+            )
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[
+            ApprovalRepositoryProtocol,
+            MutationRepositoryProtocol,
+            PipelineRepositoryProtocol,
+        ]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=MockContextResolver(),
+        fix_service=ProtectedFixService(),
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+
+    pipe_rec = await orch.process_failure(sample_context)
+    assert pipe_rec.status == PipelineStatus.REJECTED
+    assert "matches protected security pattern" in (pipe_rec.failure_reason or "")

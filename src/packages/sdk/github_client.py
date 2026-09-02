@@ -1,3 +1,5 @@
+import io
+import zipfile
 from typing import Any, Protocol, cast
 
 import httpx
@@ -41,13 +43,13 @@ class GitHubResourceNotFoundError(GitHubAPIError):
 
 
 class GitHubConflictError(GitHubAPIError):
-    """Exception raised when a branch or Pull Request conflict occurs."""
+    """Exception raised on 409 Conflict or 422 Unprocessable Entity."""
 
     pass
 
 
 class GitHubClientProtocol(Protocol):
-    """Interface for GitHub integration and mutation client."""
+    """Interface for GitHub API interactions."""
 
     async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
         """Fetches workflow run metadata by ID."""
@@ -148,12 +150,35 @@ class GitHubClient:
                 return {}
 
     async def get_workflow_run_logs(self, owner: str, repo: str, run_id: int) -> str:
-        """Retrieves raw log text of a completed workflow run."""
+        """Retrieves raw log text of a completed workflow run, unzipping if returned as archive."""
         url = f"{self.base_url}/repos/{owner}/{repo}/actions/runs/{run_id}/logs"
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
             try:
                 res = await client.get(url, headers=self._get_headers())
                 res.raise_for_status()
+
+                # If GitHub returns a ZIP archive of individual step logs
+                if res.content.startswith(b"PK\x03\x04"):
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+                            log_parts: list[str] = []
+                            for name in sorted(z.namelist()):
+                                if name.endswith("/") or not name.endswith(".txt"):
+                                    continue
+                                info = z.getinfo(name)
+                                if info.is_dir():
+                                    continue
+                                txt = z.read(name).decode("utf-8", errors="replace")
+                                log_parts.append(f"=== {name} ===\n{txt}")
+                            return "\n\n".join(log_parts)
+                    except zipfile.BadZipFile as err:
+                        logger.error(
+                            "corrupted_workflow_logs_archive", run_id=run_id, error=str(err)
+                        )
+                        raise GitHubAPIError(
+                            f"Corrupted logs archive for run {run_id}: {err}"
+                        ) from err
+
                 return res.text
             except httpx.HTTPStatusError as err:
                 self._handle_error(err, f"Failed to get logs for run {run_id}")

@@ -196,3 +196,34 @@ def test_webhook_api_error_handled_safely() -> None:
         data = response.json()
         assert data["status"] == "accepted"
         assert data["category"] == "unknown"
+
+
+def test_openapi_endpoint() -> None:
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "paths" in data
+    assert "/health/liveness" in data["paths"]
+    assert "/health/readiness" in data["paths"]
+    assert "/v1/webhooks/github" in data["paths"]
+    assert "/v1/slack/interactions" in data["paths"]
+
+
+def test_slack_interactions_missing_signature() -> None:
+    resp = client.post(
+        "/v1/slack/interactions",
+        data={"payload": "{}"},
+    )
+    assert resp.status_code == 401
+
+
+def test_slack_interactions_invalid_signature() -> None:
+    resp = client.post(
+        "/v1/slack/interactions",
+        data={"payload": "{}"},
+        headers={
+            "X-Slack-Request-Timestamp": "1234567890",
+            "X-Slack-Signature": "v0=invalid",
+        },
+    )
+    assert resp.status_code == 401
