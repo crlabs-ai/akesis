@@ -51,7 +51,8 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 * [x] **Status:** `COMPLETE` (ADR-0005)
 * Dedicated validator image (`docker/Dockerfile.validator` → `akesis-validator:v1`).
 * Isolated execution (`--network none`, `--cap-drop ALL`, non-root, read-only mounts).
-* Verbatim patch application (`git apply --check` $ightarrow$ `git apply` without whitespace fixing).
+* Verbatim patch application (`git apply --check` $
+ightarrow$ `git apply` without whitespace fixing).
 * Deterministic command selection matrix (`pytest`, `ruff`, `mypy`, `python -m compileall`).
 
 ### Phase 6: Human-in-the-Loop Approval Gate & PostgreSQL Persistence
@@ -59,7 +60,8 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 * Durable PostgreSQL persistence (`approvals` table, `ApprovalModel`, `ApprovalRepository`).
 * Alembic async migration setup (`0001_create_approvals.py`).
 * Slack interactive Block Kit card dispatch and HMAC-SHA256 signature verification.
-* Atomic conditional state transitions (`pending` $ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
+* Atomic conditional state transitions (`pending` $
+ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 
 ### Phase 7: Controlled Git Mutation & GitHub PR Creation
 * [x] **Status:** `COMPLETE` (ADR-0007)
@@ -74,8 +76,8 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 
 ## Upcoming Phases
 
-### Phase 8: End-to-End Orchestrator Pipeline (NEXT)
-* [ ] **Status:** `READY FOR IMPLEMENTATION`
+### Phase 8: End-to-End Orchestrator Pipeline
+* [x] **Status:** `COMPLETE` (ADR-0008)
 * **RemediationOrchestrator:** Coordinate the end-to-end pipeline across all Phase 1–7 components.
 * **Non-Blocking Ingestion:** Webhook gateway immediately returns `202 Accepted` and delegates pipeline execution to an asynchronous background task.
 * **Approval Pause & Resume:** Pipeline dispatches Slack interactive cards and pauses; human decision at `/v1/slack/interactions` resumes `GitMutationService` to create the PR.
@@ -83,8 +85,10 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 * **Safety Invariant:** Human approval remains mandatory; zero autonomous mutation or auto-merging.
 
 ### Phase 9: Vertical Slice Validation, Benchmark Hardening & Release Sign-Off
-* [ ] **Status:** `SCHEDULED`
-* **Benchmark Evaluation Suite:** 10–12 realistic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), and Test (pytest assertion) errors.
+* [x] **Automated Benchmark Validation:** `COMPLETE` (ADR-0009)
+* [x] **Local Runtime Smoke Testing:** `COMPLETE` (HTTP 200/202/401 verified on local runtime)
+* [ ] **Live Integration Smoke Test:** `READY / PENDING OPERATOR EXECUTION`
+* **Benchmark Evaluation Suite:** 12 deterministic CI failure scenarios covering Lint (Ruff), Dependency (missing imports/lockfiles), Test (pytest assertion), Low Confidence, Malformed Patch, Protected Path, Sandbox Failure, Human Rejection, Approval Expiry, Stale Commit, Duplicate Webhook, and End-to-End Mocked Delivery.
 * **Resilience & Latency Testing:** Verify timeout handling, sandbox resource limits, and error diagnostics across all pipeline stages.
-* **Audit Trail Verification:** Ensure complete traceability from failing GitHub Actions run $ightarrow$ Slack card $ightarrow$ PostgreSQL state $ightarrow$ Pull Request.
-* **V1 Release Sign-Off:** Final quality gate execution and production runbook validation.
+* **Operations Runbook & Matrix:** Comprehensive manual and release matrix created at `docs/07-operations/v1-validation-runbook.md`.
+* **V1 Release Sign-Off:** Automated quality gates pass 100%; final V1 release sign-off occurs upon operator verification of live smoke test.

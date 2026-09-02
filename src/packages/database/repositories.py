@@ -4,13 +4,15 @@ from typing import Protocol
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.packages.database.models import ApprovalModel, MutationModel
+from src.packages.database.models import ApprovalModel, MutationModel, PipelineModel
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     ApprovalRecord,
     ApprovalStatus,
     MutationRecord,
     MutationStatus,
+    PipelineRecord,
+    PipelineStatus,
     ValidationStatus,
 )
 
@@ -75,6 +77,44 @@ class MutationRepositoryProtocol(Protocol):
         failure_reason: str | None = None,
     ) -> MutationRecord | None:
         """Updates mutation lifecycle state and metadata."""
+        ...
+
+
+class PipelineRepositoryProtocol(Protocol):
+    """Protocol defining persistence operations for end-to-end orchestration pipelines."""
+
+    async def create_pipeline(self, record: PipelineRecord) -> PipelineRecord:
+        """Persists a new pipeline record."""
+        ...
+
+    async def get_pipeline(self, pipeline_id: str) -> PipelineRecord | None:
+        """Retrieves a pipeline record by pipeline_id."""
+        ...
+
+    async def get_by_incident_id(self, incident_id: str) -> PipelineRecord | None:
+        """Retrieves a pipeline record by incident_id."""
+        ...
+
+    async def get_by_approval_id(self, approval_id: str) -> PipelineRecord | None:
+        """Retrieves a pipeline record by approval_id."""
+        ...
+
+    async def update_pipeline_state(
+        self,
+        pipeline_id: str,
+        status: PipelineStatus,
+        diagnosis_id: str | None = None,
+        proposal_id: str | None = None,
+        approval_id: str | None = None,
+        mutation_id: str | None = None,
+        pr_number: int | None = None,
+        pr_url: str | None = None,
+        failure_reason: str | None = None,
+        failure_context_json: str | None = None,
+        proposal_json: str | None = None,
+        validation_json: str | None = None,
+    ) -> PipelineRecord | None:
+        """Updates pipeline lifecycle state and stage identifiers."""
         ...
 
 
@@ -323,6 +363,142 @@ class MutationRepository:
             .where(MutationModel.mutation_id == mutation_id)
             .values(**values)
             .returning(MutationModel)
+        )
+        res = await self.session.execute(stmt)
+        model = res.scalar_one_or_none()
+        if model is not None:
+            await self.session.commit()
+            return self._to_domain(model)
+        return None
+
+
+class PipelineRepository:
+    """SQLAlchemy async implementation of PipelineRepositoryProtocol."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    def _to_domain(self, model: PipelineModel) -> PipelineRecord:
+        """Maps ORM model to Pydantic domain model."""
+        return PipelineRecord(
+            pipeline_id=model.pipeline_id,
+            incident_id=model.incident_id,
+            repository_owner=model.repository_owner,
+            repository_name=model.repository_name,
+            run_id=model.run_id,
+            commit_sha=model.commit_sha,
+            status=PipelineStatus(model.status),
+            diagnosis_id=model.diagnosis_id,
+            proposal_id=model.proposal_id,
+            approval_id=model.approval_id,
+            mutation_id=model.mutation_id,
+            pr_number=model.pr_number,
+            pr_url=model.pr_url,
+            failure_reason=model.failure_reason,
+            failure_context_json=model.failure_context_json,
+            proposal_json=model.proposal_json,
+            validation_json=model.validation_json,
+            created_at=model.created_at,
+            updated_at=model.updated_at,
+        )
+
+    async def create_pipeline(self, record: PipelineRecord) -> PipelineRecord:
+        """Persists a new pipeline record."""
+        model = PipelineModel(
+            pipeline_id=record.pipeline_id,
+            incident_id=record.incident_id,
+            repository_owner=record.repository_owner,
+            repository_name=record.repository_name,
+            run_id=record.run_id,
+            commit_sha=record.commit_sha,
+            status=record.status.value,
+            diagnosis_id=record.diagnosis_id,
+            proposal_id=record.proposal_id,
+            approval_id=record.approval_id,
+            mutation_id=record.mutation_id,
+            pr_number=record.pr_number,
+            pr_url=record.pr_url,
+            failure_reason=record.failure_reason,
+            failure_context_json=record.failure_context_json,
+            proposal_json=record.proposal_json,
+            validation_json=record.validation_json,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
+        self.session.add(model)
+        await self.session.commit()
+        await self.session.refresh(model)
+        logger.info("pipeline_record_created", pipeline_id=record.pipeline_id)
+        return self._to_domain(model)
+
+    async def get_pipeline(self, pipeline_id: str) -> PipelineRecord | None:
+        """Loads pipeline record from PostgreSQL by pipeline_id."""
+        stmt = select(PipelineModel).where(PipelineModel.pipeline_id == pipeline_id)
+        res = await self.session.execute(stmt)
+        model = res.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_by_incident_id(self, incident_id: str) -> PipelineRecord | None:
+        """Loads pipeline record by incident_id."""
+        stmt = select(PipelineModel).where(PipelineModel.incident_id == incident_id)
+        res = await self.session.execute(stmt)
+        model = res.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def get_by_approval_id(self, approval_id: str) -> PipelineRecord | None:
+        """Loads pipeline record by approval_id."""
+        stmt = select(PipelineModel).where(PipelineModel.approval_id == approval_id)
+        res = await self.session.execute(stmt)
+        model = res.scalar_one_or_none()
+        return self._to_domain(model) if model else None
+
+    async def update_pipeline_state(
+        self,
+        pipeline_id: str,
+        status: PipelineStatus,
+        diagnosis_id: str | None = None,
+        proposal_id: str | None = None,
+        approval_id: str | None = None,
+        mutation_id: str | None = None,
+        pr_number: int | None = None,
+        pr_url: str | None = None,
+        failure_reason: str | None = None,
+        failure_context_json: str | None = None,
+        proposal_json: str | None = None,
+        validation_json: str | None = None,
+    ) -> PipelineRecord | None:
+        """Updates pipeline lifecycle state and stage identifiers."""
+        now = datetime.now(UTC)
+        values: dict[str, object] = {
+            "status": status.value,
+            "updated_at": now,
+        }
+        if diagnosis_id is not None:
+            values["diagnosis_id"] = diagnosis_id
+        if proposal_id is not None:
+            values["proposal_id"] = proposal_id
+        if approval_id is not None:
+            values["approval_id"] = approval_id
+        if mutation_id is not None:
+            values["mutation_id"] = mutation_id
+        if pr_number is not None:
+            values["pr_number"] = pr_number
+        if pr_url is not None:
+            values["pr_url"] = pr_url
+        if failure_reason is not None:
+            values["failure_reason"] = failure_reason
+        if failure_context_json is not None:
+            values["failure_context_json"] = failure_context_json
+        if proposal_json is not None:
+            values["proposal_json"] = proposal_json
+        if validation_json is not None:
+            values["validation_json"] = validation_json
+
+        stmt = (
+            update(PipelineModel)
+            .where(PipelineModel.pipeline_id == pipeline_id)
+            .values(**values)
+            .returning(PipelineModel)
         )
         res = await self.session.execute(stmt)
         model = res.scalar_one_or_none()

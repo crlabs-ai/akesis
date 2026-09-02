@@ -262,3 +262,47 @@ def test_oversized_patch_rejected() -> None:
 
     assert result.is_valid is False
     assert any("exceeds maximum" in r for r in result.rejection_reasons)
+
+
+def test_test_file_only_patch_rejected(temp_repo: Path) -> None:
+    (temp_repo / "tests").mkdir(exist_ok=True)
+    (temp_repo / "tests" / "test_calc.py").write_text(
+        "def test_add(): assert 1 == 2\n", encoding="utf-8"
+    )
+    validator = PatchValidator()
+    diff = (
+        "--- a/tests/test_calc.py\n"
+        "+++ b/tests/test_calc.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-def test_add(): assert 1 == 2\n"
+        "+def test_add(): assert 1 == 1\n"
+    )
+    result = validator.validate_patch(
+        raw_diff=diff,
+        claimed_target_files=["tests/test_calc.py"],
+        repo_root=temp_repo,
+    )
+    assert result.is_valid is False
+    assert any("exclusively modifies test files" in r for r in result.rejection_reasons)
+
+
+def test_application_source_patch_accepted(temp_repo: Path) -> None:
+    (temp_repo / "src").mkdir(exist_ok=True)
+    (temp_repo / "src" / "calc.py").write_text(
+        "def add(a, b): return a + b + 1\n", encoding="utf-8"
+    )
+    validator = PatchValidator()
+    diff = (
+        "--- a/src/calc.py\n"
+        "+++ b/src/calc.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-def add(a, b): return a + b + 1\n"
+        "+def add(a, b): return a + b\n"
+    )
+    result = validator.validate_patch(
+        raw_diff=diff,
+        claimed_target_files=["src/calc.py"],
+        repo_root=temp_repo,
+    )
+    assert result.is_valid is True
+    assert result.target_files == ["src/calc.py"]

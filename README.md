@@ -62,6 +62,19 @@ akesis/
 
 ---
 
+
+## V1 Status & Architecture
+
+Akesis V1 is a self-healing CI/CD agent designed to ingest Python GitHub Actions failures, synthesize targeted fix proposals via Google Gemini, validate patches in isolated Docker sandboxes, require explicit human authorization via Slack, and deliver Pull Requests with full audit trails.
+
+* **Automated Benchmark Suite:** 12/12 vertical-slice scenarios passing (100% automated regression baseline).
+* **Local Runtime Verification:** Verified `/health/liveness`, `/health/readiness`, and webhook HMAC signature rejection/acceptance against local API runtime.
+* **Mandatory Human Approval:** Zero autonomous code mutations or auto-merges; all Git mutations require signed, durable human approval in PostgreSQL.
+* **Validation Engine:** Isolated Docker execution (`akesis-validator:v1`, `--network none`, `--cap-drop ALL`).
+* **Live Integration Readiness:** Live smoke test prepared and documented in [`docs/07-operations/v1-validation-runbook.md`](docs/07-operations/v1-validation-runbook.md).
+* **V1 Core Boundaries:** Single Python repository scope, max 2 target files / 100 patch lines, protected workflow file rejection.
+---
+
 ## Quality Gates & Verification
 
 All code merged to `main` must satisfy these criteria:

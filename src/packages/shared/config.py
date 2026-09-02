@@ -40,7 +40,7 @@ class Settings(BaseSettings):
         description="API key for Google Gemini model access",
     )
     gemini_model: str = Field(
-        default="gemini-1.5-flash",
+        default="gemini-2.5-flash",
         description="Gemini model identifier for diagnostic and fix analysis",
     )
     gemini_api_url: str = Field(
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         description="Base REST URL for Gemini API",
     )
     gemini_timeout_seconds: float = Field(
-        default=30.0,
+        default=60.0,
         description="HTTP request timeout for LLM provider requests in seconds",
     )
 
