@@ -949,3 +949,118 @@ async def test_orchestrator_protected_target_rejection(
     pipe_rec = await orch.process_failure(sample_context)
     assert pipe_rec.status == PipelineStatus.REJECTED
     assert "matches protected security pattern" in (pipe_rec.failure_reason or "")
+
+
+# 16. Context unavailable halts pipeline and prevents fix synthesis.
+@pytest.mark.asyncio
+async def test_orchestrator_halts_when_codebase_context_unavailable(
+    sample_context: FailureContext,
+) -> None:
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+    pipe_repo = MockPipelineRepo()
+
+    class UnavailableContextResolver:
+        def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
+            return EvidencePackage(
+                incident_id=sample_context.incident_id,
+                commit_sha=sample_context.commit_sha,
+                failure_context=sample_context,
+                code_evidences=[],
+                retrieval_status="unavailable",
+                retrieval_notes=["Repository checkout failed: GitCommandError"],
+            )
+
+    class SpyFixService:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def generate_fix_proposal(self, *args: Any, **kwargs: Any) -> FixProposal:
+            self.called = True
+            raise AssertionError("Fix service must NEVER be called when context is unavailable!")
+
+    spy_fix = SpyFixService()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[
+            ApprovalRepositoryProtocol,
+            MutationRepositoryProtocol,
+            PipelineRepositoryProtocol,
+        ]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=UnavailableContextResolver(),
+        fix_service=spy_fix,
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+
+    pipe_rec = await orch.process_failure(sample_context)
+    assert pipe_rec.status == PipelineStatus.FAILED
+    assert "Codebase context unavailable" in (pipe_rec.failure_reason or "")
+    assert spy_fix.called is False
+    # Verify no approval or mutation was created
+    assert pipe_rec.approval_id is None
+    assert pipe_rec.mutation_id is None
+
+
+# 17. Zero relevant source snippets halts pipeline and prevents fix synthesis.
+@pytest.mark.asyncio
+async def test_orchestrator_halts_when_zero_relevant_source_snippets(
+    sample_context: FailureContext,
+) -> None:
+    appr_repo = MockApprovalRepo()
+    mut_repo = MockMutationRepo()
+    pipe_repo = MockPipelineRepo()
+
+    class EmptyContextResolver:
+        def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
+            return EvidencePackage(
+                incident_id=sample_context.incident_id,
+                commit_sha=sample_context.commit_sha,
+                failure_context=sample_context,
+                code_evidences=[],
+                retrieval_status="empty",
+                retrieval_notes=["No target source file identified"],
+            )
+
+    class SpyFixService:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def generate_fix_proposal(self, *args: Any, **kwargs: Any) -> FixProposal:
+            self.called = True
+            raise AssertionError("Fix service must NEVER be called when source snippets are empty!")
+
+    spy_fix = SpyFixService()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[
+            ApprovalRepositoryProtocol,
+            MutationRepositoryProtocol,
+            PipelineRepositoryProtocol,
+        ]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=EmptyContextResolver(),
+        fix_service=spy_fix,
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+
+    pipe_rec = await orch.process_failure(sample_context)
+    assert pipe_rec.status == PipelineStatus.FAILED
+    assert "Codebase context unavailable" in (pipe_rec.failure_reason or "")
+    assert spy_fix.called is False

@@ -213,6 +213,32 @@ class RemediationOrchestrator:
                 failure_context=context,
             )
 
+            if (
+                evidence_pkg.retrieval_status in ("unavailable", "empty")
+                or len(evidence_pkg.code_evidences) == 0
+            ):
+                notes_msg = (
+                    "; ".join(evidence_pkg.retrieval_notes) or "No source code evidence available"
+                )
+                err_msg = (
+                    f"Remediation halted: Codebase context unavailable "
+                    f"({evidence_pkg.retrieval_status}): {notes_msg}"
+                )
+                logger.warning(
+                    "pipeline_halted_context_unavailable",
+                    incident_id=context.incident_id,
+                    retrieval_status=evidence_pkg.retrieval_status,
+                    notes=evidence_pkg.retrieval_notes,
+                )
+                async with self.repository_factory() as (_, _, pipe_repo):
+                    updated = await pipe_repo.update_pipeline_state(
+                        pipeline_id,
+                        PipelineStatus.FAILED,
+                        diagnosis_id=diag_id,
+                        failure_reason=err_msg,
+                    )
+                return updated or record
+
             # 4. Stage: Fix Synthesis
             async with self.repository_factory() as (_, _, pipe_repo):
                 await pipe_repo.update_pipeline_state(
