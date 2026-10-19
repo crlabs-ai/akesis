@@ -5,8 +5,20 @@ import uuid
 from typing import Any
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.packages.database.repositories import IncidentRepository, PipelineRepository
+from src.packages.database.session import get_db_session
 from src.packages.sdk.github_client import GitHubClient, GitHubResourceNotFoundError
 from src.packages.sdk.slack_client import verify_slack_signature
 from src.packages.shared.approval_service import (
@@ -19,13 +31,17 @@ from src.packages.shared.log_parser import filter_and_extract_signal
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     FailureContext,
+    IncidentDetail,
+    IncidentSummary,
     IngestionResponse,
+    PipelineSummary,
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
 from src.packages.shared.remediation_orchestrator import (
     RemediationOrchestrator,
 )
+from src.packages.shared.security import verify_read_token
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
@@ -312,3 +328,59 @@ async def handle_slack_interaction(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(err),
         ) from err
+
+
+@router.get(
+    "/v1/incidents",
+    response_model=list[IncidentSummary],
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="List incident summaries with pagination and deterministic ordering",
+)
+async def list_incidents(
+    limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> list[IncidentSummary]:
+    """Returns a list of lightweight incident summaries without diff_content."""
+    repo = IncidentRepository(session)
+    return await repo.list_incidents(limit=limit, offset=offset)
+
+
+@router.get(
+    "/v1/incidents/{incident_id}",
+    response_model=IncidentDetail,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="Get full incident detail by ID including diff_content and execution context",
+)
+async def get_incident(
+    incident_id: str,
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> IncidentDetail:
+    """Returns full incident detail including patch diff, proposals, and logs."""
+    repo = IncidentRepository(session)
+    incident = await repo.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found",
+        )
+    return incident
+
+
+@router.get(
+    "/v1/pipelines",
+    response_model=list[PipelineSummary],
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="List recent pipeline summaries with pagination and deterministic ordering",
+)
+async def list_pipelines(
+    limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> list[PipelineSummary]:
+    """Returns recent pipeline execution summaries from PostgreSQL."""
+    repo = PipelineRepository(session)
+    return await repo.list_recent_pipelines(limit=limit, offset=offset)

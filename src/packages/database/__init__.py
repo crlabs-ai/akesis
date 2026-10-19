@@ -7,6 +7,8 @@ from src.packages.database.models import (
 from src.packages.database.repositories import (
     ApprovalRepository,
     ApprovalRepositoryProtocol,
+    IncidentRepository,
+    IncidentRepositoryProtocol,
     MutationRepository,
     MutationRepositoryProtocol,
     PipelineRepository,
@@ -23,6 +25,8 @@ __all__ = [
     "ApprovalRepository",
     "ApprovalRepositoryProtocol",
     "Base",
+    "IncidentRepository",
+    "IncidentRepositoryProtocol",
     "MutationModel",
     "MutationRepository",
     "MutationRepositoryProtocol",

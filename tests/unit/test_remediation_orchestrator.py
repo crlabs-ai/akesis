@@ -26,6 +26,7 @@ from src.packages.shared.models import (
     MutationStatus,
     PipelineRecord,
     PipelineStatus,
+    PipelineSummary,
     RemediationDirection,
     ValidationResult,
     ValidationStatus,
@@ -140,6 +141,33 @@ class MockPipelineRepo(PipelineRepositoryProtocol):
             if r.approval_id == approval_id:
                 return r
         return None
+
+    async def list_recent_pipelines(
+        self, limit: int = 20, offset: int = 0
+    ) -> list[PipelineSummary]:
+        summaries: list[PipelineSummary] = []
+        for r in list(self.records.values())[offset : offset + limit]:
+            summaries.append(
+                PipelineSummary(
+                    pipeline_id=r.pipeline_id,
+                    incident_id=r.incident_id,
+                    repository_owner=r.repository_owner,
+                    repository_name=r.repository_name,
+                    run_id=r.run_id,
+                    commit_sha=r.commit_sha,
+                    status=r.status,
+                    diagnosis_id=r.diagnosis_id,
+                    proposal_id=r.proposal_id,
+                    approval_id=r.approval_id,
+                    mutation_id=r.mutation_id,
+                    pr_number=r.pr_number,
+                    pr_url=r.pr_url,
+                    failure_reason=r.failure_reason,
+                    created_at=r.created_at,
+                    updated_at=r.updated_at,
+                )
+            )
+        return summaries
 
     async def update_pipeline_state(
         self,
