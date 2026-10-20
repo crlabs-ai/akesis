@@ -63,49 +63,55 @@ def test_incident_detail_model_fields() -> None:
         created_at=now,
         updated_at=now,
         diff_content="--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-import os\n+import sys\n",
-        failure_context=FailureContext.model_validate({
-            "incident_id": "inc_test_123",
-            "repository_owner": "crlabs-ai",
-            "repository_name": "akesis",
-            "run_id": 123456789,
-            "workflow_name": "CI",
-            "commit_sha": "abcdef123456",
-            "branch": "main",
-            "run_url": "",
-            "conclusion": "failure",
-            "signal": {
-                "category": "lint",
-                "error_type": "RUFF_ERROR",
-                "failure_message": "Undefined variable",
-                "extracted_snippet": "F821 Undefined name",
-            },
-            "raw_log_excerpt": "F821 Undefined name",
-        }),
-        fix_proposal=FixProposal.model_validate({
-            "proposal_id": "prop_123",
-            "incident_id": "inc_test_123",
-            "commit_sha": "abcdef123456",
-            "status": "proposed",
-            "is_valid": True,
-            "rationale": "Remove unused import",
-            "risk_level": "low",
-            "confidence_score": 0.95,
-            "unified_diff": (
-                "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-import os\n+import sys\n"
-            ),
-        }),
-        validation_result=ValidationResult.model_validate({
-            "validation_id": "val_123",
-            "proposal_id": "prop_123",
-            "incident_id": "inc_test_123",
-            "commit_sha": "abcdef123456",
-            "status": "passed",
-            "command_executed": "pytest",
-            "exit_code": 0,
-            "stdout": "1 passed",
-            "stderr": "",
-            "duration_ms": 120.0,
-        }),
+        failure_context=FailureContext.model_validate(
+            {
+                "incident_id": "inc_test_123",
+                "repository_owner": "crlabs-ai",
+                "repository_name": "akesis",
+                "run_id": 123456789,
+                "workflow_name": "CI",
+                "commit_sha": "abcdef123456",
+                "branch": "main",
+                "run_url": "",
+                "conclusion": "failure",
+                "signal": {
+                    "category": "lint",
+                    "error_type": "RUFF_ERROR",
+                    "failure_message": "Undefined variable",
+                    "extracted_snippet": "F821 Undefined name",
+                },
+                "raw_log_excerpt": "F821 Undefined name",
+            }
+        ),
+        fix_proposal=FixProposal.model_validate(
+            {
+                "proposal_id": "prop_123",
+                "incident_id": "inc_test_123",
+                "commit_sha": "abcdef123456",
+                "status": "proposed",
+                "is_valid": True,
+                "rationale": "Remove unused import",
+                "risk_level": "low",
+                "confidence_score": 0.95,
+                "unified_diff": (
+                    "--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-import os\n+import sys\n"
+                ),
+            }
+        ),
+        validation_result=ValidationResult.model_validate(
+            {
+                "validation_id": "val_123",
+                "proposal_id": "prop_123",
+                "incident_id": "inc_test_123",
+                "commit_sha": "abcdef123456",
+                "status": "passed",
+                "command_executed": "pytest",
+                "exit_code": 0,
+                "stdout": "1 passed",
+                "stderr": "",
+                "duration_ms": 120.0,
+            }
+        ),
         traceback_excerpt="F821 Undefined name",
         sandbox_command="pytest",
         sandbox_exit_code=0,
