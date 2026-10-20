@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from src.packages.sdk.repo_checkout import (
@@ -247,6 +248,26 @@ class CodebaseContextResolver:
                     lines=f"{start_line}-{end_line}",
                     target_line=target_line,
                 )
+
+                # Recursively discover imported local Python modules as candidate context
+                if ext == ".py":
+                    for raw_l in lines:
+                        stripped = raw_l.strip()
+                        if stripped.startswith("from ") or stripped.startswith("import "):
+                            for pattern in (
+                                r"^from\s+([a-zA-Z0-9_\.]+)\s+import",
+                                r"^import\s+([a-zA-Z0-9_\.]+)",
+                            ):
+                                match = re.match(pattern, stripped)
+                                if match:
+                                    mod = match.group(1)
+                                    potential_rel = mod.replace(".", "/") + ".py"
+                                    if not any(c[0] == potential_rel for c in candidate_targets):
+                                        pot_safe = is_path_safe_and_within_root(
+                                            repo_root, potential_rel
+                                        )
+                                        if pot_safe and pot_safe.is_file():
+                                            candidate_targets.append((potential_rel, None))
 
             except Exception as err:
                 logger.error("file_read_error", path=clean_rel_path, error=str(err))

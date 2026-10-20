@@ -29,6 +29,13 @@ PROTECTED_PATH_PATTERNS = (
     ),
 )
 
+TEST_FILE_PATTERNS = (
+    re.compile(r"^tests?/", re.IGNORECASE),
+    re.compile(r"/tests?/", re.IGNORECASE),
+    re.compile(r"_test\.py$", re.IGNORECASE),
+    re.compile(r"test_[^/]+\.py$", re.IGNORECASE),
+)
+
 DEPENDENCY_PATH_PATTERNS = (
     re.compile(r"^pyproject\.toml$"),
     re.compile(r"^requirements(-\w+)?\.txt$"),
@@ -172,6 +179,15 @@ class PatchValidator:
                     f"Target path '{norm_path}' is neither grounded in evidence "
                     "nor verified to exist in repository."
                 )
+
+        # Rejection Rule: Disallow patches that exclusively modify test files
+        if all_target_files and all(
+            any(p.search(f) for p in TEST_FILE_PATTERNS) for f in all_target_files
+        ):
+            rejection_reasons.append(
+                "Proposed patch exclusively modifies test files. Test files cannot be "
+                "the primary mutation target for application defect remediation."
+            )
 
         # 6. Evaluate Risk Level
         risk_level = "low"

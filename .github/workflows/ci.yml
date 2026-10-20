@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/remediation-orchestrator
+  pull_request:
+    branches:
+      - main
+      - feat/remediation-orchestrator
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, Type Check & Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: akesis
+        ports:
+          - 5436:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis
+      GITHUB_WEBHOOK_SECRET: test_webhook_secret
+      SLACK_SIGNING_SECRET: test_slack_signing_secret
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Run database migrations
+        run: uv run alembic upgrade head
+
+      - name: Run Ruff linter
+        run: uv run ruff check .
+
+      - name: Run Ruff formatter check
+        run: uv run ruff format --check .
+
+      - name: Run MyPy static type analysis
+        run: uv run mypy src
+
+      - name: Run unit and integration tests with coverage
+        run: uv run pytest -v --cov=src --cov-report=term-missing tests/
+
+      - name: Run vertical-slice benchmark suite
+        run: uv run pytest -v tests/benchmark/test_vertical_slice_benchmarks.py

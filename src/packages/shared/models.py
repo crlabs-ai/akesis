@@ -476,6 +476,100 @@ class MutationRecord(BaseModel):
     )
 
 
+class PipelineStatus(StrEnum):
+    """Authoritative lifecycle state machine states for end-to-end remediation pipeline."""
+
+    RECEIVED = "received"
+    DIAGNOSING = "diagnosing"
+    PROPOSING = "proposing"
+    VALIDATING = "validating"
+    AWAITING_APPROVAL = "awaiting_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    MUTATING = "mutating"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class PipelineRecord(BaseModel):
+    """Authoritative representation of an end-to-end remediation orchestration pipeline entity."""
+
+    pipeline_id: str = Field(..., description="Unique pipeline execution identifier")
+    incident_id: str = Field(..., description="Associated CI incident identifier")
+    repository_owner: str = Field(..., description="Repository owner")
+    repository_name: str = Field(..., description="Repository name")
+    run_id: int = Field(..., description="GitHub workflow run identifier")
+    commit_sha: str = Field(..., description="Target commit SHA")
+    status: PipelineStatus = Field(
+        default=PipelineStatus.RECEIVED,
+        description="Current orchestration pipeline status",
+    )
+    diagnosis_id: str | None = Field(default=None, description="Associated diagnosis identifier")
+    proposal_id: str | None = Field(default=None, description="Associated fix proposal identifier")
+    approval_id: str | None = Field(
+        default=None, description="Associated approval record identifier"
+    )
+    mutation_id: str | None = Field(
+        default=None, description="Associated mutation record identifier"
+    )
+    pr_number: int | None = Field(
+        default=None, description="Created Pull Request number if completed"
+    )
+    pr_url: str | None = Field(default=None, description="Created Pull Request URL if completed")
+    failure_reason: str | None = Field(
+        default=None, description="Summary explanation if pipeline stopped or failed"
+    )
+    failure_context_json: str | None = Field(
+        default=None, description="Durable JSON serialization of FailureContext"
+    )
+    proposal_json: str | None = Field(
+        default=None, description="Durable JSON serialization of validated FixProposal"
+    )
+    validation_json: str | None = Field(
+        default=None, description="Durable JSON serialization of ValidationResult"
+    )
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Pipeline initiation timestamp",
+    )
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        description="Pipeline last update timestamp",
+    )
+
+
+class PipelineSummary(BaseModel):
+    """Lightweight summary representation of a pipeline execution for API list views."""
+
+    pipeline_id: str = Field(..., description="Unique pipeline execution identifier")
+    incident_id: str = Field(..., description="Associated CI incident identifier")
+    repository_owner: str = Field(..., description="Repository owner")
+    repository_name: str = Field(..., description="Repository name")
+    run_id: int = Field(..., description="GitHub workflow run identifier")
+    commit_sha: str = Field(..., description="Target commit SHA")
+    status: PipelineStatus = Field(
+        default=PipelineStatus.RECEIVED,
+        description="Current orchestration pipeline status",
+    )
+    diagnosis_id: str | None = Field(default=None, description="Associated diagnosis identifier")
+    proposal_id: str | None = Field(default=None, description="Associated fix proposal identifier")
+    approval_id: str | None = Field(
+        default=None, description="Associated approval record identifier"
+    )
+    mutation_id: str | None = Field(
+        default=None, description="Associated mutation record identifier"
+    )
+    pr_number: int | None = Field(
+        default=None, description="Created Pull Request number if completed"
+    )
+    pr_url: str | None = Field(default=None, description="Created Pull Request URL if completed")
+    failure_reason: str | None = Field(
+        default=None, description="Summary explanation if pipeline stopped or failed"
+    )
+    created_at: datetime = Field(..., description="Pipeline initiation timestamp")
+    updated_at: datetime = Field(..., description="Pipeline last update timestamp")
+
+
 class IngestionResponse(BaseModel):
     """HTTP response payload returned by the webhook ingestion gateway."""
 
@@ -483,3 +577,62 @@ class IngestionResponse(BaseModel):
     incident_id: str | None = Field(default=None, description="Generated incident identifier")
     message: str = Field(..., description="Human-readable processing summary")
     category: str | None = Field(default=None, description="Extracted category if processed")
+
+
+class IncidentSummary(BaseModel):
+    """Lightweight summary representation of an incident for list views without diff content."""
+
+    incident_id: str = Field(..., description="Unique Akesis incident identifier")
+    repository: str = Field(..., description="Repository in owner/name format")
+    run_id: int = Field(..., description="GitHub Actions workflow run identifier")
+    commit_sha: str = Field(..., description="Target failing commit SHA")
+    workflow_name: str = Field(..., description="Display name of the CI workflow")
+    branch: str = Field(..., description="Git branch of the workflow run")
+    category: str = Field(..., description="Classified failure category")
+    error_type: str = Field(..., description="Identified error type or exception class")
+    failure_message: str = Field(..., description="Primary error message or assertion snippet")
+    current_stage: str = Field(..., description="Current pipeline lifecycle stage")
+    approval_status: str | None = Field(
+        default=None, description="Current approval status if reached"
+    )
+    approval_id: str | None = Field(
+        default=None, description="Associated approval identifier if reached"
+    )
+    target_file: str | None = Field(default=None, description="Primary failing source file path")
+    target_line: int | None = Field(default=None, description="Primary failing line number")
+    pr_number: int | None = Field(
+        default=None, description="Created Pull Request number if completed"
+    )
+    pr_url: str | None = Field(default=None, description="Created Pull Request URL if completed")
+    created_at: datetime = Field(..., description="Timestamp when incident was ingested")
+    updated_at: datetime = Field(..., description="Timestamp of latest status update")
+
+
+class IncidentDetail(IncidentSummary):
+    """Detailed representation of an incident with full diff and validation context."""
+
+    diff_content: str | None = Field(default=None, description="Full unified diff patch content")
+    failure_context: FailureContext | None = Field(
+        default=None, description="Complete failure context object"
+    )
+    fix_proposal: FixProposal | None = Field(
+        default=None, description="Validated fix proposal object"
+    )
+    validation_result: ValidationResult | None = Field(
+        default=None, description="Sandbox validation result object"
+    )
+    traceback_excerpt: str | None = Field(
+        default=None, description="Extracted traceback or log snippet"
+    )
+    sandbox_command: str | None = Field(
+        default=None, description="Command executed in sandbox validator"
+    )
+    sandbox_exit_code: int | None = Field(
+        default=None, description="Exit code returned by sandbox execution"
+    )
+    sandbox_stdout: str | None = Field(
+        default=None, description="Captured stdout from sandbox validator"
+    )
+    sandbox_stderr: str | None = Field(
+        default=None, description="Captured stderr from sandbox validator"
+    )

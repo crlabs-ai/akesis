@@ -1,4 +1,7 @@
-from pydantic import Field
+import json
+from typing import Any
+
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +16,52 @@ class Settings(BaseSettings):
 
     environment: str = Field(default="development", description="Runtime environment")
     log_level: str = Field(default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR")
+
+    # API Security & Authentication
+    read_api_token: str = Field(
+        default="",
+        description="Shared secret required for Read API access when configured",
+    )
+
+    # CORS Configuration
+    cors_allowed_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:5173",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+        ],
+        description="Allowed CORS origin URLs",
+    )
+    cors_allow_credentials: bool = Field(
+        default=False,
+        description="Whether to allow credentials in CORS requests",
+    )
+    cors_allowed_methods: list[str] = Field(
+        default_factory=lambda: ["GET", "POST", "OPTIONS"],
+        description="Allowed HTTP methods for CORS requests",
+    )
+    cors_allowed_headers: list[str] = Field(
+        default_factory=lambda: [
+            "Content-Type",
+            "X-Akesis-Read-Token",
+            "X-Hub-Signature-256",
+            "X-GitHub-Event",
+            "X-Slack-Signature",
+            "X-Slack-Request-Timestamp",
+            "X-Request-ID",
+            "Authorization",
+        ],
+        description="Allowed HTTP headers for CORS requests",
+    )
+
+    # Trusted Host Protection
+    trusted_hosts: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "testserver", "test"],
+        description="Allowed hosts for TrustedHostMiddleware",
+    )
 
     # Database Configuration
     database_url: str = Field(
@@ -40,7 +89,7 @@ class Settings(BaseSettings):
         description="API key for Google Gemini model access",
     )
     gemini_model: str = Field(
-        default="gemini-1.5-flash",
+        default="gemini-2.5-flash",
         description="Gemini model identifier for diagnostic and fix analysis",
     )
     gemini_api_url: str = Field(
@@ -48,7 +97,7 @@ class Settings(BaseSettings):
         description="Base REST URL for Gemini API",
     )
     gemini_timeout_seconds: float = Field(
-        default=30.0,
+        default=60.0,
         description="HTTP request timeout for LLM provider requests in seconds",
     )
 
@@ -135,6 +184,114 @@ class Settings(BaseSettings):
         default=24,
         description="Hours before a pending human approval request expires",
     )
+
+    @field_validator(
+        "cors_allowed_origins",
+        "cors_allowed_methods",
+        "cors_allowed_headers",
+        "trusted_hosts",
+        mode="before",
+    )
+    @classmethod
+    def _parse_list_from_str(cls, value: Any) -> list[str] | Any:
+        """Parses comma-separated strings or JSON arrays into list[str]."""
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed]
+                except json.JSONDecodeError:
+                    pass
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @model_validator(mode="after")
+    def _validate_production_configuration(self) -> "Settings":
+        """Enforces strict fail-fast validation for production deployments."""
+        is_prod = self.environment.lower() in ("production", "prod")
+        if not is_prod:
+            return self
+
+        errors: list[str] = []
+
+        # Database validation
+        if not self.database_url:
+            errors.append("DATABASE_URL is required in production.")
+        elif "postgrespassword" in self.database_url or "localhost:5436" in self.database_url:
+            errors.append(
+                "DATABASE_URL contains default/development credentials or localhost address."
+            )
+
+        # GitHub Secrets validation
+        insecure_webhook_secrets = {
+            "test_webhook_secret",
+            "your_github_webhook_secret_here",
+            "secret",
+            "placeholder",
+        }
+        if not self.github_webhook_secret or self.github_webhook_secret in insecure_webhook_secrets:
+            errors.append("GITHUB_WEBHOOK_SECRET is missing or using an insecure test placeholder.")
+
+        if not self.github_token or self.github_token == "your_github_token_here":
+            errors.append("GITHUB_TOKEN is required in production.")
+
+        # Gemini API Key validation
+        if not self.gemini_api_key or self.gemini_api_key == "your_gemini_api_key_here":
+            errors.append("GEMINI_API_KEY is required in production.")
+
+        # Slack Integration validation
+        insecure_slack_webhooks = {
+            "https://hooks.slack.com/services/...",
+            "your_slack_webhook_url_here",
+            "placeholder",
+        }
+        if not self.slack_webhook_url or self.slack_webhook_url in insecure_slack_webhooks:
+            errors.append("SLACK_WEBHOOK_URL is missing or using an insecure placeholder.")
+
+        insecure_slack_secrets = {
+            "test_slack_signing_secret",
+            "your_slack_signing_secret_here",
+            "placeholder",
+        }
+        if not self.slack_signing_secret or self.slack_signing_secret in insecure_slack_secrets:
+            errors.append("SLACK_SIGNING_SECRET is missing or using an insecure placeholder.")
+
+        # CORS validation
+        if not self.cors_allowed_origins:
+            errors.append(
+                "CORS_ALLOWED_ORIGINS must be configured with explicit origins in production."
+            )
+        elif any(origin == "*" or "*" in origin for origin in self.cors_allowed_origins):
+            errors.append("CORS_ALLOWED_ORIGINS must not contain wildcard '*' in production.")
+
+        # Trusted Hosts validation
+        if not self.trusted_hosts:
+            errors.append("TRUSTED_HOSTS must be explicitly configured in production.")
+        elif any(host == "*" or "*" in host for host in self.trusted_hosts):
+            errors.append("TRUSTED_HOSTS must not contain wildcard '*' in production.")
+
+        # Read API Token distinctness check
+        if self.read_api_token:
+            secret_pool = {
+                self.github_webhook_secret,
+                self.github_token,
+                self.gemini_api_key,
+                self.slack_signing_secret,
+            }
+            if self.read_api_token in secret_pool:
+                errors.append(
+                    "READ_API_TOKEN must be distinct from GitHub, Gemini, and Slack credentials."
+                )
+
+        if errors:
+            raise ValueError(
+                "Production configuration validation failed with "
+                f"{len(errors)} error(s):\n- " + "\n- ".join(errors)
+            )
+
+        return self
 
 
 # Singleton settings instance

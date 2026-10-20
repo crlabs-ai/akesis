@@ -5,8 +5,20 @@ import uuid
 from typing import Any
 from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.packages.database.repositories import IncidentRepository, PipelineRepository
+from src.packages.database.session import get_db_session
 from src.packages.sdk.github_client import GitHubClient, GitHubResourceNotFoundError
 from src.packages.sdk.slack_client import verify_slack_signature
 from src.packages.shared.approval_service import (
@@ -19,17 +31,39 @@ from src.packages.shared.log_parser import filter_and_extract_signal
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     FailureContext,
+    IncidentDetail,
+    IncidentSummary,
     IngestionResponse,
+    PipelineSummary,
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
-from src.packages.shared.mutation_service import (
-    GitMutationService,
+from src.packages.shared.remediation_orchestrator import (
+    RemediationOrchestrator,
 )
+from src.packages.shared.security import verify_read_token
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
-mutation_service = GitMutationService()
+orchestrator = RemediationOrchestrator()
+
+
+async def _safe_process_failure(context: FailureContext) -> None:
+    """Executes failure processing in background, catching all exceptions."""
+    try:
+        await orchestrator.process_failure(context)
+    except Exception as err:
+        logger.error(
+            "background_process_failure_error", error=str(err), incident_id=context.incident_id
+        )
+
+
+async def _safe_resume_approval(approval_id: str) -> None:
+    """Executes approval resumption in background, catching all exceptions."""
+    try:
+        await orchestrator.resume_approval(approval_id)
+    except Exception as err:
+        logger.error("background_resume_approval_error", error=str(err), approval_id=approval_id)
 
 
 def verify_github_signature(
@@ -57,15 +91,16 @@ def verify_github_signature(
 @router.post(
     "/v1/webhooks/github",
     response_model=IngestionResponse,
-    status_code=status.HTTP_200_OK,
-    summary="Ingest GitHub webhook events",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest GitHub webhook events and trigger remediation asynchronously",
 )
 async def handle_github_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
     x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
 ) -> IngestionResponse:
-    """Receives, verifies, and normalizes GitHub webhook events for CI failure remediation."""
+    """Receives and verifies webhook events, launching orchestration asynchronously."""
     payload_bytes = await request.body()
 
     # 1. Security Check: HMAC Signature Verification
@@ -186,34 +221,30 @@ async def handle_github_webhook(
         raw_log_excerpt=signal.extracted_snippet,
     )
 
-    logger.info(
-        "Constructed failure context",
-        incident_id=failure_context.incident_id,
-        category=signal.category,
-        error_type=signal.error_type,
-        target_file=signal.target_file,
-    )
+    # 8. Schedule Orchestration Pipeline Non-Blockingly in Background Task
+    background_tasks.add_task(_safe_process_failure, failure_context)
 
     target_display = signal.target_file or "unknown file"
     return IngestionResponse(
         status="accepted",
         incident_id=incident_id,
         category=signal.category,
-        message=f"Failure successfully diagnosed: {signal.error_type} in {target_display}",
+        message=f"Remediation pipeline scheduled for {signal.error_type} in {target_display}",
     )
 
 
 @router.post(
     "/v1/slack/interactions",
     status_code=status.HTTP_200_OK,
-    summary="Handle Slack interactive component callbacks",
+    summary="Handle Slack interactive component callbacks and resume orchestration",
 )
 async def handle_slack_interaction(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),
     x_slack_request_timestamp: str | None = Header(default=None, alias="X-Slack-Request-Timestamp"),
 ) -> dict[str, Any]:
-    """Receives and verifies Slack button interactions (Approve / Reject)."""
+    """Receives and verifies Slack button interactions, resuming orchestration on approval."""
     raw_body = await request.body()
 
     is_valid = verify_slack_signature(
@@ -266,12 +297,21 @@ async def handle_slack_interaction(
     decision = "approve" if action_id == "approve_fix" else "reject"
 
     try:
+        # 1. Authoritative decision recorded in PostgreSQL
         record, is_duplicate = await approval_service.record_decision(
             approval_id=approval_id,
             decision=decision,
             decided_by=user_name,
             response_url=response_url,
         )
+
+        # 2. Resume pipeline in background task if approved
+        if not is_duplicate and record.status.value == "approved":
+            background_tasks.add_task(
+                _safe_resume_approval,
+                approval_id=record.approval_id,
+            )
+
         return {
             "status": "ok",
             "approval_id": record.approval_id,
@@ -288,3 +328,59 @@ async def handle_slack_interaction(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(err),
         ) from err
+
+
+@router.get(
+    "/v1/incidents",
+    response_model=list[IncidentSummary],
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="List incident summaries with pagination and deterministic ordering",
+)
+async def list_incidents(
+    limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> list[IncidentSummary]:
+    """Returns a list of lightweight incident summaries without diff_content."""
+    repo = IncidentRepository(session)
+    return await repo.list_incidents(limit=limit, offset=offset)
+
+
+@router.get(
+    "/v1/incidents/{incident_id}",
+    response_model=IncidentDetail,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="Get full incident detail by ID including diff_content and execution context",
+)
+async def get_incident(
+    incident_id: str,
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> IncidentDetail:
+    """Returns full incident detail including patch diff, proposals, and logs."""
+    repo = IncidentRepository(session)
+    incident = await repo.get_incident(incident_id)
+    if incident is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident '{incident_id}' not found",
+        )
+    return incident
+
+
+@router.get(
+    "/v1/pipelines",
+    response_model=list[PipelineSummary],
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(verify_read_token)],
+    summary="List recent pipeline summaries with pagination and deterministic ordering",
+)
+async def list_pipelines(
+    limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
+) -> list[PipelineSummary]:
+    """Returns recent pipeline execution summaries from PostgreSQL."""
+    repo = PipelineRepository(session)
+    return await repo.list_recent_pipelines(limit=limit, offset=offset)

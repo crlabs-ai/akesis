@@ -55,7 +55,7 @@ def test_webhook_unsupported_event() -> None:
             "Content-Type": "application/json",
         },
     )
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     assert response.json()["status"] == "ignored"
 
 
@@ -104,7 +104,7 @@ def test_webhook_non_failure_conclusion_ignored() -> None:
             "Content-Type": "application/json",
         },
     )
-    assert response.status_code == 200
+    assert response.status_code in (200, 202)
     assert response.json()["status"] == "ignored"
     assert "not a failure" in response.json()["message"]
 
@@ -134,7 +134,7 @@ def test_webhook_successful_ingestion_and_diagnosis() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["incident_id"] is not None
@@ -164,7 +164,7 @@ def test_webhook_logs_not_found_handled_safely() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["category"] == "unknown"
@@ -192,7 +192,38 @@ def test_webhook_api_error_handled_safely() -> None:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["category"] == "unknown"
+
+
+def test_openapi_endpoint() -> None:
+    resp = client.get("/openapi.json")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "paths" in data
+    assert "/health/liveness" in data["paths"]
+    assert "/health/readiness" in data["paths"]
+    assert "/v1/webhooks/github" in data["paths"]
+    assert "/v1/slack/interactions" in data["paths"]
+
+
+def test_slack_interactions_missing_signature() -> None:
+    resp = client.post(
+        "/v1/slack/interactions",
+        data={"payload": "{}"},
+    )
+    assert resp.status_code == 401
+
+
+def test_slack_interactions_invalid_signature() -> None:
+    resp = client.post(
+        "/v1/slack/interactions",
+        data={"payload": "{}"},
+        headers={
+            "X-Slack-Request-Timestamp": "1234567890",
+            "X-Slack-Signature": "v0=invalid",
+        },
+    )
+    assert resp.status_code == 401

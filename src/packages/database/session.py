@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
@@ -15,15 +16,17 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def get_engine(database_url: str | None = None, is_test: bool = False) -> AsyncEngine:
-    """Returns or initializes the async SQLAlchemy engine."""
+    """Returns or initializes the async SQLAlchemy engine.
+
+    Automatically uses NullPool under pytest and test environments to eliminate
+    cross-test event-loop connection reuse errors while preserving connection
+    pre-ping in production.
+    """
     global _engine
+    is_testing = is_test or settings.environment == "test" or "PYTEST_CURRENT_TEST" in os.environ
     if _engine is None or database_url is not None:
         url = database_url or settings.database_url
-        pool_kwargs = (
-            {"poolclass": NullPool}
-            if is_test or settings.environment == "test"
-            else {"pool_pre_ping": True}
-        )
+        pool_kwargs = {"poolclass": NullPool} if is_testing else {"pool_pre_ping": True}
         _engine = create_async_engine(
             url,
             echo=False,
@@ -38,8 +41,9 @@ def get_session_factory(
 ) -> async_sessionmaker[AsyncSession]:
     """Returns or initializes the async session maker."""
     global _session_factory
+    is_testing = is_test or settings.environment == "test" or "PYTEST_CURRENT_TEST" in os.environ
     if _session_factory is None or database_url is not None:
-        engine = get_engine(database_url, is_test=is_test)
+        engine = get_engine(database_url, is_test=is_testing)
         _session_factory = async_sessionmaker(
             bind=engine,
             expire_on_commit=False,

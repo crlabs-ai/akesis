@@ -4,10 +4,12 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from src.apps.api.routes import router as webhook_router
 from src.packages.database.session import get_engine
-from src.packages.shared.config import settings
+from src.packages.shared.config import Settings, settings
 from src.packages.shared.logging import configure_logging, get_logger
 
 logger = get_logger("akesis.api")
@@ -28,8 +30,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Akesis Ingestion Gateway shutting down")
 
 
-def create_app() -> FastAPI:
+def create_app(app_settings: Settings | None = None) -> FastAPI:
     """Factory creating the configured FastAPI application."""
+    active_settings = app_settings or settings
+
     app = FastAPI(
         title="Akesis API Gateway",
         description="CI/CD Failure Ingestion and Deterministic Log Signal Extraction",
@@ -37,6 +41,22 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # 1. TrustedHostMiddleware (outermost host header validation)
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=active_settings.trusted_hosts,
+    )
+
+    # 2. CORSMiddleware (cross-origin resource sharing policy)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=active_settings.cors_allowed_origins,
+        allow_credentials=active_settings.cors_allow_credentials,
+        allow_methods=active_settings.cors_allowed_methods,
+        allow_headers=active_settings.cors_allowed_headers,
+    )
+
+    # 3. Request correlation middleware
     @app.middleware("http")
     async def request_correlation_middleware(
         request: Request,
@@ -57,7 +77,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health/readiness", tags=["Health"])
     async def readiness() -> dict[str, str]:
-        return {"status": "ready", "environment": settings.environment}
+        return {"status": "ready", "environment": active_settings.environment}
 
     app.include_router(webhook_router)
     return app

@@ -6,9 +6,14 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.packages.database.repositories import ApprovalRepository
+from src.packages.database.repositories import ApprovalRepository, PipelineRepository
 from src.packages.shared.config import settings
-from src.packages.shared.models import ApprovalRecord, ApprovalStatus
+from src.packages.shared.models import (
+    ApprovalRecord,
+    ApprovalStatus,
+    PipelineRecord,
+    PipelineStatus,
+)
 
 
 @pytest.fixture
@@ -174,3 +179,39 @@ async def test_invalid_approval_lookup(
         repo = ApprovalRepository(session)
         res = await repo.get_approval("non_existent_approval_id")
         assert res is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_id_bigint_persistence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    unique_suffix = f"{now.timestamp():.6f}".replace(".", "_")
+    # Real GitHub Actions run IDs exceed int32 range (> 2,147,483,647)
+    big_run_id = 33530784201
+
+    pipeline_record = PipelineRecord(
+        pipeline_id=f"pipe_test_bigint_{unique_suffix}",
+        incident_id=f"inc_test_bigint_{unique_suffix}",
+        repository_owner="crlabs-ai",
+        repository_name="akesis",
+        run_id=big_run_id,
+        commit_sha="a1b2c3d4e5f67890123456789abcdef012345678",
+        status=PipelineStatus.RECEIVED,
+        created_at=now,
+        updated_at=now,
+    )
+
+    async with session_factory() as session:
+        repo = PipelineRepository(session)
+        created = await repo.create_pipeline(pipeline_record)
+        assert created.run_id == big_run_id
+        assert created.pipeline_id == pipeline_record.pipeline_id
+
+    # Verify persistence and retrieval in separate session
+    async with session_factory() as session:
+        repo = PipelineRepository(session)
+        fetched = await repo.get_pipeline(pipeline_record.pipeline_id)
+        assert fetched is not None
+        assert fetched.run_id == big_run_id
+        assert fetched.run_id > 2_147_483_647

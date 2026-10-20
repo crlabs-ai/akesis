@@ -79,6 +79,22 @@ class FixProposalService:
                 confidence_score=diag_proposal.confidence_score,
             )
 
+        # Verify Codebase Context Evidence Availability
+        if (
+            evidence_package is None
+            or evidence_package.retrieval_status in ("unavailable", "empty")
+            or not evidence_package.code_evidences
+        ):
+            reason = (
+                f"Ineligible for automated fix: Codebase context unavailable "
+                f"({getattr(evidence_package, 'retrieval_status', 'none')}). "
+                "Application code modification requires verified repository source evidence."
+            )
+            logger.warning(
+                "fix_generation_context_unavailable", incident_id=incident_id, reason=reason
+            )
+            return self._build_rejected_proposal(proposal_id, incident_id, commit_sha, reason)
+
         # 2. Build Fix Prompt
         system_instruction = self.prompt_builder.build_system_instruction()
         user_prompt = self.prompt_builder.build_user_prompt(

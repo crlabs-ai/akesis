@@ -277,7 +277,9 @@ PENDING ──► APPLYING ──► VALIDATED ──► COMMITTED ──► PUS
 
 ### 5.1 GitHub Inbound HMAC Verification
 ```python
-def verify_github_signature(payload_bytes: bytes, signature_header: str | None, secret: str) -> bool:
+def verify_github_signature(
+    payload_bytes: bytes, signature_header: str | None, secret: str
+) -> bool:
     if not signature_header or not secret or not signature_header.startswith("sha256="):
         return False
     expected = signature_header.removeprefix("sha256=")
@@ -287,13 +289,24 @@ def verify_github_signature(payload_bytes: bytes, signature_header: str | None, 
 
 ### 5.2 Slack Interaction Signature & Replay Prevention
 ```python
-def verify_slack_signature(raw_body: bytes, timestamp: str | None, signature: str | None, signing_secret: str, max_age_seconds: int = 300) -> bool:
+def verify_slack_signature(
+    raw_body: bytes,
+    timestamp: str | None,
+    signature: str | None,
+    signing_secret: str,
+    max_age_seconds: int = 300,
+) -> bool:
     if not timestamp or not signature or not signing_secret:
         return False
     if abs(int(time.time()) - int(timestamp)) > max_age_seconds:
         return False
     sig_basestring = f"v0:{timestamp}:{raw_body.decode('utf-8', errors='replace')}"
-    computed = "v0=" + hmac.new(signing_secret.encode("utf-8"), sig_basestring.encode("utf-8"), hashlib.sha256).hexdigest()
+    computed = (
+        "v0="
+        + hmac.new(
+            signing_secret.encode("utf-8"), sig_basestring.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+    )
     return hmac.compare_digest(computed, signature)
 ```
 

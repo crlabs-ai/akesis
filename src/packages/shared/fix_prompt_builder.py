@@ -25,7 +25,9 @@ class FixPromptBuilder:
             "5. BUDGET LIMITS: Modify at most 2 files and produce fewer than 100 lines of diff.\n"
             "6. HONEST UNCERTAINTY: If you cannot produce a safe fix, set confidence <= 0.3.\n"
             "7. NO COMMAND EXECUTION: Do NOT execute commands or claim you executed commands.\n"
-            "8. STRUCTURED OUTPUT: Return strictly conforming JSON matching the schema."
+            "8. STRUCTURED OUTPUT: Return strictly conforming JSON matching the schema.\n"
+            "9. APPLICATION TARGET: Target application source files (e.g. in src/), "
+            "NOT test files. Never modify tests to mask application defects."
         )
 
     @staticmethod

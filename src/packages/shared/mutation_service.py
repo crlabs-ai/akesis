@@ -378,7 +378,7 @@ class GitMutationService:
 
             # 7. Post-patch pre-push validation
             post_val = await self.validation_service.validate_fix(
-                proposal=proposal, context=context, repo_root=temp_dir
+                proposal=proposal, context=context, repo_root=source_dir
             )
             if post_val.status != ValidationStatus.PASSED or post_val.exit_code != 0:
                 err_msg = (
