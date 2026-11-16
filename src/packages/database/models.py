@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Integer, String, Text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -8,6 +8,49 @@ class Base(DeclarativeBase):
     """SQLAlchemy Declarative Base for Akesis database models."""
 
     pass
+
+
+class WebhookEventModel(Base):
+    """Signed delivery metadata and its non-actionable verification lifecycle."""
+
+    __tablename__ = "webhook_events"
+    __table_args__ = (
+        Index("ix_webhook_events_due", "status", "next_retry_at"),
+        Index("ix_webhook_events_listing", "updated_at", "delivery_id"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str | None] = mapped_column(String(64))
+    # Authenticated event claims used to rebuild verification input; not verified provenance.
+    workflow_name: Mapped[str | None] = mapped_column(String(255))
+    run_url: Mapped[str | None] = mapped_column(String(512))
+    conclusion: Mapped[str | None] = mapped_column(String(32))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    installation_id: Mapped[int | None] = mapped_column(BigInteger)
+    event_repository_id: Mapped[int | None] = mapped_column(BigInteger)
+    event_repository_name: Mapped[str | None] = mapped_column(String(255))
+    run_id: Mapped[int | None] = mapped_column(BigInteger)
+    run_attempt: Mapped[int | None] = mapped_column(Integer)
+    source_repository_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_repository_name: Mapped[str | None] = mapped_column(String(255))
+    source_sha: Mapped[str | None] = mapped_column(String(40))
+    source_branch: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="received")
+    failure_code: Mapped[str | None] = mapped_column(String(64))
+    semantic_key: Mapped[str | None] = mapped_column(String(64), unique=True)
+    pipeline_id: Mapped[str | None] = mapped_column(ForeignKey("pipelines.pipeline_id"))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ApprovalModel(Base):

@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.packages.database.models import ApprovalModel, MutationModel, PipelineModel
@@ -222,6 +222,14 @@ class ApprovalRepository:
             .where(
                 ApprovalModel.approval_id == approval_id,
                 ApprovalModel.status == ApprovalStatus.PENDING.value,
+                ApprovalModel.expires_at > now,
+                exists().where(
+                    PipelineModel.approval_id == ApprovalModel.approval_id,
+                    PipelineModel.incident_id == ApprovalModel.incident_id,
+                    PipelineModel.proposal_id == ApprovalModel.proposal_id,
+                    PipelineModel.commit_sha == ApprovalModel.commit_sha,
+                    PipelineModel.status == PipelineStatus.AWAITING_APPROVAL.value,
+                ),
             )
             .values(
                 status=target_status.value,
@@ -236,6 +244,15 @@ class ApprovalRepository:
         updated_model = res.scalar_one_or_none()
 
         if updated_model is not None:
+            if target_status == ApprovalStatus.REJECTED:
+                await self.session.execute(
+                    update(PipelineModel)
+                    .where(
+                        PipelineModel.approval_id == approval_id,
+                        PipelineModel.status == PipelineStatus.AWAITING_APPROVAL.value,
+                    )
+                    .values(status=PipelineStatus.REJECTED.value, updated_at=now)
+                )
             await self.session.commit()
             logger.info(
                 "approval_decision_committed",

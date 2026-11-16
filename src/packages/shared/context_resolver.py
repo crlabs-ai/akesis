@@ -14,6 +14,8 @@ from src.packages.shared.models import (
     EvidencePackage,
     FailureContext,
 )
+from src.packages.shared.persisted_provenance import ProvenanceRejected, require_bound_token
+from src.packages.shared.provenance import require_verified_provenance
 
 logger = get_logger("akesis.context_resolver")
 
@@ -101,8 +103,35 @@ class CodebaseContextResolver:
         self,
         failure_context: FailureContext,
         repo_root: Path | None = None,
+        *,
+        provenance: object | None = None,
     ) -> EvidencePackage:
-        """Extracts bounded source code snippets around failure locations."""
+        """Extracts bounded source code snippets around failure locations.
+
+        Requires a persisted-provenance token bound to this incident, then the temporary hold.
+        Both checks run before any checkout.
+        """
+        if repo_root is not None:
+            raise ProvenanceRejected(
+                "Caller-supplied source is not bound to provenance", code="binding"
+            )
+        token = require_bound_token(
+            provenance,
+            incident_id=failure_context.incident_id,
+            owner=failure_context.repository_owner,
+            name=failure_context.repository_name,
+            head_sha=failure_context.commit_sha,
+        )
+        require_verified_provenance()
+        return self._resolve_context_unchecked(failure_context, repo_root, token)
+
+    def _resolve_context_unchecked(
+        self,
+        failure_context: FailureContext,
+        repo_root: Path | None = None,
+        provenance: object | None = None,
+    ) -> EvidencePackage:
+        """Context extraction body. Private: callers must use the gated public method."""
         incident_id = failure_context.incident_id
         commit_sha = failure_context.commit_sha
         repo_owner = failure_context.repository_owner
@@ -125,6 +154,7 @@ class CodebaseContextResolver:
                     repo_owner=repo_owner,
                     repo_name=repo_name,
                     commit_sha=commit_sha,
+                    provenance=provenance,
                 )
                 notes.append(f"Successfully checked out {repo_owner}/{repo_name}@{commit_sha[:8]}")
             except (InvalidCommitError, RepositoryCheckoutError) as err:

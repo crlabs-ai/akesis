@@ -170,7 +170,7 @@ async def test_scenario_lint_fix(
     )
 
     service = FixProposalService(llm_client=MockLLMClient(raw_fix=raw_fix))
-    proposal = await service.generate_fix_proposal(
+    proposal = await service._generate_fix_proposal_unchecked(
         context, diag, evidence_package=sample_evidence_package, repo_root=temp_repo
     )
 
@@ -224,7 +224,7 @@ async def test_scenario_pytest_fix(
     )
 
     service = FixProposalService(llm_client=MockLLMClient(raw_fix=raw_fix))
-    proposal = await service.generate_fix_proposal(
+    proposal = await service._generate_fix_proposal_unchecked(
         context, diag, evidence_package=evidence_pkg, repo_root=temp_repo
     )
 
@@ -314,7 +314,7 @@ async def test_scenario_mypy_fix(temp_repo: Path) -> None:
     )
 
     service = FixProposalService(llm_client=MockLLMClient(raw_fix=raw_fix))
-    proposal = await service.generate_fix_proposal(
+    proposal = await service._generate_fix_proposal_unchecked(
         context, diag, evidence_package=evidence_pkg, repo_root=temp_repo
     )
 
@@ -333,7 +333,7 @@ async def test_fix_service_ineligible_on_low_confidence(
     diag.proposal.confidence_score = 0.40
 
     service = FixProposalService()
-    proposal = await service.generate_fix_proposal(context, diag)
+    proposal = await service._generate_fix_proposal_unchecked(context, diag)
 
     assert proposal.status == "ineligible"
     assert proposal.is_valid is False
@@ -360,7 +360,9 @@ async def test_fix_service_rejected_when_evidence_package_missing_or_empty(
         code_evidences=[],
         retrieval_status="empty",
     )
-    proposal = await service.generate_fix_proposal(context, diag, evidence_package=empty_pkg)
+    proposal = await service._generate_fix_proposal_unchecked(
+        context, diag, evidence_package=empty_pkg
+    )
 
     assert proposal.status == "rejected"
     assert proposal.is_valid is False
@@ -413,7 +415,7 @@ async def test_prompt_injection_handled_safely(
     )
 
     service = FixProposalService(llm_client=MockLLMClient(raw_fix=raw_fix))
-    proposal = await service.generate_fix_proposal(
+    proposal = await service._generate_fix_proposal_unchecked(
         context, diag, evidence_package=evidence_pkg, repo_root=temp_repo
     )
 
@@ -434,7 +436,7 @@ async def test_fix_service_rejected_on_provider_error(
     service = FixProposalService(
         llm_client=MockLLMClient(raise_exc=LLMAuthError("Invalid Gemini Key", status_code=401))
     )
-    proposal = await service.generate_fix_proposal(
+    proposal = await service._generate_fix_proposal_unchecked(
         context, diag, evidence_package=sample_evidence_package
     )
 

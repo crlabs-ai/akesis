@@ -1,4 +1,5 @@
-from typing import TypeVar
+from pathlib import Path
+from typing import Any, TypeVar, cast
 
 import pytest
 from pydantic import BaseModel
@@ -6,8 +7,10 @@ from pydantic import BaseModel
 from src.packages.sdk.llm_client import LLMAuthError, LLMTimeoutError
 from src.packages.shared.diagnostic_service import DiagnosticService
 from src.packages.shared.models import (
+    CodeEvidence,
     DiagnosisProposal,
     EvidenceItem,
+    EvidencePackage,
     FailureCategory,
     FailureContext,
     FailureSignal,
@@ -42,6 +45,35 @@ class MockLLMClient:
         if self.proposal:
             return self.proposal  # type: ignore[return-value]
         raise ValueError("No mock proposal configured")
+
+
+class _NoEvidenceResolver:
+    """Explicit test double: diagnosis proceeds without repository evidence (no checkout)."""
+
+    def resolve_context(
+        self,
+        failure_context: FailureContext,
+        repo_root: Path | None = None,
+        provenance: Any = None,
+        **_: object,
+    ) -> None:
+        return None
+
+
+class _StaticEvidenceResolver:
+    """Explicit test double returning a fixed, verified-shaped evidence package."""
+
+    def __init__(self, package: EvidencePackage) -> None:
+        self.package = package
+
+    def resolve_context(
+        self,
+        failure_context: FailureContext,
+        repo_root: Path | None = None,
+        provenance: Any = None,
+        **_: object,
+    ) -> EvidencePackage:
+        return self.package
 
 
 @pytest.fixture
@@ -94,7 +126,10 @@ async def test_diagnostic_service_success(sample_failure_context: FailureContext
         reasoning="Direct traceback evidence",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal=expected_proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()),
+        llm_client=MockLLMClient(proposal=expected_proposal),
+    )
     result = await service.diagnose_failure(sample_failure_context)
 
     assert result.incident_id == "inc_diag_test_01"
@@ -110,7 +145,8 @@ async def test_diagnostic_service_fallback_on_auth_error(
     sample_failure_context: FailureContext,
 ) -> None:
     service = DiagnosticService(
-        llm_client=MockLLMClient(raise_exc=LLMAuthError("Invalid API key", status_code=401))
+        context_resolver=cast(Any, _NoEvidenceResolver()),
+        llm_client=MockLLMClient(raise_exc=LLMAuthError("Invalid API key", status_code=401)),
     )
     result = await service.diagnose_failure(sample_failure_context)
 
@@ -127,7 +163,8 @@ async def test_diagnostic_service_fallback_on_timeout(
     sample_failure_context: FailureContext,
 ) -> None:
     service = DiagnosticService(
-        llm_client=MockLLMClient(raise_exc=LLMTimeoutError("Request timed out"))
+        context_resolver=cast(Any, _NoEvidenceResolver()),
+        llm_client=MockLLMClient(raise_exc=LLMTimeoutError("Request timed out")),
     )
     result = await service.diagnose_failure(sample_failure_context)
 
@@ -164,7 +201,26 @@ async def test_diagnostic_service_with_codebase_evidence(
         reasoning="Traceback matches verified code evidence.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal=expected_proposal))
+    package = EvidencePackage(
+        incident_id=sample_failure_context.incident_id,
+        commit_sha=sample_failure_context.commit_sha,
+        failure_context=sample_failure_context,
+        code_evidences=[
+            CodeEvidence(
+                path="tests/test_math.py",
+                start_line=18,
+                end_line=22,
+                target_line=20,
+                content="20 | return a / b",
+                total_file_lines=30,
+            )
+        ],
+        retrieval_status="success",
+    )
+    service = DiagnosticService(
+        context_resolver=cast(Any, _StaticEvidenceResolver(package)),
+        llm_client=MockLLMClient(proposal=expected_proposal),
+    )
     result = await service.diagnose_failure(sample_failure_context)
 
     assert result.evidence_package is not None

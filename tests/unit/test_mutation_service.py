@@ -112,10 +112,17 @@ class MockMutationRepo(MutationRepositoryProtocol):
 
 
 class MockGitHubClient:
-    def __init__(self, should_fail_auth: bool = False, should_fail_perm: bool = False) -> None:
+    def __init__(
+        self,
+        should_fail_auth: bool = False,
+        should_fail_perm: bool = False,
+        head_sha: str | None = None,
+    ) -> None:
         self.created_prs: list[dict[str, Any]] = []
         self.should_fail_auth = should_fail_auth
         self.should_fail_perm = should_fail_perm
+        # Current head of the base branch on the remote (what GET /commits/{branch} returns).
+        self.head_sha = head_sha
 
     async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
         return {}
@@ -124,7 +131,8 @@ class MockGitHubClient:
         return ""
 
     async def get_commit(self, owner: str, repo: str, commit_sha: str) -> dict[str, Any]:
-        return {"sha": commit_sha}
+        # The mutation service passes a branch name; the remote answers with that branch's head.
+        return {"sha": self.head_sha or ""}
 
     async def create_pull_request(
         self, owner: str, repo: str, title: str, body: str, head: str, base: str
@@ -157,7 +165,13 @@ class MockRepoCheckout:
         self.target_dir = target_dir
 
     def checkout_commit(
-        self, repo_owner: str, repo_name: str, commit_sha: str, clone_url: str | None = None
+        self,
+        repo_owner: str,
+        repo_name: str,
+        commit_sha: str,
+        clone_url: str | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> Path:
         return self.target_dir
 
@@ -177,6 +191,8 @@ class MockSandboxRunner:
         patch_diff: str,
         command: ValidationCommand,
         timeout_seconds: float | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> Any:
         from src.packages.sdk.sandbox_runner import ValidationExecutionResult
 
@@ -187,6 +203,42 @@ class MockSandboxRunner:
             duration_ms=10.0,
             timed_out=(self.return_status == ValidationStatus.TIMED_OUT),
         )
+
+
+class _ControlledValidation:
+    """Explicit test double for the post-patch pre-push validation step."""
+
+    def __init__(
+        self, status: ValidationStatus = ValidationStatus.PASSED, exit_code: int = 0
+    ) -> None:
+        self.status = status
+        self.exit_code = exit_code
+
+    async def validate_fix(
+        self,
+        proposal: FixProposal,
+        context: FailureContext,
+        repo_root: Path | None = None,
+    ) -> ValidationResult:
+        return ValidationResult(
+            validation_id=f"val_pre_push_{proposal.proposal_id}",
+            proposal_id=proposal.proposal_id,
+            incident_id=context.incident_id,
+            commit_sha=proposal.commit_sha,
+            status=self.status,
+            command_executed="pytest",
+            exit_code=self.exit_code,
+            duration_ms=1.0,
+        )
+
+
+def _mutation_service(
+    validation: _ControlledValidation | None = None, **kwargs: Any
+) -> GitMutationService:
+    """Build the service under test with a controlled pre-push validation double."""
+    service = GitMutationService(**kwargs)
+    service.validation_service = validation or _ControlledValidation()  # type: ignore[assignment]
+    return service
 
 
 @pytest.fixture
@@ -200,6 +252,10 @@ def mock_git_repo(tmp_path: Path) -> tuple[Path, str]:
     f.write_text("x = 1\n", encoding="utf-8")
     r.index.add(["src.py"])
     c = r.index.commit("init")
+    # Local bare remote so the fix-branch push is real and exercised without network access.
+    origin_dir = tmp_path / "origin.git"
+    git.Repo.init(origin_dir, bare=True)
+    r.create_remote("origin", str(origin_dir))
     return repo_dir, c.hexsha
 
 
@@ -263,6 +319,7 @@ async def test_successful_pr_creation(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -271,15 +328,17 @@ async def test_successful_pr_creation(
     ]:
         yield (appr_repo, mut_repo)
 
-    gh_client = MockGitHubClient()
-    service = GitMutationService(
+    gh_client = MockGitHubClient(
+        head_sha=approval.commit_sha,
+    )
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=gh_client,
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
 
-    record = await service.create_pull_request(context, proposal, validation, approval)
+    record = await service._create_pull_request_unchecked(context, proposal, validation, approval)
     assert record.status == MutationStatus.PR_CREATED
     assert record.pr_number == 42
     assert record.resulting_commit_sha is not None
@@ -295,12 +354,12 @@ async def test_unapproved_proposal_rejected(
     context, proposal, validation, approval = sample_mutation_data
     approval.status = ApprovalStatus.PENDING
 
-    service = GitMutationService(
+    service = _mutation_service(
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
     with pytest.raises(PreflightCheckError) as exc:
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
     assert "must be 'approved'" in str(exc.value)
 
 
@@ -313,12 +372,12 @@ async def test_mismatched_proposal_id_rejected(
     context, proposal, validation, approval = sample_mutation_data
     approval.proposal_id = "other_proposal_id"
 
-    service = GitMutationService(
+    service = _mutation_service(
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
     with pytest.raises(PreflightCheckError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -330,12 +389,12 @@ async def test_mismatched_commit_sha_rejected(
     context, proposal, validation, approval = sample_mutation_data
     approval.commit_sha = "000000000000"
 
-    service = GitMutationService(
+    service = _mutation_service(
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
     with pytest.raises(PreflightCheckError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -351,8 +410,10 @@ async def test_stale_commit_sha_detected(
     context.commit_sha = fake_sha
     proposal.commit_sha = fake_sha
     approval.commit_sha = fake_sha
+    validation.commit_sha = fake_sha
 
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -361,20 +422,22 @@ async def test_stale_commit_sha_detected(
     ]:
         yield (appr_repo, mut_repo)
 
-    service = GitMutationService(
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
-        github_client=MockGitHubClient(),
+        github_client=MockGitHubClient(
+            head_sha=approval.commit_sha,
+        ),
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
 
     with pytest.raises(StaleCommitError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
 async def test_unsafe_branch_name_rejected() -> None:
-    service = GitMutationService()
+    service = _mutation_service()
     with pytest.raises(UnsafeBranchError):
         service.validate_branch_name("akesis/fix/../../root")
 
@@ -390,6 +453,7 @@ async def test_pre_push_validation_failure_aborts_commit(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -398,15 +462,18 @@ async def test_pre_push_validation_failure_aborts_commit(
     ]:
         yield (appr_repo, mut_repo)
 
-    service = GitMutationService(
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
-        github_client=MockGitHubClient(),
+        github_client=MockGitHubClient(
+            head_sha=approval.commit_sha,
+        ),
         repo_checkout=MockRepoCheckout(repo_dir),
-        sandbox_runner=MockSandboxRunner(return_status=ValidationStatus.FAILED, exit_code=1),
+        sandbox_runner=MockSandboxRunner(),
+        validation=_ControlledValidation(status=ValidationStatus.FAILED, exit_code=1),
     )
 
     with pytest.raises(PrePushValidationError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -417,6 +484,7 @@ async def test_duplicate_mutation_returns_existing(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     # Pre-populate mutation repo with existing PR_CREATED record
@@ -441,15 +509,17 @@ async def test_duplicate_mutation_returns_existing(
     ]:
         yield (appr_repo, mut_repo)
 
-    gh_client = MockGitHubClient()
-    service = GitMutationService(
+    gh_client = MockGitHubClient(
+        head_sha=approval.commit_sha,
+    )
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=gh_client,
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
 
-    result = await service.create_pull_request(context, proposal, validation, approval)
+    result = await service._create_pull_request_unchecked(context, proposal, validation, approval)
     assert result.mutation_id == existing.mutation_id
     assert result.pr_number == 99
     # No new PR was created via GitHub API
@@ -464,6 +534,7 @@ async def test_github_auth_error_handled(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -472,8 +543,8 @@ async def test_github_auth_error_handled(
     ]:
         yield (appr_repo, mut_repo)
 
-    gh_client = MockGitHubClient(should_fail_auth=True)
-    service = GitMutationService(
+    gh_client = MockGitHubClient(head_sha=approval.commit_sha, should_fail_auth=True)
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=gh_client,
         repo_checkout=MockRepoCheckout(repo_dir),
@@ -483,7 +554,7 @@ async def test_github_auth_error_handled(
     from src.packages.sdk.github_client import GitHubAuthError
 
     with pytest.raises(GitHubAuthError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -494,6 +565,7 @@ async def test_working_tree_unexpected_untracked_files_rejected(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -505,15 +577,23 @@ async def test_working_tree_unexpected_untracked_files_rejected(
     # Patch that modifies src.py and creates an extra untracked file
     class ModRepoCheckout(MockRepoCheckout):
         def checkout_commit(
-            self, repo_owner: str, repo_name: str, commit_sha: str, clone_url: str | None = None
+            self,
+            repo_owner: str,
+            repo_name: str,
+            commit_sha: str,
+            clone_url: str | None = None,
+            provenance: Any = None,
+            **_: object,
         ) -> Path:
             p = super().checkout_commit(repo_owner, repo_name, commit_sha, clone_url)
             # simulate extra untracked file
             return p
 
-    service = GitMutationService(
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
-        github_client=MockGitHubClient(),
+        github_client=MockGitHubClient(
+            head_sha=approval.commit_sha,
+        ),
         repo_checkout=ModRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
@@ -521,7 +601,7 @@ async def test_working_tree_unexpected_untracked_files_rejected(
     proposal.target_files = ["other.py"]
 
     with pytest.raises(WorkingTreeMismatchError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -532,6 +612,7 @@ async def test_existing_remote_pr_returns_record(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -550,14 +631,14 @@ async def test_existing_remote_pr_returns_record(
                 "head": {"sha": "existing_sha"},
             }
 
-    service = GitMutationService(
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=ExistingPRGitHubClient(),
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
 
-    record = await service.create_pull_request(context, proposal, validation, approval)
+    record = await service._create_pull_request_unchecked(context, proposal, validation, approval)
     assert record.status == MutationStatus.PR_CREATED
     assert record.pr_number == 55
 
@@ -570,6 +651,7 @@ async def test_patch_apply_failure_aborts(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -581,15 +663,17 @@ async def test_patch_apply_failure_aborts(
     # Corrupt the diff to make git apply fail
     proposal.unified_diff = "--- a/src.py\n+++ b/src.py\n@@ -100,1 +100,1 @@\n-x = 999\n+x = 1000\n"
 
-    service = GitMutationService(
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
-        github_client=MockGitHubClient(),
+        github_client=MockGitHubClient(
+            head_sha=approval.commit_sha,
+        ),
         repo_checkout=MockRepoCheckout(repo_dir),
         sandbox_runner=MockSandboxRunner(),
     )
 
     with pytest.raises(MutationError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
 
 @pytest.mark.asyncio
@@ -600,6 +684,7 @@ async def test_push_failure_prevents_pr(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -608,8 +693,10 @@ async def test_push_failure_prevents_pr(
     ]:
         yield (appr_repo, mut_repo)
 
-    gh_client = MockGitHubClient()
-    service = GitMutationService(
+    gh_client = MockGitHubClient(
+        head_sha=approval.commit_sha,
+    )
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=gh_client,
         repo_checkout=MockRepoCheckout(repo_dir),
@@ -623,7 +710,7 @@ async def test_push_failure_prevents_pr(
     service._push_branch_safely = failing_push  # type: ignore[method-assign]
 
     with pytest.raises(GitPushError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)
 
     # Assert no PR was created
     assert len(gh_client.created_prs) == 0
@@ -637,6 +724,7 @@ async def test_github_permission_error_handled(
     repo_dir, _ = mock_git_repo
     context, proposal, validation, approval = sample_mutation_data
     appr_repo = MockApprovalRepo()
+    appr_repo.records[approval.approval_id] = approval  # approval is persisted before the PR flow
     mut_repo = MockMutationRepo()
 
     @asynccontextmanager
@@ -645,8 +733,8 @@ async def test_github_permission_error_handled(
     ]:
         yield (appr_repo, mut_repo)
 
-    gh_client = MockGitHubClient(should_fail_perm=True)
-    service = GitMutationService(
+    gh_client = MockGitHubClient(head_sha=approval.commit_sha, should_fail_perm=True)
+    service = _mutation_service(
         repository_factory=mock_repo_factory,
         github_client=gh_client,
         repo_checkout=MockRepoCheckout(repo_dir),
@@ -656,4 +744,4 @@ async def test_github_permission_error_handled(
     from src.packages.sdk.github_client import GitHubPermissionError
 
     with pytest.raises(GitHubPermissionError):
-        await service.create_pull_request(context, proposal, validation, approval)
+        await service._create_pull_request_unchecked(context, proposal, validation, approval)

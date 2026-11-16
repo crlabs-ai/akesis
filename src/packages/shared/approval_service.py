@@ -18,8 +18,18 @@ from src.packages.shared.models import (
     ValidationResult,
     ValidationStatus,
 )
+from src.packages.shared.persisted_provenance import (
+    bind_work_to_context,
+    verify_context_provenance,
+)
+from src.packages.shared.provenance import require_verified_provenance
 
 logger = get_logger("akesis.approval_service")
+
+
+def approval_id_for(incident_id: str, commit_sha: str) -> str:
+    """Deterministic approval identifier shared by the approval service and orchestrator."""
+    return f"appr_{incident_id}_{commit_sha[:8]}"
 
 
 class ApprovalError(Exception):
@@ -96,7 +106,22 @@ class ApprovalService:
         proposal: FixProposal,
         validation: ValidationResult,
     ) -> ApprovalRecord:
-        """Creates a durable PostgreSQL approval record and posts card to Slack if eligible."""
+        """Creates a durable PostgreSQL approval record and posts card to Slack if eligible.
+
+        Fails closed before any persistence or Slack call while the provenance hold is active.
+        """
+        await verify_context_provenance(context)
+        bind_work_to_context(context, proposal=proposal, validation=validation)
+        require_verified_provenance()
+        return await self._request_approval_unchecked(context, proposal, validation)
+
+    async def _request_approval_unchecked(
+        self,
+        context: FailureContext,
+        proposal: FixProposal,
+        validation: ValidationResult,
+    ) -> ApprovalRecord:
+        """Approval request body. Private: callers must use the gated public method."""
         is_eligible, reason = self.check_eligibility(proposal, validation)
         if not is_eligible:
             logger.info(
@@ -106,7 +131,7 @@ class ApprovalService:
             )
             raise IneligibleApprovalError(reason or "Proposal is ineligible for human review.")
 
-        approval_id = f"appr_{context.incident_id}_{proposal.commit_sha[:8]}"
+        approval_id = approval_id_for(context.incident_id, proposal.commit_sha)
         now = datetime.now(UTC)
         expires_at = now + timedelta(hours=self.ttl_hours)
 

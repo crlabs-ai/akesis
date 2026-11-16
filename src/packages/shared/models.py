@@ -89,10 +89,34 @@ class WorkflowRunEvent(BaseModel):
     sender: str | None = Field(default=None, description="Username of trigger initiator")
 
 
+class RepositoryIdentity(BaseModel):
+    """Canonical GitHub repository identity."""
+
+    id: int = Field(gt=0, strict=True)
+    full_name: str = Field(min_length=3)
+
+
+class WorkflowRunProvenance(BaseModel):
+    """Independently verified workflow-run provenance; historical contexts may lack it."""
+
+    delivery_id: str = Field(pattern=r"^[A-Za-z0-9-]{1,128}$")
+    event_repository: RepositoryIdentity
+    source_repository: RepositoryIdentity
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    head_branch: str = Field(min_length=1)
+    run_id: int = Field(gt=0, strict=True)
+    run_attempt: int = Field(gt=0, strict=True)
+    installation_id: int = Field(gt=0, strict=True)
+    verified_at: datetime
+    verification_status: Literal["verified"] = "verified"
+    event_type: Literal["workflow_run"] = "workflow_run"
+
+
 class FailureContext(BaseModel):
     """Complete structured failure context ready for downstream diagnostic ingestion."""
 
     incident_id: str = Field(..., description="Unique Akesis incident identifier")
+    provenance: WorkflowRunProvenance | None = None
     repository_owner: str = Field(..., description="Repository owner")
     repository_name: str = Field(..., description="Repository name")
     run_id: int = Field(..., description="Workflow run ID")

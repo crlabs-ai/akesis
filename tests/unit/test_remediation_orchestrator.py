@@ -216,7 +216,11 @@ class MockDiagService:
         self.is_fixable = is_fixable
 
     async def diagnose_failure(
-        self, context: FailureContext, evidence_package: EvidencePackage | None = None
+        self,
+        context: FailureContext,
+        evidence_package: EvidencePackage | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> DiagnosticResult:
         proposal = DiagnosisProposal(
             category=FailureCategory.TEST,
@@ -241,7 +245,11 @@ class MockDiagService:
 
 class MockContextResolver:
     def resolve_context(
-        self, failure_context: FailureContext, repo_root: Any = None
+        self,
+        failure_context: FailureContext,
+        repo_root: Any = None,
+        provenance: Any = None,
+        **_: object,
     ) -> EvidencePackage:
         return EvidencePackage(
             incident_id=failure_context.incident_id,
@@ -318,7 +326,7 @@ class MockApprovalService:
         self, context: FailureContext, proposal: FixProposal, validation: ValidationResult
     ) -> ApprovalRecord:
         record = ApprovalRecord(
-            approval_id=f"appr_{proposal.proposal_id}",
+            approval_id=f"appr_{context.incident_id}_{proposal.commit_sha[:8]}",
             incident_id=context.incident_id,
             proposal_id=proposal.proposal_id,
             commit_sha=context.commit_sha,
@@ -418,7 +426,7 @@ async def test_orchestrator_success_to_awaiting_approval(sample_context: Failure
         mutation_service=mut_svc,
     )
 
-    record = await orch.process_failure(sample_context)
+    record = await orch._process_failure_unchecked(sample_context)
     assert record.status == PipelineStatus.AWAITING_APPROVAL
     assert record.approval_id is not None
     assert record.proposal_id is not None
@@ -455,7 +463,7 @@ async def test_orchestrator_halts_on_unfixable_diagnosis(sample_context: Failure
         mutation_service=MockMutationService(mut_repo),
     )
 
-    record = await orch.process_failure(sample_context)
+    record = await orch._process_failure_unchecked(sample_context)
     assert record.status == PipelineStatus.FAILED
     assert "not fixable" in (record.failure_reason or "")
 
@@ -487,7 +495,7 @@ async def test_orchestrator_halts_on_invalid_fix_proposal(sample_context: Failur
         mutation_service=MockMutationService(mut_repo),
     )
 
-    record = await orch.process_failure(sample_context)
+    record = await orch._process_failure_unchecked(sample_context)
     assert record.status == PipelineStatus.REJECTED
 
 
@@ -518,7 +526,7 @@ async def test_orchestrator_halts_on_validation_failure(sample_context: FailureC
         mutation_service=MockMutationService(mut_repo),
     )
 
-    record = await orch.process_failure(sample_context)
+    record = await orch._process_failure_unchecked(sample_context)
     assert record.status == PipelineStatus.FAILED
 
 
@@ -551,9 +559,11 @@ async def test_orchestrator_creates_awaiting_approval_state(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    record = await orch.process_failure(sample_context)
+    record = await orch._process_failure_unchecked(sample_context)
     assert record.status == PipelineStatus.AWAITING_APPROVAL
-    assert record.approval_id == f"appr_prop_{sample_context.incident_id}"
+    assert (
+        record.approval_id == f"appr_{sample_context.incident_id}_{sample_context.commit_sha[:8]}"
+    )
 
 
 # 6. Rejected approval stops pipeline.
@@ -584,14 +594,14 @@ async def test_orchestrator_resume_on_rejected_decision(sample_context: FailureC
         mutation_service=mut_svc,
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
 
     # Human rejects
     await appr_repo.record_decision(approval_id, ApprovalStatus.REJECTED, reviewer="bob")
 
-    final_rec = await orch.resume_approval(approval_id=approval_id)
+    final_rec = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final_rec.status == PipelineStatus.REJECTED
     # Mutation must never be called on rejection
     assert not mut_svc.mutation_invoked
@@ -628,7 +638,7 @@ async def test_orchestrator_resume_uses_exact_persisted_patch(
     )
 
     # 1. Start pipeline to awaiting_approval
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     assert pipe_rec.status == PipelineStatus.AWAITING_APPROVAL
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
@@ -637,7 +647,7 @@ async def test_orchestrator_resume_uses_exact_persisted_patch(
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
 
     # 3. Resume pipeline
-    final_rec = await orch.resume_approval(approval_id=approval_id)
+    final_rec = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final_rec.status == PipelineStatus.COMPLETED
     assert final_rec.pr_number == 123
     assert mut_svc.mutation_invoked
@@ -674,7 +684,7 @@ async def test_orchestrator_resume_fails_if_proposal_json_missing(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
@@ -684,7 +694,7 @@ async def test_orchestrator_resume_fails_if_proposal_json_missing(
     pipe.proposal_json = None
 
     with pytest.raises(OrchestrationError, match="fix proposal missing"):
-        await orch.resume_approval(approval_id=approval_id)
+        await orch._resume_approval_unchecked(approval_id=approval_id)
 
 
 # 9. Stale commit SHA prevents mutation.
@@ -716,12 +726,12 @@ async def test_orchestrator_stale_commit_sha_prevents_mutation(
         mutation_service=MockMutationService(mut_repo, stale_sha=True),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
 
-    final_rec = await orch.resume_approval(approval_id=approval_id)
+    final_rec = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final_rec.status == PipelineStatus.FAILED
     assert "does not match proposal commit sha" in (final_rec.failure_reason or "")
 
@@ -755,7 +765,7 @@ async def test_orchestrator_mismatched_proposal_id_rejected(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
@@ -765,7 +775,7 @@ async def test_orchestrator_mismatched_proposal_id_rejected(
     appr.proposal_id = "prop_tampered_diff"
 
     with pytest.raises(OrchestrationError, match="does not match"):
-        await orch.resume_approval(approval_id=approval_id)
+        await orch._resume_approval_unchecked(approval_id=approval_id)
 
 
 # 11. Duplicate webhook is idempotent.
@@ -797,8 +807,8 @@ async def test_orchestrator_duplicate_incident_is_idempotent(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    rec1 = await orch.process_failure(sample_context)
-    rec2 = await orch.process_failure(sample_context)
+    rec1 = await orch._process_failure_unchecked(sample_context)
+    rec2 = await orch._process_failure_unchecked(sample_context)
     assert rec1.pipeline_id == rec2.pipeline_id
 
 
@@ -831,16 +841,16 @@ async def test_orchestrator_duplicate_resume_is_idempotent(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
 
-    final1 = await orch.resume_approval(approval_id=approval_id)
+    final1 = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final1.status == PipelineStatus.COMPLETED
 
     # Repeat resume
-    final2 = await orch.resume_approval(approval_id=approval_id)
+    final2 = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final2.status == PipelineStatus.COMPLETED
     assert final2.pipeline_id == final1.pipeline_id
 
@@ -874,12 +884,12 @@ async def test_orchestrator_mutation_failure_produces_failed_state(
         mutation_service=MockMutationService(mut_repo, should_fail=True),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
 
-    final_rec = await orch.resume_approval(approval_id=approval_id)
+    final_rec = await orch._resume_approval_unchecked(approval_id=approval_id)
     assert final_rec.status == PipelineStatus.FAILED
     assert "Git push rejected" in (final_rec.failure_reason or "")
 
@@ -913,13 +923,13 @@ async def test_orchestrator_expired_approval_rejected(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     approval_id = pipe_rec.approval_id
     assert approval_id is not None
     await appr_repo.expire_approval(approval_id)
 
     with pytest.raises(OrchestrationError, match="must be 'approved'"):
-        await orch.resume_approval(approval_id=approval_id)
+        await orch._resume_approval_unchecked(approval_id=approval_id)
 
 
 # 15. Protected target path causes proposal rejection.
@@ -974,7 +984,7 @@ async def test_orchestrator_protected_target_rejection(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     assert pipe_rec.status == PipelineStatus.REJECTED
     assert "matches protected security pattern" in (pipe_rec.failure_reason or "")
 
@@ -1029,7 +1039,7 @@ async def test_orchestrator_halts_when_codebase_context_unavailable(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     assert pipe_rec.status == PipelineStatus.FAILED
     assert "Codebase context unavailable" in (pipe_rec.failure_reason or "")
     assert spy_fix.called is False
@@ -1088,7 +1098,7 @@ async def test_orchestrator_halts_when_zero_relevant_source_snippets(
         mutation_service=MockMutationService(mut_repo),
     )
 
-    pipe_rec = await orch.process_failure(sample_context)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
     assert pipe_rec.status == PipelineStatus.FAILED
     assert "Codebase context unavailable" in (pipe_rec.failure_reason or "")
     assert spy_fix.called is False

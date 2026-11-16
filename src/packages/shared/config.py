@@ -82,6 +82,25 @@ class Settings(BaseSettings):
         default="https://api.github.com",
         description="Base URL for the GitHub REST API",
     )
+    github_app_id: int = Field(default=0, repr=False)
+    github_app_private_key: str = Field(default="", repr=False)
+    # Total verification attempts per delivery, including the initial attempt.
+    webhook_retry_max_attempts: int = Field(default=5, ge=1, le=100)
+    # Computed exponential backoff: base * 2^(attempt-1), jittered, capped at max_delay.
+    webhook_retry_base_delay_seconds: int = Field(default=60, ge=1, le=3600)
+    webhook_retry_max_delay_seconds: int = Field(default=900, ge=1, le=86400)
+    # Sanity bound for provider-directed delays (Retry-After / rate-limit reset). Larger values
+    # are treated as invalid and the computed backoff applies instead.
+    webhook_retry_provider_delay_ceiling_seconds: int = Field(default=86400, ge=60, le=604800)
+    # Total time allowed for one provenance verification (all GitHub requests together). Must stay
+    # below the 10-minute stale-claim window, so a live verification is never reclaimed.
+    webhook_verification_deadline_seconds: int = Field(default=240, ge=30, le=540)
+    # Retry worker (separate process: python -m src.apps.worker)
+    worker_poll_seconds: float = Field(default=15.0, ge=1.0, le=3600.0)
+    worker_batch_size: int = Field(default=20, ge=1, le=500)
+    worker_db_backoff_max_seconds: float = Field(default=60.0, ge=1.0, le=900.0)
+    worker_heartbeat_path: str = Field(default="/run/akesis/worker-heartbeat.json")
+    worker_heartbeat_max_age_seconds: int = Field(default=300, ge=5, le=3600)
 
     # Gemini AI Integration
     gemini_api_key: str = Field(
@@ -105,6 +124,30 @@ class Settings(BaseSettings):
     repo_checkout_base_dir: str = Field(
         default="/tmp/akesis/repos",
         description="Directory where git repositories are checked out",
+    )
+    snapshot_base_dir: str = Field(
+        default="/tmp/akesis/snapshots",
+        description="Private, owner-only directory for immutable source snapshots",
+    )
+    snapshot_max_files: int = Field(
+        default=2000,
+        ge=1,
+        description="Maximum number of blob entries materialized into one snapshot",
+    )
+    snapshot_max_file_bytes: int = Field(
+        default=1_000_000,
+        ge=1,
+        description="Maximum size of one materialized file in bytes",
+    )
+    snapshot_max_total_bytes: int = Field(
+        default=20_000_000,
+        ge=1,
+        description="Maximum total size of one materialized snapshot in bytes",
+    )
+    snapshot_ttl_seconds: int = Field(
+        default=900,
+        ge=1,
+        description="Lifetime of a prepared snapshot handle before it must be re-prepared",
     )
     max_context_window_lines: int = Field(
         default=40,
@@ -180,6 +223,8 @@ class Settings(BaseSettings):
         default="",
         description="Default Slack channel for approval cards",
     )
+    slack_approver_user_ids: list[str] = Field(default_factory=list)
+    slack_workspace_id: str = Field(default="")
     approval_ttl_hours: int = Field(
         default=24,
         description="Hours before a pending human approval request expires",
@@ -190,6 +235,7 @@ class Settings(BaseSettings):
         "cors_allowed_methods",
         "cors_allowed_headers",
         "trusted_hosts",
+        "slack_approver_user_ids",
         mode="before",
     )
     @classmethod
@@ -258,6 +304,15 @@ class Settings(BaseSettings):
         if not self.slack_signing_secret or self.slack_signing_secret in insecure_slack_secrets:
             errors.append("SLACK_SIGNING_SECRET is missing or using an insecure placeholder.")
 
+        if not self.slack_approver_user_ids or any(
+            not user.strip() for user in self.slack_approver_user_ids
+        ):
+            errors.append("SLACK_APPROVER_USER_IDS is required in production.")
+        if not self.slack_workspace_id.strip():
+            errors.append("SLACK_WORKSPACE_ID is required in production.")
+        if not self.slack_channel_id.strip():
+            errors.append("SLACK_CHANNEL_ID is required in production.")
+
         # CORS validation
         if not self.cors_allowed_origins:
             errors.append(
@@ -273,7 +328,9 @@ class Settings(BaseSettings):
             errors.append("TRUSTED_HOSTS must not contain wildcard '*' in production.")
 
         # Read API Token distinctness check
-        if self.read_api_token:
+        if not self.read_api_token.strip():
+            errors.append("READ_API_TOKEN is required in production.")
+        else:
             secret_pool = {
                 self.github_webhook_secret,
                 self.github_token,

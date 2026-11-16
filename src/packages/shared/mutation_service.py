@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import subprocess
@@ -41,6 +42,11 @@ from src.packages.shared.models import (
     ValidationResult,
     ValidationStatus,
 )
+from src.packages.shared.persisted_provenance import (
+    bind_work_to_context,
+    verify_context_provenance,
+)
+from src.packages.shared.provenance import require_verified_provenance
 from src.packages.shared.validation_service import ValidationService
 
 logger = get_logger("akesis.mutation_service")
@@ -102,6 +108,25 @@ async def default_mutation_repositories() -> AsyncIterator[
         yield (ApprovalRepository(session), MutationRepository(session))
 
 
+def copy_checkout_without_links(source_dir: Path, dest_dir: Path) -> None:
+    """Copy a checkout without ever following a link. Any symbolic link fails closed.
+
+    A link in the shared checkout could point at a host file. Following it would commit that host
+    content into a pull request, so links are refused instead of copied or dereferenced.
+    """
+    for root, dirs, files in os.walk(source_dir, followlinks=False):
+        relative = Path(root).relative_to(source_dir)
+        for name in dirs + files:
+            if os.path.islink(os.path.join(root, name)):
+                raise WorkingTreeMismatchError("Symbolic links are not permitted in mutations")
+        for name in dirs:
+            os.makedirs(dest_dir / relative / name, exist_ok=True)
+        for name in files:
+            shutil.copy2(
+                os.path.join(root, name), dest_dir / relative / name, follow_symlinks=False
+            )
+
+
 class GitMutationServiceProtocol(Protocol):
     """Interface for Git mutation and Pull Request creation orchestration."""
 
@@ -138,10 +163,7 @@ class GitMutationService:
         self.github_client = github_client or GitHubClient()
         self.repo_checkout = repo_checkout or GitRepositoryCheckoutManager()
         self.sandbox_runner = sandbox_runner or DockerSandboxRunner()
-        self.validation_service = ValidationService(
-            sandbox_runner=self.sandbox_runner,
-            checkout_manager=self.repo_checkout,
-        )
+        self.validation_service = ValidationService(sandbox_runner=self.sandbox_runner)
 
     def generate_branch_name(self, incident_id: str, proposal_id: str) -> str:
         """Generates a deterministic, collision-resistant fix branch name."""
@@ -200,6 +222,20 @@ class GitMutationService:
                 f"FailureContext commit_sha '{context.commit_sha}' does not match "
                 f"proposal '{proposal.commit_sha}'."
             )
+        if not re.fullmatch(r"[0-9a-f]{40}", context.commit_sha):
+            raise PreflightCheckError("Commit SHA must be a full lowercase SHA-1")
+        if not (
+            context.incident_id
+            == proposal.incident_id
+            == validation.incident_id
+            == approval.incident_id
+        ):
+            raise PreflightCheckError("Incident identifiers do not match")
+        if (
+            validation.proposal_id != proposal.proposal_id
+            or validation.commit_sha != proposal.commit_sha
+        ):
+            raise PreflightCheckError("Validation does not match proposal")
 
     async def create_pull_request(
         self,
@@ -208,7 +244,27 @@ class GitMutationService:
         validation: ValidationResult,
         approval: ApprovalRecord,
     ) -> MutationRecord:
-        """Executes full mutation pipeline creating PR for approved fix."""
+        """Executes full mutation pipeline creating PR for approved fix.
+
+        Fails closed before any preflight, checkout, push or PR call while the provenance hold
+        is active.
+        """
+        require_verified_provenance()  # first: no database read or preflight before the hold
+        provenance = await verify_context_provenance(context)
+        bind_work_to_context(context, proposal, validation, approval)
+        return await self._create_pull_request_unchecked(
+            context, proposal, validation, approval, provenance
+        )
+
+    async def _create_pull_request_unchecked(
+        self,
+        context: FailureContext,
+        proposal: FixProposal,
+        validation: ValidationResult,
+        approval: ApprovalRecord,
+        provenance: object | None = None,
+    ) -> MutationRecord:
+        """Mutation body. Private: callers must use the gated public method."""
         # 1. Preflight safety checks
         self.verify_preflight_invariants(context, proposal, validation, approval)
 
@@ -219,6 +275,9 @@ class GitMutationService:
         now = datetime.now(UTC)
 
         async with self.repository_factory() as (approval_repo, mutation_repo):
+            persisted_approval = await approval_repo.get_approval(approval.approval_id)
+            if persisted_approval is None or persisted_approval != approval:
+                raise PreflightCheckError("Approval does not match persisted approval")
             # 2. Idempotency Check: Existing mutation in database
             existing_mut = await mutation_repo.get_by_proposal_and_commit(
                 proposal.proposal_id, proposal.commit_sha
@@ -285,10 +344,11 @@ class GitMutationService:
                 repo_owner=context.repository_owner,
                 repo_name=context.repository_name,
                 commit_sha=proposal.commit_sha,
+                provenance=provenance,
             )
 
             # Copy tree to ephemeral mutation workspace
-            shutil.copytree(source_dir, temp_dir, dirs_exist_ok=True)
+            copy_checkout_without_links(source_dir, temp_dir)
             repo = git.Repo(temp_dir)
 
             # Verify exact HEAD SHA matches approved proposal SHA
@@ -305,6 +365,11 @@ class GitMutationService:
                 raise StaleCommitError(err_msg)
 
             # 4. Create dedicated fix branch
+            remote_commit = await self.github_client.get_commit(
+                context.repository_owner, context.repository_name, context.branch
+            )
+            if remote_commit.get("sha") != proposal.commit_sha:
+                raise StaleCommitError("Remote base branch no longer points to approved commit")
             current_branches = [h.name for h in repo.heads]
             if branch_name in current_branches:
                 repo.git.checkout(branch_name)
@@ -377,8 +442,10 @@ class GitMutationService:
                 raise WorkingTreeMismatchError(err_msg)
 
             # 7. Post-patch pre-push validation
+            # Validates base snapshot + patch; the verbatim patch yields the same tree as the
+            # mutated working tree, and the snapshot path never reads the mutable checkout.
             post_val = await self.validation_service.validate_fix(
-                proposal=proposal, context=context, repo_root=source_dir
+                proposal=proposal, context=context
             )
             if post_val.status != ValidationStatus.PASSED or post_val.exit_code != 0:
                 err_msg = (
@@ -422,6 +489,11 @@ class GitMutationService:
                 )
 
             # 9. Push to GitHub remote
+            remote_commit = await self.github_client.get_commit(
+                context.repository_owner, context.repository_name, context.branch
+            )
+            if remote_commit.get("sha") != proposal.commit_sha:
+                raise StaleCommitError("Remote base branch no longer points to approved commit")
             self._push_branch_safely(repo, branch_name)
 
             async with self.repository_factory() as (_, mutation_repo):
@@ -478,10 +550,10 @@ class GitMutationService:
                 # If remote is configured in local repo
                 repo.git.push("origin", branch_name)
             else:
-                logger.info("simulated_git_push_completed", branch=branch_name)
-        except Exception as err:
-            logger.error("git_push_failed", branch=branch_name, error=str(err))
-            raise GitPushError(f"Failed to push branch '{branch_name}': {err}") from err
+                raise GitPushError("Repository has no origin remote")
+        except Exception:
+            logger.error("git_push_failed", branch=branch_name)
+            raise GitPushError(f"Failed to push branch '{branch_name}'") from None
 
     def _build_pr_body(
         self,

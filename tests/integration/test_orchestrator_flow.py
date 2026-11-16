@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -15,6 +15,7 @@ from src.packages.database.repositories import (
     PipelineRepository,
     PipelineRepositoryProtocol,
 )
+from src.packages.shared.approval_service import approval_id_for
 from src.packages.shared.config import settings
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -41,7 +42,11 @@ from src.packages.shared.remediation_orchestrator import RemediationOrchestrator
 
 class MockIntDiagService:
     async def diagnose_failure(
-        self, context: FailureContext, evidence_package: EvidencePackage | None = None
+        self,
+        context: FailureContext,
+        evidence_package: EvidencePackage | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> DiagnosticResult:
         proposal = DiagnosisProposal(
             category=FailureCategory.TEST,
@@ -66,7 +71,11 @@ class MockIntDiagService:
 
 class MockIntContextResolver:
     def resolve_context(
-        self, failure_context: FailureContext, repo_root: Any = None
+        self,
+        failure_context: FailureContext,
+        repo_root: Any = None,
+        provenance: Any = None,
+        **_: object,
     ) -> EvidencePackage:
         return EvidencePackage(
             incident_id=failure_context.incident_id,
@@ -132,12 +141,17 @@ class MockIntApprovalService:
     async def request_approval(
         self, context: FailureContext, proposal: FixProposal, validation: ValidationResult
     ) -> ApprovalRecord:
+        now = datetime.now(UTC)
         record = ApprovalRecord(
-            approval_id=f"appr_int_{proposal.proposal_id}",
+            approval_id=approval_id_for(context.incident_id, proposal.commit_sha),
             incident_id=context.incident_id,
             proposal_id=proposal.proposal_id,
             commit_sha=context.commit_sha,
             status=ApprovalStatus.PENDING,
+            requested_at=now,
+            expires_at=now + timedelta(hours=24),
+            created_at=now,
+            updated_at=now,
         )
         async with self.session_factory() as session:
             repo = ApprovalRepository(session)
@@ -230,7 +244,7 @@ async def test_end_to_end_orchestrator_postgres_flow(
     )
 
     # 1. Process failure
-    pipe_rec = await orch.process_failure(context)
+    pipe_rec = await orch._process_failure_unchecked(context)
     assert pipe_rec.status == PipelineStatus.AWAITING_APPROVAL
 
     # 2. Verify pipeline and approval persisted in PostgreSQL
@@ -250,7 +264,7 @@ async def test_end_to_end_orchestrator_postgres_flow(
 
     # 4. Resume orchestration
     assert pipe_rec.approval_id is not None
-    final_rec = await orch.resume_approval(approval_id=pipe_rec.approval_id)
+    final_rec = await orch._resume_approval_unchecked(approval_id=pipe_rec.approval_id)
     assert final_rec.status == PipelineStatus.COMPLETED
     assert final_rec.pr_number == 202
 

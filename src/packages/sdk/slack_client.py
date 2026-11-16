@@ -117,9 +117,9 @@ class SlackClient:
                 res.raise_for_status()
                 logger.info("slack_approval_card_posted", approval_id=approval.approval_id)
                 return {"channel_id": "webhook", "message_ts": str(time.time())}
-            except Exception as err:
-                logger.error("slack_post_failed", error=str(err))
-                raise SlackError(f"Failed to post card to Slack: {err}") from err
+            except Exception:
+                logger.error("slack_post_failed")
+                raise SlackError("Failed to post card to Slack") from None
 
     async def update_approval_card(
         self,

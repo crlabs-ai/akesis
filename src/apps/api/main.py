@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 
 from src.apps.api.routes import router as webhook_router
+from src.apps.api.webhook_deliveries import router as webhook_deliveries_router
 from src.packages.database.session import get_engine
 from src.packages.shared.config import Settings, settings
 from src.packages.shared.logging import configure_logging, get_logger
@@ -40,6 +41,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.settings = active_settings
 
     # 1. TrustedHostMiddleware (outermost host header validation)
     app.add_middleware(
@@ -80,6 +82,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         return {"status": "ready", "environment": active_settings.environment}
 
     app.include_router(webhook_router)
+    app.include_router(webhook_deliveries_router)
     return app
 
 

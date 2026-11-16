@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -25,9 +25,31 @@ from src.packages.shared.models import (
 from src.packages.shared.mutation_service import GitMutationService
 
 
+class _PassingValidation:
+    """Explicit test double for the post-patch pre-push validation step."""
+
+    async def validate_fix(
+        self,
+        proposal: FixProposal,
+        context: FailureContext,
+        repo_root: Path | None = None,
+    ) -> ValidationResult:
+        return ValidationResult(
+            validation_id=f"val_pre_push_{proposal.proposal_id}",
+            proposal_id=proposal.proposal_id,
+            incident_id=context.incident_id,
+            commit_sha=proposal.commit_sha,
+            status=ValidationStatus.PASSED,
+            command_executed="pytest",
+            exit_code=0,
+            duration_ms=1.0,
+        )
+
+
 class MockIntegrationGitHubClient:
     def __init__(self) -> None:
         self.prs: list[dict[str, Any]] = []
+        self.head_sha = ""
 
     async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
         return {}
@@ -36,7 +58,8 @@ class MockIntegrationGitHubClient:
         return ""
 
     async def get_commit(self, owner: str, repo: str, commit_sha: str) -> dict[str, Any]:
-        return {"sha": commit_sha}
+        # The mutation service passes a branch name; the remote answers with that branch's head.
+        return {"sha": self.head_sha}
 
     async def create_pull_request(
         self, owner: str, repo: str, title: str, body: str, head: str, base: str
@@ -61,7 +84,13 @@ class MockIntegrationRepoCheckout:
         self.target_dir = target_dir
 
     def checkout_commit(
-        self, repo_owner: str, repo_name: str, commit_sha: str, clone_url: str | None = None
+        self,
+        repo_owner: str,
+        repo_name: str,
+        commit_sha: str,
+        clone_url: str | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> Path:
         return self.target_dir
 
@@ -69,10 +98,12 @@ class MockIntegrationRepoCheckout:
 class MockIntegrationSandboxRunner:
     async def run_validation(
         self,
-        repo_source_dir: Path,
+        snapshot: Any,
         patch_diff: str,
         command: ValidationCommand,
         timeout_seconds: float | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> Any:
         from src.packages.sdk.sandbox_runner import ValidationExecutionResult
 
@@ -104,6 +135,10 @@ def mock_git_repo(tmp_path: Path) -> tuple[Path, str]:
     f.write_text("def add(a, b): return a + b\n", encoding="utf-8")
     r.index.add(["calc.py"])
     c = r.index.commit("initial commit")
+    # Local bare remote so the fix-branch push is real without network access.
+    origin_dir = tmp_path / "origin.git"
+    git.Repo.init(origin_dir, bare=True)
+    r.create_remote("origin", str(origin_dir))
     return repo_dir, c.hexsha
 
 
@@ -133,6 +168,10 @@ async def test_full_mutation_flow_with_postgres(
     async with session_factory() as session:
         appr_repo = ApprovalRepository(session)
         await appr_repo.create_approval(approval_rec)
+        # Production resumes with the record as PostgreSQL returns it, so mirror that exactly.
+        loaded = await appr_repo.get_approval(approval_rec.approval_id)
+        assert loaded is not None
+        approval_rec = loaded
 
     context = FailureContext(
         incident_id=approval_rec.incident_id,
@@ -193,15 +232,20 @@ async def test_full_mutation_flow_with_postgres(
             yield (ApprovalRepository(session), MutationRepository(session))
 
     gh_client = MockIntegrationGitHubClient()
+    gh_client.head_sha = commit_sha
     service = GitMutationService(
         repository_factory=scoped_repo_factory,
         github_client=gh_client,
         repo_checkout=MockIntegrationRepoCheckout(repo_dir),
         sandbox_runner=MockIntegrationSandboxRunner(),
     )
+    # Controlled pre-push validation double; the real validator is gated by the provenance hold.
+    service.validation_service = cast(Any, _PassingValidation())
 
     # 2. Execute mutation pipeline
-    record = await service.create_pull_request(context, proposal, validation, approval_rec)
+    record = await service._create_pull_request_unchecked(
+        context, proposal, validation, approval_rec
+    )
     assert record.status == MutationStatus.PR_CREATED
     assert record.pr_number == 108
     assert record.resulting_commit_sha is not None

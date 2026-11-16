@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +28,8 @@ class FailingCheckoutManager(RepoCheckoutProtocol):
         repo_name: str,
         commit_sha: str,
         clone_url: str | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> Path:
         raise RepositoryCheckoutError("Remote git clone timed out")
 
@@ -87,7 +90,7 @@ def test_bounded_context_extraction(temp_repo: Path) -> None:
         raw_log_excerpt="err",
     )
 
-    package = resolver.resolve_context(context, repo_root=temp_repo)
+    package = resolver._resolve_context_unchecked(context, repo_root=temp_repo)
     assert package.retrieval_status == "success"
     assert len(package.code_evidences) == 1
     ev = package.code_evidences[0]
@@ -125,7 +128,7 @@ def test_multiple_files_and_traceback_frames(temp_repo: Path) -> None:
         raw_log_excerpt="err",
     )
 
-    package = resolver.resolve_context(context, repo_root=temp_repo)
+    package = resolver._resolve_context_unchecked(context, repo_root=temp_repo)
     assert package.retrieval_status == "success"
     assert len(package.code_evidences) == 2
 
@@ -156,7 +159,7 @@ def test_oversized_and_empty_files_skipped(temp_repo: Path) -> None:
         raw_log_excerpt="err",
     )
 
-    package = resolver.resolve_context(context, repo_root=temp_repo)
+    package = resolver._resolve_context_unchecked(context, repo_root=temp_repo)
     assert package.retrieval_status == "empty"
     assert any("exceeds limit" in note for note in package.retrieval_notes)
     assert any("empty file" in note for note in package.retrieval_notes)
@@ -185,6 +188,6 @@ def test_checkout_failure_handled_gracefully() -> None:
         raw_log_excerpt="err",
     )
 
-    package = resolver.resolve_context(context)
+    package = resolver._resolve_context_unchecked(context)
     assert package.retrieval_status == "unavailable"
     assert any("Repository checkout failed" in note for note in package.retrieval_notes)

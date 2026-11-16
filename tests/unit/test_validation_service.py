@@ -1,8 +1,11 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from src.packages.sdk.repo_checkout import RepoCheckoutProtocol, RepositoryCheckoutError
 from src.packages.sdk.sandbox_runner import (
     DockerUnavailableError,
     PatchApplicationError,
@@ -19,6 +22,7 @@ from src.packages.shared.models import (
     ValidationStatus,
     WorkflowRunConclusion,
 )
+from src.packages.shared.source_snapshot import SnapshotRejected
 from src.packages.shared.validation_service import ValidationService
 
 
@@ -35,10 +39,12 @@ class MockSandboxRunner(SandboxRunnerProtocol):
 
     async def run_validation(
         self,
-        repo_source_dir: Path,
+        snapshot: Any,
         patch_diff: str,
         command: ValidationCommand,
         timeout_seconds: float | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> ValidationExecutionResult:
         if self.raise_exc:
             raise self.raise_exc
@@ -53,18 +59,17 @@ class MockSandboxRunner(SandboxRunnerProtocol):
         )
 
 
-class MockCheckoutManager(RepoCheckoutProtocol):
-    """Mock checkout manager."""
+class StubSnapshotService:
+    """Controlled stand-in for source preparation: yields an opaque handle, or refuses."""
 
-    def __init__(self, raise_exc: Exception | None = None) -> None:
-        self.raise_exc = raise_exc
+    def __init__(self, refuse: SnapshotRejected | None = None) -> None:
+        self.refuse = refuse
 
-    def checkout_commit(
-        self, repo_owner: str, repo_name: str, commit_sha: str, clone_url: str | None = None
-    ) -> Path:
-        if self.raise_exc:
-            raise self.raise_exc
-        return Path("/tmp/mock_repo")
+    @asynccontextmanager
+    async def prepare(self, token: Any) -> AsyncIterator[Any]:
+        if self.refuse is not None:
+            raise self.refuse
+        yield SimpleNamespace(snapshot_id="stub")
 
 
 @pytest.fixture
@@ -114,7 +119,7 @@ def test_command_selection_matrix(
     sample_proposal_and_context: tuple[FixProposal, FailureContext],
 ) -> None:
     _, context = sample_proposal_and_context
-    service = ValidationService()
+    service = ValidationService(snapshot_service=StubSnapshotService())
 
     # Test
     context.signal.category = FailureCategory.TEST
@@ -141,8 +146,8 @@ async def test_validation_service_invalid_proposal(
     proposal, context = sample_proposal_and_context
     proposal.is_valid = False
 
-    service = ValidationService()
-    result = await service.validate_fix(proposal, context)
+    service = ValidationService(snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.PATCH_REJECTED
     assert result.failure_reason is not None
@@ -153,15 +158,13 @@ async def test_validation_service_checkout_failure(
     sample_proposal_and_context: tuple[FixProposal, FailureContext],
 ) -> None:
     proposal, context = sample_proposal_and_context
-    mock_checkout = MockCheckoutManager(
-        raise_exc=RepositoryCheckoutError("Commit SHA 1122 not found")
-    )
-
-    service = ValidationService(checkout_manager=mock_checkout)
-    result = await service.validate_fix(proposal, context, repo_root=None)
+    refusal = SnapshotRejected("Source snapshot could not be verified", code="sha")
+    service = ValidationService(snapshot_service=StubSnapshotService(refuse=refusal))
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.INFRASTRUCTURE_ERROR
-    assert "Commit SHA 1122 not found" in result.stderr
+    assert "rejected (sha)" in result.stderr
+    assert "/" not in result.stderr  # no filesystem paths in user-facing errors
 
 
 @pytest.mark.asyncio
@@ -180,8 +183,8 @@ async def test_validation_service_passed(
         )
     )
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.PASSED
     assert result.exit_code == 0
@@ -206,8 +209,8 @@ async def test_validation_service_failed(
         )
     )
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.FAILED
     assert result.exit_code == 1
@@ -224,8 +227,8 @@ async def test_validation_service_patch_rejected(
         raise_exc=PatchApplicationError("git apply rejected patch: hunk failed")
     )
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.PATCH_REJECTED
     assert "hunk failed" in result.stderr
@@ -239,8 +242,8 @@ async def test_validation_service_timeout(
     proposal, context = sample_proposal_and_context
     mock_runner = MockSandboxRunner(raise_exc=SandboxTimeoutError("Timed out after 30s"))
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.TIMED_OUT
     assert result.timed_out is True
@@ -254,8 +257,8 @@ async def test_validation_service_docker_unavailable(
     proposal, context = sample_proposal_and_context
     mock_runner = MockSandboxRunner(raise_exc=DockerUnavailableError("Docker daemon offline"))
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.INFRASTRUCTURE_ERROR
     assert "Docker daemon offline" in result.stderr
@@ -269,8 +272,8 @@ async def test_validation_service_unexpected_error(
     proposal, context = sample_proposal_and_context
     mock_runner = MockSandboxRunner(raise_exc=RuntimeError("Unexpected OS crash"))
 
-    service = ValidationService(sandbox_runner=mock_runner)
-    result = await service.validate_fix(proposal, context, repo_root=tmp_path)
+    service = ValidationService(sandbox_runner=mock_runner, snapshot_service=StubSnapshotService())
+    result = await service._validate_fix_unchecked(proposal, context)
 
     assert result.status == ValidationStatus.INFRASTRUCTURE_ERROR
     assert result.failure_reason is not None

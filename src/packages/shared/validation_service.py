@@ -1,11 +1,5 @@
 import time
-from pathlib import Path
 
-from src.packages.sdk.repo_checkout import (
-    GitRepositoryCheckoutManager,
-    RepoCheckoutProtocol,
-    RepositoryCheckoutError,
-)
 from src.packages.sdk.sandbox_runner import (
     DockerSandboxRunner,
     DockerUnavailableError,
@@ -22,6 +16,12 @@ from src.packages.shared.models import (
     ValidationResult,
     ValidationStatus,
 )
+from src.packages.shared.persisted_provenance import (
+    bind_work_to_context,
+    verify_context_provenance,
+)
+from src.packages.shared.provenance import require_verified_provenance
+from src.packages.shared.source_snapshot import SnapshotPreparer, SnapshotRejected, SnapshotService
 
 logger = get_logger("akesis.validation_service")
 
@@ -32,10 +32,10 @@ class ValidationService:
     def __init__(
         self,
         sandbox_runner: SandboxRunnerProtocol | None = None,
-        checkout_manager: RepoCheckoutProtocol | None = None,
+        snapshot_service: SnapshotPreparer | None = None,
     ) -> None:
         self.sandbox_runner = sandbox_runner or DockerSandboxRunner()
-        self.checkout_manager = checkout_manager or GitRepositoryCheckoutManager()
+        self.snapshot_service = snapshot_service or SnapshotService()
 
     def select_validation_command(self, context: FailureContext) -> ValidationCommand | None:
         """Maps FailureContext deterministically to an allowlisted ValidationCommand."""
@@ -60,9 +60,24 @@ class ValidationService:
         self,
         proposal: FixProposal,
         context: FailureContext,
-        repo_root: Path | None = None,
     ) -> ValidationResult:
-        """Executes end-to-end sandbox validation for a FixProposal."""
+        """Executes end-to-end sandbox validation for a FixProposal.
+
+        The only source is a verified, immutable snapshot of the exact commit. Fails closed before
+        any snapshot acquisition or container work while the provenance hold is active.
+        """
+        provenance = await verify_context_provenance(context)
+        bind_work_to_context(context, proposal=proposal)
+        require_verified_provenance()
+        return await self._validate_fix_unchecked(proposal, context, provenance)
+
+    async def _validate_fix_unchecked(
+        self,
+        proposal: FixProposal,
+        context: FailureContext,
+        provenance: object | None = None,
+    ) -> ValidationResult:
+        """Validation body. Private: callers must use the gated public method."""
         start_time = time.perf_counter()
         validation_id = f"val_{proposal.proposal_id}"
         incident_id = context.incident_id
@@ -111,38 +126,15 @@ class ValidationService:
                 failure_reason="Unsupported validation category.",
             )
 
-        # 3. Resolve exact commit checkout directory
-        if repo_root is None:
-            try:
-                repo_root = self.checkout_manager.checkout_commit(
-                    repo_owner=context.repository_owner,
-                    repo_name=context.repository_name,
-                    commit_sha=commit_sha,
-                )
-            except RepositoryCheckoutError as err:
-                duration_ms = (time.perf_counter() - start_time) * 1000.0
-                return ValidationResult(
-                    validation_id=validation_id,
-                    proposal_id=proposal.proposal_id,
-                    incident_id=incident_id,
-                    commit_sha=commit_sha,
-                    status=ValidationStatus.INFRASTRUCTURE_ERROR,
-                    command_executed=str(command),
-                    exit_code=None,
-                    stdout="",
-                    stderr=f"Repository checkout failed: {err}",
-                    duration_ms=round(duration_ms, 2),
-                    timed_out=False,
-                    failure_reason="Failed to checkout exact commit SHA.",
-                )
-
-        # 4. Invocate Sandbox Runner
+        # 3. Acquire a verified snapshot, validate inside it, and release it on every exit path
         try:
-            exec_res = await self.sandbox_runner.run_validation(
-                repo_source_dir=repo_root,
-                patch_diff=proposal.unified_diff,
-                command=command,
-            )
+            async with self.snapshot_service.prepare(provenance) as snapshot:
+                exec_res = await self.sandbox_runner.run_validation(
+                    snapshot,
+                    proposal.unified_diff,
+                    command,
+                    provenance=provenance,
+                )
 
             status = (
                 ValidationStatus.TIMED_OUT
@@ -227,6 +219,23 @@ class ValidationService:
                 duration_ms=round(duration_ms, 2),
                 timed_out=False,
                 failure_reason="Docker daemon unavailable on host.",
+            )
+
+        except SnapshotRejected as err:
+            duration_ms = (time.perf_counter() - start_time) * 1000.0
+            return ValidationResult(
+                validation_id=validation_id,
+                proposal_id=proposal.proposal_id,
+                incident_id=incident_id,
+                commit_sha=commit_sha,
+                status=ValidationStatus.INFRASTRUCTURE_ERROR,
+                command_executed=str(command),
+                exit_code=None,
+                stdout="",
+                stderr=f"Source snapshot rejected ({err.code}).",
+                duration_ms=round(duration_ms, 2),
+                timed_out=False,
+                failure_reason="Source snapshot could not be verified.",
             )
 
         except Exception as err:

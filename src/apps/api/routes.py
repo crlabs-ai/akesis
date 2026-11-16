@@ -1,10 +1,14 @@
+import asyncio
 import hashlib
 import hmac
 import json
-import uuid
+import math
+import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs
 
+import httpx
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -15,11 +19,14 @@ from fastapi import (
     Request,
     status,
 )
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.packages.database.models import WebhookEventModel
 from src.packages.database.repositories import IncidentRepository, PipelineRepository
 from src.packages.database.session import get_db_session
-from src.packages.sdk.github_client import GitHubClient, GitHubResourceNotFoundError
+from src.packages.database.webhook_events import DeliveryConflictError, WebhookEventRepository
+from src.packages.sdk.github_app_auth import GitHubAppAuth
 from src.packages.sdk.slack_client import verify_slack_signature
 from src.packages.shared.approval_service import (
     ApprovalNotFoundError,
@@ -27,10 +34,8 @@ from src.packages.shared.approval_service import (
     approval_service,
 )
 from src.packages.shared.config import settings
-from src.packages.shared.log_parser import filter_and_extract_signal
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
-    FailureContext,
     IncidentDetail,
     IncidentSummary,
     IngestionResponse,
@@ -42,20 +47,17 @@ from src.packages.shared.remediation_orchestrator import (
     RemediationOrchestrator,
 )
 from src.packages.shared.security import verify_read_token
+from src.packages.shared.webhook_admission import admit_verified_delivery
+from src.packages.shared.webhook_retry import RetrySchedule, classify_retry
+from src.packages.shared.workflow_provenance import (
+    ProvenanceVerificationError,
+    TransientProvenanceError,
+    WorkflowRunProvenanceVerifier,
+)
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
 orchestrator = RemediationOrchestrator()
-
-
-async def _safe_process_failure(context: FailureContext) -> None:
-    """Executes failure processing in background, catching all exceptions."""
-    try:
-        await orchestrator.process_failure(context)
-    except Exception as err:
-        logger.error(
-            "background_process_failure_error", error=str(err), incident_id=context.incident_id
-        )
 
 
 async def _safe_resume_approval(approval_id: str) -> None:
@@ -88,6 +90,99 @@ def verify_github_signature(
     return hmac.compare_digest(computed_hmac, expected_signature)
 
 
+async def _record_malformed_delivery(
+    session: AsyncSession, delivery_id: str | None, payload_bytes: bytes
+) -> None:
+    """Persist only the digest of an authenticated malformed workflow delivery."""
+    if not delivery_id or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", delivery_id):
+        raise HTTPException(status_code=400, detail="Missing or invalid GitHub delivery ID")
+    try:
+        event, _ = await WebhookEventRepository(session).register(
+            delivery_id, hashlib.sha256(payload_bytes).hexdigest(), "workflow_run"
+        )
+        if event.status in ("received", "retryable_error"):
+            await session.execute(
+                update(WebhookEventModel)
+                .where(
+                    WebhookEventModel.delivery_id == delivery_id,
+                    WebhookEventModel.status.in_(("received", "retryable_error")),
+                )
+                .values(
+                    status="rejected", failure_code="malformed_json", updated_at=datetime.now(UTC)
+                )
+            )
+        await session.commit()
+    except DeliveryConflictError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Delivery conflicts with prior payload"
+        ) from None
+
+
+EXHAUSTED_DETAIL = "Delivery verification retries exhausted"
+IN_PROGRESS_RETRY_AFTER_SECONDS = 30
+_TRANSIENT_DETAIL = "Workflow provenance could not be verified"
+
+
+def _retry_schedule(
+    headers: dict[str, str], attempt: int, settings_obj: Any, now: datetime
+) -> RetrySchedule:
+    return classify_retry(
+        headers,
+        attempt,
+        now=now,
+        base_delay=settings_obj.webhook_retry_base_delay_seconds,
+        max_delay=settings_obj.webhook_retry_max_delay_seconds,
+        provider_ceiling=settings_obj.webhook_retry_provider_delay_ceiling_seconds,
+    )
+
+
+def _seconds_until(at: datetime, now: datetime) -> int:
+    due = at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+    return max(1, math.ceil((due - now).total_seconds()))
+
+
+def _attempt_failure_response(
+    outcome: str | None, retry_at: datetime, now: datetime, transient_detail: str
+) -> HTTPException:
+    """Map the persisted outcome of a failed attempt to the response for the sender."""
+    if outcome in ("retryable_error", "provider_hold"):
+        return HTTPException(
+            status_code=503,
+            detail=transient_detail,
+            headers={"Retry-After": str(_seconds_until(retry_at, now))},
+        )
+    if outcome == "exhausted":
+        return HTTPException(status_code=422, detail=EXHAUSTED_DETAIL)
+    if outcome == "rejected":
+        return HTTPException(status_code=422, detail=_TRANSIENT_DETAIL)
+    # The attempt was superseded by another verifier; the holder of that attempt decides.
+    return HTTPException(
+        status_code=503,
+        detail="Delivery verification already in progress",
+        headers={"Retry-After": str(IN_PROGRESS_RETRY_AFTER_SECONDS)},
+    )
+
+
+def _unclaimed_response(row: Any, now: datetime) -> HTTPException:
+    """Explain a refused redelivery; a scheduled retry tells the sender when to try again."""
+    if (
+        row is not None
+        and row.status in ("retryable_error", "provider_hold")
+        and row.next_retry_at is not None
+    ):
+        return HTTPException(
+            status_code=503,
+            detail="Delivery verification is scheduled for retry; redeliver after Retry-After",
+            headers={"Retry-After": str(_seconds_until(row.next_retry_at, now))},
+        )
+    return HTTPException(
+        status_code=503,
+        detail="Delivery verification already in progress",
+        headers={"Retry-After": str(IN_PROGRESS_RETRY_AFTER_SECONDS)},
+    )
+
+
 @router.post(
     "/v1/webhooks/github",
     response_model=IngestionResponse,
@@ -99,6 +194,8 @@ async def handle_github_webhook(
     background_tasks: BackgroundTasks,
     x_github_event: str | None = Header(default=None, alias="X-GitHub-Event"),
     x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
+    x_github_delivery: str | None = Header(default=None, alias="X-GitHub-Delivery"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> IngestionResponse:
     """Receives and verifies webhook events, launching orchestration asynchronously."""
     payload_bytes = await request.body()
@@ -127,19 +224,22 @@ async def handle_github_webhook(
     # 3. Parse JSON Payload
     try:
         payload: dict[str, Any] = await request.json()
-    except Exception as err:
-        logger.error("Failed to parse webhook JSON body", error=str(err))
+    except (ValueError, UnicodeDecodeError):
+        await _record_malformed_delivery(session, x_github_delivery, payload_bytes)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Malformed JSON payload",
-        ) from err
+        ) from None
 
     # 4. Validate and Normalize workflow_run Payload
+    if not isinstance(payload, dict):
+        await _record_malformed_delivery(session, x_github_delivery, payload_bytes)
+        raise HTTPException(status_code=400, detail="Malformed JSON payload")
     workflow_run_data = payload.get("workflow_run")
     repo_data = payload.get("repository")
     action = payload.get("action", "")
 
-    if not workflow_run_data or not repo_data:
+    if not isinstance(workflow_run_data, dict) or not isinstance(repo_data, dict):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Payload missing required 'workflow_run' or 'repository' objects",
@@ -159,8 +259,8 @@ async def handle_github_webhook(
         repository_name=repo_data.get("name", "unknown"),
         run_id=workflow_run_data.get("id", 0),
         workflow_name=workflow_run_data.get("name", "Unnamed Workflow"),
-        head_branch=workflow_run_data.get("head_branch", "unknown"),
-        head_sha=workflow_run_data.get("head_sha", "unknown"),
+        head_branch=workflow_run_data.get("head_branch") or "",
+        head_sha=workflow_run_data.get("head_sha") or "",
         run_url=workflow_run_data.get("html_url", ""),
         conclusion=conclusion,
         sender=payload.get("sender", {}).get("login"),
@@ -179,57 +279,175 @@ async def handle_github_webhook(
             message=f"Workflow run conclusion '{event.conclusion}' is not a failure",
         )
 
-    incident_id = f"inc_{uuid.uuid4().hex[:12]}"
-    logger.info(
-        "Ingested workflow failure event",
-        incident_id=incident_id,
-        repo=f"{event.repository_owner}/{event.repository_name}",
-        run_id=event.run_id,
-        sha=event.head_sha,
-        branch=event.head_branch,
-    )
-
-    # 6. Fetch Logs & Extract Signal
-    client = GitHubClient()
-    raw_logs = ""
+    if action != "completed":
+        return IngestionResponse(status="ignored", message="Workflow run is not completed")
+    if not x_github_delivery or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", x_github_delivery):
+        raise HTTPException(status_code=400, detail="Missing or invalid GitHub delivery ID")
+    deliveries = WebhookEventRepository(session)
     try:
-        raw_logs = await client.get_workflow_run_logs(
-            owner=event.repository_owner,
-            repo=event.repository_name,
-            run_id=event.run_id,
+        delivery, _ = await deliveries.register(
+            x_github_delivery, hashlib.sha256(payload_bytes).hexdigest(), "workflow_run"
         )
-    except GitHubResourceNotFoundError:
-        logger.warning("Logs not found on GitHub for run", run_id=event.run_id)
-        raw_logs = "Log output unavailable from GitHub API"
-    except Exception as err:
-        logger.error("Failed to retrieve logs from GitHub API", error=str(err))
-        raw_logs = f"Log retrieval error: {err}"
+        if delivery.status in ("verified", "duplicate"):
+            await session.commit()
+            return IngestionResponse(status="accepted", message="Delivery already processed")
+        if delivery.status == "rejected":
+            await session.commit()
+            raise HTTPException(status_code=422, detail="Delivery was rejected")
+        if delivery.status == "exhausted":
+            # Terminal: no claim, no GitHub call, and no state change for repeat deliveries.
+            await session.commit()
+            raise HTTPException(status_code=422, detail=EXHAUSTED_DETAIL)
+        max_attempts = request.app.state.settings.webhook_retry_max_attempts
+        claimed = await deliveries.claim(x_github_delivery, max_attempts)
+        if not claimed:
+            if await deliveries.exhaust(x_github_delivery, max_attempts):
+                await session.commit()
+                raise HTTPException(status_code=422, detail=EXHAUSTED_DETAIL)
+            row = await deliveries.state(x_github_delivery)
+            await session.commit()
+            raise _unclaimed_response(row, datetime.now(UTC))
+        source = workflow_run_data.get("head_repository") or {}
+        installation = payload.get("installation") or {}
 
-    # 7. Extract Failure Signal & Construct FailureContext
-    signal = filter_and_extract_signal(raw_logs)
-    failure_context = FailureContext(
-        incident_id=incident_id,
-        repository_owner=event.repository_owner,
-        repository_name=event.repository_name,
-        run_id=event.run_id,
+        def safe_int(value: Any) -> int | None:
+            return value if type(value) is int and 0 < value < 2**63 else None
+
+        def safe_str(value: Any, limit: int) -> str | None:
+            return value if isinstance(value, str) and 0 < len(value) <= limit else None
+
+        await session.execute(
+            update(WebhookEventModel)
+            .where(WebhookEventModel.delivery_id == x_github_delivery)
+            .values(
+                action="completed",
+                installation_id=safe_int(installation.get("id"))
+                if isinstance(installation, dict)
+                else None,
+                event_repository_id=safe_int(repo_data.get("id")),
+                event_repository_name=safe_str(repo_data.get("full_name"), 255),
+                run_id=safe_int(workflow_run_data.get("id")),
+                run_attempt=(
+                    value
+                    if (value := safe_int(workflow_run_data.get("run_attempt"))) is not None
+                    and value < 2**31
+                    else None
+                ),
+                source_repository_id=safe_int(source.get("id"))
+                if isinstance(source, dict)
+                else None,
+                source_repository_name=safe_str(source.get("full_name"), 255)
+                if isinstance(source, dict)
+                else None,
+                source_sha=safe_str(workflow_run_data.get("head_sha"), 40),
+                source_branch=safe_str(workflow_run_data.get("head_branch"), 255),
+                workflow_name=safe_str(workflow_run_data.get("name"), 255),
+                run_url=safe_str(workflow_run_data.get("html_url"), 512),
+                conclusion=conclusion.value,
+            )
+        )
+        attempt_number = (
+            await session.execute(
+                select(WebhookEventModel.attempt_count).where(
+                    WebhookEventModel.delivery_id == x_github_delivery
+                )
+            )
+        ).scalar_one()
+        await session.commit()
+    except DeliveryConflictError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="Delivery conflicts with prior payload"
+        ) from None
+
+    # Verification is deliberately separate from the unconditional remediation hold.
+    active_settings = request.app.state.settings
+    if not active_settings.github_app_id or not active_settings.github_app_private_key:
+        now = datetime.now(UTC)
+        schedule = _retry_schedule({}, attempt_number, active_settings, now)
+        outcome = await deliveries.record_attempt_failure(
+            x_github_delivery,
+            attempt_number,
+            retryable=True,
+            failure_code="app_not_configured",
+            next_retry_at=schedule.next_retry_at,
+            max_attempts=active_settings.webhook_retry_max_attempts,
+            retry_status=schedule.status,
+        )
+        await session.commit()
+        raise _attempt_failure_response(
+            outcome, schedule.next_retry_at, now, "GitHub App provenance verification unavailable"
+        )
+    try:
+        # One deadline bounds every GitHub request in this verification (see ADR-0010).
+        async with asyncio.timeout(active_settings.webhook_verification_deadline_seconds):
+            async with httpx.AsyncClient(base_url="https://api.github.com", timeout=30.0) as api:
+                app_auth = GitHubAppAuth(
+                    active_settings.github_app_id,
+                    active_settings.github_app_private_key,
+                    client=api,
+                )
+                provenance = await WorkflowRunProvenanceVerifier(app_auth, api).verify(
+                    payload, x_github_delivery
+                )
+    except TimeoutError:
+        now = datetime.now(UTC)
+        schedule = _retry_schedule({}, attempt_number, active_settings, now)
+        outcome = await deliveries.record_attempt_failure(
+            x_github_delivery,
+            attempt_number,
+            retryable=True,
+            failure_code="verification_deadline_exceeded",
+            next_retry_at=schedule.next_retry_at,
+            max_attempts=active_settings.webhook_retry_max_attempts,
+            retry_status=schedule.status,
+        )
+        await session.commit()
+        raise _attempt_failure_response(
+            outcome, schedule.next_retry_at, now, _TRANSIENT_DETAIL
+        ) from None
+    except (ProvenanceVerificationError, ValueError) as error:
+        retryable = isinstance(error, TransientProvenanceError)
+        now = datetime.now(UTC)
+        retry_headers = error.headers if isinstance(error, TransientProvenanceError) else {}
+        schedule = _retry_schedule(retry_headers, attempt_number, active_settings, now)
+        outcome = await deliveries.record_attempt_failure(
+            x_github_delivery,
+            attempt_number,
+            retryable=retryable,
+            failure_code=error.code
+            if isinstance(error, ProvenanceVerificationError)
+            else "provenance_mismatch",
+            next_retry_at=schedule.next_retry_at,
+            max_attempts=active_settings.webhook_retry_max_attempts,
+            retry_status=schedule.status,
+        )
+        await session.commit()
+        raise _attempt_failure_response(
+            outcome, schedule.next_retry_at, now, _TRANSIENT_DETAIL
+        ) from None
+
+    admission = await admit_verified_delivery(
+        session,
+        delivery_id=x_github_delivery,
+        attempt_number=attempt_number,
+        provenance=provenance,
         workflow_name=event.workflow_name,
-        commit_sha=event.head_sha,
-        branch=event.head_branch,
         run_url=event.run_url,
         conclusion=event.conclusion,
-        signal=signal,
-        raw_log_excerpt=signal.extracted_snippet,
     )
-
-    # 8. Schedule Orchestration Pipeline Non-Blockingly in Background Task
-    background_tasks.add_task(_safe_process_failure, failure_context)
-
-    target_display = signal.target_file or "unknown file"
+    if admission.result == "superseded":
+        raise HTTPException(status_code=503, detail="Verification claim was superseded")
+    if admission.result == "conflict":
+        raise HTTPException(
+            status_code=409, detail="Workflow identity conflicts with prior delivery"
+        )
+    if admission.result == "duplicate":
+        return IngestionResponse(status="accepted", message="Workflow attempt already processed")
     return IngestionResponse(
         status="accepted",
-        incident_id=incident_id,
-        category=signal.category,
-        message=f"Remediation pipeline scheduled for {signal.error_type} in {target_display}",
+        incident_id=admission.incident_id,
+        message="Provenance verified; remediation remains disabled",
     )
 
 
@@ -285,7 +503,9 @@ async def handle_slack_interaction(
     action_id = action.get("action_id", "")
     approval_id = action.get("value", "")
     user = payload_data.get("user", {})
-    user_name = user.get("username") or user.get("name") or user.get("id", "unknown_user")
+    user_id = user.get("id", "")
+    workspace_id = (payload_data.get("team") or {}).get("id", "")
+    channel_id = (payload_data.get("channel") or {}).get("id", "")
     response_url = payload_data.get("response_url")
 
     if not approval_id:
@@ -294,14 +514,27 @@ async def handle_slack_interaction(
             detail="Missing approval ID in action value",
         )
 
-    decision = "approve" if action_id == "approve_fix" else "reject"
+    decisions = {"approve_fix": "approve", "reject_fix": "reject"}
+    if action_id not in decisions:
+        raise HTTPException(status_code=400, detail="Unsupported approval action")
+    policy = request.app.state.settings
+    if (
+        not user_id
+        or user_id not in policy.slack_approver_user_ids
+        or not policy.slack_workspace_id
+        or workspace_id != policy.slack_workspace_id
+        or not policy.slack_channel_id
+        or channel_id != policy.slack_channel_id
+    ):
+        raise HTTPException(status_code=403, detail="Slack approver is not authorized")
+    decision = decisions[action_id]
 
     try:
         # 1. Authoritative decision recorded in PostgreSQL
         record, is_duplicate = await approval_service.record_decision(
             approval_id=approval_id,
             decision=decision,
-            decided_by=user_name,
+            decided_by=user_id,
             response_url=response_url,
         )
 

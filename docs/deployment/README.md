@@ -42,6 +42,28 @@ DATABASE_URL=postgresql+asyncpg://akesis_user:SECURE_DB_PASSWORD@localhost:5432/
 GITHUB_WEBHOOK_SECRET=your_generated_hmac_secret_32_chars_min
 GITHUB_TOKEN=ghp_your_github_personal_access_token_or_app_token
 GITHUB_API_URL=https://api.github.com
+# GitHub App identity (required by the retry worker and provenance verification)
+GITHUB_APP_ID=123456
+# Multi-line PEM: place this in /opt/akesis/.env as a double-quoted value, not in the systemd
+# EnvironmentFile (systemd cannot carry multi-line values). The settings loader reads .env from the
+# working directory. The settings loader is covered by tests (quoted multi-line and escaped forms).
+# Confirm the same on the deployed host during the live smoke test.
+GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
+...PKCS#8 body...
+-----END PRIVATE KEY-----"
+
+# Operator read API (GET /v1/webhook-deliveries and other read endpoints); required in production
+READ_API_TOKEN=generate_a_random_token_of_32_chars_or_more
+
+# Retry worker and webhook retry policy (defaults shown; see ADR-0010)
+WEBHOOK_RETRY_MAX_ATTEMPTS=5
+WEBHOOK_RETRY_BASE_DELAY_SECONDS=60
+WEBHOOK_RETRY_MAX_DELAY_SECONDS=900
+WEBHOOK_RETRY_PROVIDER_DELAY_CEILING_SECONDS=86400
+WORKER_POLL_SECONDS=15
+WORKER_BATCH_SIZE=20
+WORKER_HEARTBEAT_PATH=/run/akesis/worker-heartbeat.json
+WORKER_HEARTBEAT_MAX_AGE_SECONDS=300
 
 # Google Gemini AI Integration
 GEMINI_API_KEY=your_gemini_api_key_from_google_ai_studio
@@ -140,6 +162,59 @@ sudo systemctl status akesis
 
 ---
 
+### Step 4a: Configure the Retry Worker (systemd)
+
+The retry worker executes scheduled webhook verification retries. It is a separate process from the API and shares the same `.env` file and PostgreSQL database. Either process can be restarted independently. Create `/etc/systemd/system/akesis-worker.service`:
+
+```ini
+[Unit]
+Description=Akesis webhook retry worker
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=akesis
+Group=akesis
+WorkingDirectory=/opt/akesis
+EnvironmentFile=/opt/akesis/.env
+ExecStart=/opt/akesis/.venv/bin/python -m src.apps.worker
+# Heartbeat lives in a service-owned runtime directory (default /run/akesis), never /tmp.
+RuntimeDirectory=akesis
+RuntimeDirectoryMode=0750
+Restart=always
+RestartSec=5s
+# Watchdog: the worker pings systemd only when a delivery or a pass completes. A frozen or blocked
+# worker stops pinging and is restarted. Keep WatchdogSec above the verification deadline (240s).
+Type=simple
+NotifyAccess=main
+WatchdogSec=600s
+# A stop waits for the deliveries already claimed in the current batch (up to 20, each bounded by
+# GitHub request timeouts), so allow a generous window before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=300s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the worker, then confirm readiness:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable akesis-worker
+sudo systemctl start akesis-worker
+/opt/akesis/.venv/bin/python -m src.apps.worker.healthcheck
+```
+
+On SIGTERM the worker finishes only the delivery it is verifying, which is bounded by the 240-second deadline, and releases every claim it has not started. `TimeoutStopSec=300s` therefore covers the worst case. Validated in user scope: a SIGKILL restarts the worker, a frozen worker (SIGSTOP) is restarted by the watchdog within WatchdogSec, pings advance during normal operation, a clean stop exits 0 and systemd removes the runtime directory (so the probe then reports no heartbeat), and a frozen worker is reported stale. Not validated here: the `akesis` system account, `/run` ownership, `ProtectSystem`, and `ProtectHome`. One interaction to know about: `PrivateTmp=yes` hides `/tmp` from the service, so `WorkingDirectory` must not be under `/tmp`. A worker killed mid-verification leaves that one row `verifying`; it is reclaimed after 10 minutes and counts as an attempt. Claims it had not started are not left behind on a clean stop. The worker requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`. Without them it claims nothing, so due deliveries wait visibly and no attempts are consumed.
+
+---
+
 ### Step 5: Configure Reverse Proxy (Nginx)
 Create `/etc/nginx/sites-available/akesis.conf`:
 
@@ -216,6 +291,14 @@ curl -i https://akesis.yourdomain.com/health/liveness
 # Check readiness
 curl -i https://akesis.yourdomain.com/health/readiness
 ```
+
+Check the retry worker (no network access needed):
+
+```bash
+/opt/akesis/.venv/bin/python -m src.apps.worker.healthcheck
+```
+
+Exit code 0 means the worker's heartbeat is fresh and in the `ok` state. Exit code 1 prints the reason. Run the probe as the `akesis` user or as root: the runtime directory is `0750`, so other users cannot read the heartbeat.
 
 ---
 

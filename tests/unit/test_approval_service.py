@@ -180,7 +180,7 @@ async def test_request_approval_success(
         slack_client=mock_slack,
     )
 
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
     assert record.status == ApprovalStatus.PENDING
     assert record.slack_channel_id == "C12345"
     assert record.slack_message_ts == "1234567890.123"
@@ -206,7 +206,7 @@ async def test_request_approval_slack_failure_handled(
     )
 
     # Even if Slack fails, database record remains authoritative
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
     assert record.status == ApprovalStatus.PENDING
     assert record.approval_id in mock_repo.records
 
@@ -221,7 +221,7 @@ async def test_request_approval_ineligible_on_validation_failure(
 
     service = ApprovalService()
     with pytest.raises(IneligibleApprovalError):
-        await service.request_approval(context, proposal, validation)
+        await service._request_approval_unchecked(context, proposal, validation)
 
 
 @pytest.mark.asyncio
@@ -233,7 +233,7 @@ async def test_request_approval_ineligible_on_low_confidence(
 
     service = ApprovalService()
     with pytest.raises(IneligibleApprovalError):
-        await service.request_approval(context, proposal, validation)
+        await service._request_approval_unchecked(context, proposal, validation)
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_record_decision_approve_and_reject(
         slack_client=mock_slack,
     )
 
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
 
     # Approve
     updated, is_dup = await service.record_decision(
@@ -285,7 +285,7 @@ async def test_record_decision_slack_update_failure_handled(
         slack_client=mock_slack,
     )
 
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
     updated, is_dup = await service.record_decision(
         approval_id=record.approval_id,
         decision="approve",
@@ -312,7 +312,7 @@ async def test_record_decision_idempotent_duplicate(
         repository_factory=mock_repo_factory,
         slack_client=MockSlackClient(),
     )
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
 
     # First approve
     await service.record_decision(record.approval_id, "approve", "dev1")
@@ -338,7 +338,7 @@ async def test_record_decision_illegal_transition_rejected(
         repository_factory=mock_repo_factory,
         slack_client=MockSlackClient(),
     )
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
 
     # Approve
     await service.record_decision(record.approval_id, "approve", "dev1")
@@ -376,7 +376,7 @@ async def test_record_decision_expired(
         repository_factory=mock_repo_factory,
         slack_client=MockSlackClient(),
     )
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
 
     # Expire the record
     record.expires_at = datetime.now(UTC) - timedelta(hours=1)
@@ -397,7 +397,7 @@ async def test_get_approval(
         yield mock_repo
 
     service = ApprovalService(repository_factory=mock_repo_factory)
-    record = await service.request_approval(context, proposal, validation)
+    record = await service._request_approval_unchecked(context, proposal, validation)
 
     fetched = await service.get_approval(record.approval_id)
     assert fetched is not None

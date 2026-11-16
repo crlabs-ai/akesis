@@ -15,24 +15,24 @@ from src.packages.shared.config import settings
 def test_invalid_commit_sha_rejected() -> None:
     manager = GitRepositoryCheckoutManager(base_dir="/tmp/test_repos")
     with pytest.raises(InvalidCommitError) as exc:
-        manager.checkout_commit("crlabs-ai", "akesis", "invalid; rm -rf /")
+        manager._checkout_commit_unchecked("crlabs-ai", "akesis", "invalid; rm -rf /")
     assert "Invalid commit SHA format" in str(exc.value)
 
     with pytest.raises(InvalidCommitError):
-        manager.checkout_commit("crlabs-ai", "akesis", "")
+        manager._checkout_commit_unchecked("crlabs-ai", "akesis", "")
 
     with pytest.raises(InvalidCommitError):
-        manager.checkout_commit("crlabs-ai", "akesis", "12345")  # Too short
+        manager._checkout_commit_unchecked("crlabs-ai", "akesis", "12345")  # Too short
 
 
 def test_invalid_repo_owner_or_name_rejected() -> None:
     manager = GitRepositoryCheckoutManager(base_dir="/tmp/test_repos")
     with pytest.raises(RepositoryCheckoutError) as exc:
-        manager.checkout_commit("../traversal", "repo", "a" * 40)
+        manager._checkout_commit_unchecked("../traversal", "repo", "a" * 40)
     assert "Invalid repository owner" in str(exc.value)
 
     with pytest.raises(RepositoryCheckoutError) as exc:
-        manager.checkout_commit("owner", "repo;rm", "a" * 40)
+        manager._checkout_commit_unchecked("owner", "repo;rm", "a" * 40)
     assert "Invalid repository name" in str(exc.value)
 
 
@@ -69,7 +69,7 @@ def test_repo_checkout_exact_commit_detached_head(tmp_path: Path) -> None:
     # 2. Checkout c1 via manager
     base_checkout_dir = tmp_path / "checkouts"
     manager = GitRepositoryCheckoutManager(base_dir=base_checkout_dir)
-    checked_out = manager.checkout_commit(
+    checked_out = manager._checkout_commit_unchecked(
         repo_owner="test_owner",
         repo_name="test_repo",
         commit_sha=sha1,
@@ -83,7 +83,7 @@ def test_repo_checkout_exact_commit_detached_head(tmp_path: Path) -> None:
     assert (checked_out / "app.py").read_text() == "print('v1')\n"
 
     # 3. Checkout c2 into existing clone
-    checked_out_2 = manager.checkout_commit(
+    checked_out_2 = manager._checkout_commit_unchecked(
         repo_owner="test_owner",
         repo_name="test_repo",
         commit_sha=sha2,
@@ -96,7 +96,7 @@ def test_repo_checkout_exact_commit_detached_head(tmp_path: Path) -> None:
 def test_repo_checkout_missing_repo_error(tmp_path: Path) -> None:
     manager = GitRepositoryCheckoutManager(base_dir=tmp_path / "checkouts")
     with pytest.raises(RepositoryCheckoutError) as exc:
-        manager.checkout_commit(
+        manager._checkout_commit_unchecked(
             repo_owner="nonexistent",
             repo_name="nonexistent",
             commit_sha="a" * 40,
@@ -120,7 +120,7 @@ def test_repo_checkout_fetches_missing_remote_commit_successfully(tmp_path: Path
     # 2. Clone initially with C1
     base_checkout_dir = tmp_path / "checkouts"
     manager = GitRepositoryCheckoutManager(base_dir=base_checkout_dir)
-    checked_out = manager.checkout_commit(
+    checked_out = manager._checkout_commit_unchecked(
         repo_owner="test_owner",
         repo_name="test_repo",
         commit_sha=sha1,
@@ -141,7 +141,7 @@ def test_repo_checkout_fetches_missing_remote_commit_successfully(tmp_path: Path
     assert _has_commit(local_repo, sha2) is False
 
     # 4. Checkout C2 via manager - should fetch from remote and succeed
-    checked_out_c2 = manager.checkout_commit(
+    checked_out_c2 = manager._checkout_commit_unchecked(
         repo_owner="test_owner",
         repo_name="test_repo",
         commit_sha=sha2,
@@ -169,7 +169,7 @@ def test_repo_checkout_unresolvable_sha_fails_closed(tmp_path: Path) -> None:
     # Non-existent SHA
     fake_sha = "f" * 40
     with pytest.raises(InvalidCommitError) as exc:
-        manager.checkout_commit(
+        manager._checkout_commit_unchecked(
             repo_owner="test_owner",
             repo_name="test_repo",
             commit_sha=fake_sha,

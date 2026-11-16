@@ -233,7 +233,7 @@ curl -i -X POST http://127.0.0.1:8000/v1/webhooks/github \
 ```
 
 ### 6. Process Resilience Under Asynchronous Workloads
-* Background failures during log retrieval / LLM execution are trapped cleanly inside `_safe_process_failure` and `_safe_resume_approval`.
+* Background approval resumption is trapped cleanly inside `_safe_resume_approval`. Webhook verification never schedules remediation; the webhook path ends at verified admission (ADR-0010).
 * Post-event liveness checks consistently return `HTTP 200 OK`, proving zero server crashes or unhandled event loop failures.
 
 ---

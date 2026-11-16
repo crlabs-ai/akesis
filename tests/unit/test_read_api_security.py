@@ -92,6 +92,17 @@ def test_health_endpoints_remain_accessible_independently(
     assert ready.json()["status"] == "ready"
 
 
+def test_production_missing_token_fails_closed() -> None:
+    """Even an incorrectly mutated settings object must not expose incident detail."""
+    custom_settings = Settings(environment="test", read_api_token="")
+    custom_settings.environment = "production"
+    app = create_app(app_settings=custom_settings)
+    client = TestClient(app)
+    assert client.get("/v1/incidents/inc_sensitive").status_code == 401
+    assert client.get("/v1/pipelines").status_code == 401
+    assert client.get("/health/liveness").status_code == 200
+
+
 def test_cors_allowed_origins() -> None:
     """8. Allowed CORS origins receive Access-Control-Allow-Origin."""
     custom_settings = Settings(
@@ -264,6 +275,9 @@ def test_production_config_valid() -> None:
         cors_allowed_origins=["https://dashboard.akesis.dev"],
         trusted_hosts=["api.akesis.dev"],
         read_api_token="prod_read_token_distinct_987654",
+        slack_approver_user_ids=["U_TEST"],
+        slack_workspace_id="T_TEST",
+        slack_channel_id="C_TEST",
     )
     assert prod_settings.environment == "production"
     assert prod_settings.read_api_token == "prod_read_token_distinct_987654"

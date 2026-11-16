@@ -1,15 +1,21 @@
 import asyncio
 import os
-import shutil
 import subprocess
-import tempfile
 import time
+import uuid
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import ValidationCommand
+from src.packages.shared.provenance import require_verified_provenance
+from src.packages.shared.source_snapshot import (
+    SnapshotRejected,
+    create_workspace,
+    discard_workspace,
+    require_snapshot_bound,
+)
 
 logger = get_logger("akesis.sandbox_runner")
 
@@ -19,6 +25,14 @@ COMMAND_INVOCATION_MAP: dict[ValidationCommand, list[str]] = {
     ValidationCommand.MYPY: ["mypy", "."],
     ValidationCommand.PYTHON_SYNTAX: ["python3", "-m", "compileall", "."],
 }
+
+
+def _force_remove_container(name: str) -> None:
+    """Best-effort removal of one named container. Never raises into the caller."""
+    try:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        logger.warning("sandbox_container_cleanup_failed", container=name)
 
 
 class SandboxError(Exception):
@@ -66,10 +80,12 @@ class SandboxRunnerProtocol(Protocol):
 
     async def run_validation(
         self,
-        repo_source_dir: Path,
+        snapshot: object,
         patch_diff: str,
         command: ValidationCommand,
         timeout_seconds: float | None = None,
+        *,
+        provenance: object | None = None,
     ) -> ValidationExecutionResult:
         """Executes patch validation in an isolated disposable sandbox."""
         ...
@@ -94,132 +110,84 @@ class DockerSandboxRunner:
 
     async def run_validation(
         self,
-        repo_source_dir: Path,
+        snapshot: object,
+        patch_diff: str,
+        command: ValidationCommand,
+        timeout_seconds: float | None = None,
+        *,
+        provenance: object | None = None,
+    ) -> ValidationExecutionResult:
+        """Applies a patch to a verified snapshot's writable copy and runs the command in Docker.
+
+        Requires a persisted-provenance token bound to the snapshot, then the temporary hold. A
+        caller-supplied directory is not accepted: the only source is a live `VerifiedSnapshot`.
+        """
+        require_snapshot_bound(provenance, snapshot)
+        require_verified_provenance()
+        return await self._run_validation_unchecked(snapshot, patch_diff, command, timeout_seconds)
+
+    async def _run_validation_unchecked(
+        self,
+        snapshot: object,
         patch_diff: str,
         command: ValidationCommand,
         timeout_seconds: float | None = None,
     ) -> ValidationExecutionResult:
-        """Applies patch in disposable workspace and runs command in secure container."""
+        """Sandbox body. Private: callers must use the gated public method."""
         timeout = timeout_seconds or self.timeout_seconds
         cmd_args = COMMAND_INVOCATION_MAP.get(command)
         if not cmd_args:
             raise SandboxError(f"Unsupported validation command: {command}")
 
-        temp_dir = tempfile.mkdtemp(prefix="akesis_val_")
-        workspace_dir = Path(temp_dir)
-
-        logger.info(
-            "sandbox_workspace_created",
-            workspace=str(workspace_dir),
-            image=self.image_name,
-            command=command,
-        )
-
         try:
-            # 1. Materialize exact repo files into ephemeral workspace
-            self._materialize_workspace(repo_source_dir, workspace_dir)
-
-            # 2. Apply patch exactly as generated (strictly NO --whitespace=fix)
+            workspace = create_workspace(snapshot)
+        except SnapshotRejected as err:
+            raise SandboxWorkspaceError(f"Snapshot rejected: {err.code}") from None
+        logger.info("sandbox_workspace_created", image=self.image_name, command=command)
+        try:
             if patch_diff and patch_diff.strip():
-                self._apply_patch_exact(workspace_dir, patch_diff)
-
-            # 3. Check Docker daemon availability
+                self._apply_patch_exact(workspace, patch_diff)
             self._verify_docker_available()
-
-            # 4. Invocate isolated Docker container
-            result = await self._execute_container(workspace_dir, cmd_args, timeout)
-            return result
-
+            return await self._execute_container(workspace, cmd_args, timeout)
         finally:
-            # 5. Clean up ephemeral host workspace unconditionally
-            try:
-                shutil.rmtree(workspace_dir, ignore_errors=True)
-                logger.info("sandbox_workspace_destroyed", workspace=str(workspace_dir))
-            except Exception as err:
-                logger.warning("sandbox_cleanup_error", error=str(err))
-
-    def _materialize_workspace(self, source_dir: Path, target_dir: Path) -> None:
-        """Copies source files from checked-out exact commit into disposable workspace."""
-        if not source_dir.exists() or not source_dir.is_dir():
-            raise SandboxWorkspaceError(f"Source repository directory not found: {source_dir}")
-
-        try:
-            # Copy all files ignoring .git directory
-            for item in os.listdir(source_dir):
-                if item == ".git":
-                    continue
-                s = source_dir / item
-                d = target_dir / item
-                if s.is_dir():
-                    shutil.copytree(s, d, symlinks=False)
-                else:
-                    shutil.copy2(s, d)
-            # Initialize minimal clean git repo inside workspace to support git apply
-            subprocess.run(
-                ["git", "init", "-q"],
-                cwd=target_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.name", "Akesis"],
-                cwd=target_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "config", "user.email", "agent@crlabs.ai"],
-                cwd=target_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "add", "."],
-                cwd=target_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-q", "-m", "init"],
-                cwd=target_dir,
-                check=True,
-                capture_output=True,
-            )
-        except Exception as err:
-            raise SandboxWorkspaceError(f"Failed to materialize workspace: {err}") from err
+            discard_workspace(workspace)
+            logger.info("sandbox_workspace_destroyed")
 
     def _apply_patch_exact(self, workspace_dir: Path, patch_diff: str) -> None:
-        """Applies unified diff using git apply --check followed by git apply."""
-        patch_file = workspace_dir / "patch.diff"
+        """Applies a unified diff verbatim. The patch file lives outside the mounted workspace."""
+        patch_file = workspace_dir.parent / f"{workspace_dir.name}.patch"
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(workspace_dir.parent),
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
         try:
-            patch_file.write_text(patch_diff, encoding="utf-8")
-
-            # First: git apply --check (verifies without modifying)
+            fd = os.open(patch_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(patch_diff)
             check_res = subprocess.run(
                 ["git", "apply", "--check", str(patch_file)],
                 cwd=workspace_dir,
                 capture_output=True,
                 text=True,
+                env=env,
             )
             if check_res.returncode != 0:
-                raise PatchApplicationError(
-                    f"git apply --check rejected patch: {check_res.stderr.strip()}"
-                )
-
-            # Second: git apply (applies verbatim, no --whitespace=fix)
+                raise PatchApplicationError("git apply --check rejected the patch")
             apply_res = subprocess.run(
                 ["git", "apply", str(patch_file)],
                 cwd=workspace_dir,
                 capture_output=True,
                 text=True,
+                env=env,
             )
             if apply_res.returncode != 0:
-                raise PatchApplicationError(f"git apply rejected patch: {apply_res.stderr.strip()}")
-
+                raise PatchApplicationError("git apply rejected the patch")
             logger.info("sandbox_patch_applied_successfully")
         finally:
-            if patch_file.exists():
-                patch_file.unlink(missing_ok=True)
+            patch_file.unlink(missing_ok=True)
 
     def _verify_docker_available(self) -> None:
         """Verifies Docker daemon is running and accessible."""
@@ -247,13 +215,16 @@ class DockerSandboxRunner:
         cmd_args: list[str],
         timeout: float,
     ) -> ValidationExecutionResult:
-        """Runs isolated Docker container with strict security bounds."""
+        """Runs an isolated container. Timeout or cancellation force-removes it by name."""
         start_time = time.perf_counter()
+        container = f"akesis-val-{uuid.uuid4().hex[:16]}"
 
         docker_cmd = [
             "docker",
             "run",
             "--rm",
+            "--name",
+            container,
             "--network",
             "none",
             "--cap-drop",
@@ -262,6 +233,8 @@ class DockerSandboxRunner:
             "no-new-privileges",
             "--user",
             "1000:1000",
+            "--pids-limit",
+            "256",
             "--memory",
             self.memory_limit,
             f"--cpus={self.cpu_limit}",
@@ -272,59 +245,42 @@ class DockerSandboxRunner:
             self.image_name,
         ] + cmd_args
 
-        logger.info(
-            "validation_container_invoked",
-            cmd=cmd_args,
-            timeout=timeout,
+        logger.info("validation_container_invoked", cmd=cmd_args, timeout=timeout)
+
+        proc = await asyncio.create_subprocess_exec(
+            *docker_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except TimeoutError:
+            await self._stop_container(proc, container)
+            raise SandboxTimeoutError(f"Sandbox execution timed out after {timeout}s") from None
+        except asyncio.CancelledError:
+            await self._stop_container(proc, container)
+            raise
+
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        return ValidationExecutionResult(
+            exit_code=proc.returncode,
+            stdout=self._truncate_output(stdout_bytes.decode("utf-8", errors="replace")),
+            stderr=self._truncate_output(stderr_bytes.decode("utf-8", errors="replace")),
+            duration_ms=round(duration_ms, 2),
+            timed_out=False,
         )
 
+    async def _stop_container(self, proc: Any, container: str) -> None:
+        """Kill the client, remove the named container, and reap the client process."""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *docker_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=timeout,
-                )
-                exit_code = proc.returncode
-                timed_out = False
-            except TimeoutError:
-                timed_out = True
-                exit_code = None
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                stdout_bytes, stderr_bytes = b"", b"Validation timed out"
-
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            stdout_text = self._truncate_output(stdout_bytes.decode("utf-8", errors="replace"))
-            stderr_text = self._truncate_output(stderr_bytes.decode("utf-8", errors="replace"))
-
-            if timed_out:
-                raise SandboxTimeoutError(f"Sandbox execution timed out after {timeout}s")
-
-            return ValidationExecutionResult(
-                exit_code=exit_code,
-                stdout=stdout_text,
-                stderr=stderr_text,
-                duration_ms=round(duration_ms, 2),
-                timed_out=False,
-            )
-
-        except SandboxTimeoutError:
-            duration_ms = (time.perf_counter() - start_time) * 1000.0
-            return ValidationExecutionResult(
-                exit_code=None,
-                stdout="",
-                stderr=f"Execution timed out after {timeout}s",
-                duration_ms=round(duration_ms, 2),
-                timed_out=True,
-            )
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await asyncio.to_thread(_force_remove_container, container)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except (TimeoutError, ProcessLookupError):
+            pass
 
     def _truncate_output(self, text: str) -> str:
         """Truncates voluminous stdout/stderr output defensively."""

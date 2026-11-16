@@ -7,6 +7,8 @@ import git
 
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
+from src.packages.shared.persisted_provenance import require_bound_token
+from src.packages.shared.provenance import require_verified_provenance
 
 logger = get_logger("akesis.repo_checkout")
 
@@ -61,6 +63,8 @@ class RepoCheckoutProtocol(Protocol):
         repo_name: str,
         commit_sha: str,
         clone_url: str | None = None,
+        *,
+        provenance: object | None = None,
     ) -> Path:
         """Checks out exact commit SHA into a local working directory and returns its path."""
         ...
@@ -78,8 +82,26 @@ class GitRepositoryCheckoutManager:
         repo_name: str,
         commit_sha: str,
         clone_url: str | None = None,
+        *,
+        provenance: object | None = None,
     ) -> Path:
-        """Checks out exact commit SHA and returns root directory."""
+        """Checks out exact commit SHA and returns root directory.
+
+        Requires a persisted-provenance token bound to this owner, repository and SHA, and then the
+        temporary hold. Both checks run before any clone or fetch.
+        """
+        require_bound_token(provenance, owner=repo_owner, name=repo_name, head_sha=commit_sha)
+        require_verified_provenance()
+        return self._checkout_commit_unchecked(repo_owner, repo_name, commit_sha, clone_url)
+
+    def _checkout_commit_unchecked(
+        self,
+        repo_owner: str,
+        repo_name: str,
+        commit_sha: str,
+        clone_url: str | None = None,
+    ) -> Path:
+        """Checkout body. Private: callers must use the gated public method."""
         if not repo_owner or not REPO_IDENTIFIER_PATTERN.match(repo_owner):
             raise RepositoryCheckoutError(f"Invalid repository owner: {repo_owner!r}")
 

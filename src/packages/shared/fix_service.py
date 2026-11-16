@@ -13,6 +13,10 @@ from src.packages.shared.models import (
     RawFixProposal,
 )
 from src.packages.shared.patch_validator import PatchValidator
+from src.packages.shared.persisted_provenance import (
+    verify_context_provenance,
+)
+from src.packages.shared.provenance import require_verified_provenance
 
 logger = get_logger("akesis.fix_service")
 
@@ -38,7 +42,24 @@ class FixProposalService:
         evidence_package: EvidencePackage | None = None,
         repo_root: Path | None = None,
     ) -> FixProposal:
-        """Generates, parses, and deterministically validates a fix proposal."""
+        """Generates, parses, and deterministically validates a fix proposal.
+
+        Fails closed before any LLM call while the provenance hold is active.
+        """
+        await verify_context_provenance(context)
+        require_verified_provenance()
+        return await self._generate_fix_proposal_unchecked(
+            context, diagnostic_result, evidence_package, repo_root
+        )
+
+    async def _generate_fix_proposal_unchecked(
+        self,
+        context: FailureContext,
+        diagnostic_result: DiagnosticResult,
+        evidence_package: EvidencePackage | None = None,
+        repo_root: Path | None = None,
+    ) -> FixProposal:
+        """Fix generation body. Private: callers must use the gated public method."""
         start_time = time.perf_counter()
         incident_id = context.incident_id
         commit_sha = context.commit_sha
