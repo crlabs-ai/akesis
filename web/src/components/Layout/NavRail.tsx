@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { gsap } from 'gsap'
-import { Activity, AlertOctagon, GitMerge, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Webhook, X } from 'lucide-react'
+import { PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
+import { ROUTE_GROUPS } from '../../lib/routes'
 
 const STORAGE_KEY = 'akesis.sidebar.expanded'
 const EXPANDED_WIDTH = 224
@@ -29,14 +30,6 @@ const matches = (query: string): boolean =>
   typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(query).matches
 
 const prefersReducedMotion = (): boolean => matches('(prefers-reduced-motion: reduce)')
-
-const ROUTES = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
-  { to: '/incidents', label: 'Incidents', icon: AlertOctagon, end: false },
-  { to: '/pipelines', label: 'Pipelines', icon: GitMerge, end: false },
-  { to: '/deliveries', label: 'Deliveries', icon: Webhook, end: false },
-  { to: '/health', label: 'System Health', icon: Activity, end: false },
-]
 
 export const NavRail: React.FC = () => {
   const [expanded, setExpanded] = useState<boolean>(readPreference)
@@ -109,23 +102,37 @@ export const NavRail: React.FC = () => {
 
   const renderLinks = (showLabels: boolean, onNavigate?: () => void) => (
     <nav className="nav-links" aria-label="Primary">
-      {ROUTES.map((route) => {
-        const Icon = route.icon
-        return (
-          <NavLink
-            key={route.to}
-            to={route.to}
-            end={route.end}
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''} ${showLabels ? 'is-labelled' : ''}`}
-            title={route.label}
-            aria-label={route.label}
-            onClick={onNavigate}
-          >
-            <Icon size={18} aria-hidden="true" />
-            {showLabels && <span className="nav-item-label">{route.label}</span>}
-          </NavLink>
-        )
-      })}
+      {ROUTE_GROUPS.map((group, groupIndex) => (
+        <div
+          key={group.label}
+          className="nav-group"
+          role="group"
+          aria-label={group.label}
+        >
+          {showLabels ? (
+            <div id={`nav-group-${groupIndex}`} className="nav-group-label">{group.label}</div>
+          ) : (
+            <div id={`nav-group-${groupIndex}`} className="nav-group-divider" aria-hidden="true" />
+          )}
+          {group.routes.map((route) => {
+            const Icon = route.icon
+            return (
+              <NavLink
+                key={route.to}
+                to={route.to}
+                end={route.end}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''} ${showLabels ? 'is-labelled' : ''}`}
+                title={route.label}
+                aria-label={route.label}
+                onClick={onNavigate}
+              >
+                <Icon size={18} aria-hidden="true" />
+                {showLabels && <span className="nav-item-label">{route.label}</span>}
+              </NavLink>
+            )
+          })}
+        </div>
+      ))}
     </nav>
   )
 

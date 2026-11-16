@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { apiClient, ApiError } from '../../services/api'
 import type { LivenessResponse, ReadinessResponse } from '../../types/api'
 import { CopyButton } from '../Common/CopyButton'
+import { BlockSkeleton } from '../Common/Skeleton'
 import {
   Activity,
   CheckCircle2,
@@ -39,6 +40,9 @@ export const SystemHealthView: React.FC = () => {
       setReadiness(readinessRes)
       setLastChecked(new Date())
     } catch (err) {
+      // A failed probe clears the previous values. Old results must never read as current.
+      setLiveness(null)
+      setReadiness(null)
       if (err instanceof ApiError) {
         setError(err.message)
       } else if (err instanceof Error) {
@@ -98,18 +102,29 @@ export const SystemHealthView: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Clock size={14} style={{ color: 'var(--text-muted)' }} />
               <span style={{ color: 'var(--text-secondary)' }}>
-                {lastChecked ? `Last probed at: ${lastChecked.toLocaleTimeString()} (${lastChecked.toLocaleDateString()})` : 'Probing backend...'}
+                {error
+                  ? `Last probe failed${lastChecked ? `. Last successful probe: ${lastChecked.toLocaleTimeString()}` : ''}`
+                  : lastChecked
+                    ? `Last probed at: ${lastChecked.toLocaleTimeString()} (${lastChecked.toLocaleDateString()})`
+                    : 'Probing backend...'}
               </span>
             </div>
-            {lastChecked && (
+            {error ? (
+              <span className="badge badge-danger">
+                <XCircle size={11} /> Probe failed
+              </span>
+            ) : lastChecked ? (
               <span className="badge badge-success">
                 <CheckCircle2 size={11} /> Probes Active
               </span>
-            )}
+            ) : null}
           </div>
         </div>
       </div>
 
+      {isLoading && !lastChecked && !error && (
+        <BlockSkeleton lines={3} label="Probing backend health" />
+      )}
       {error && (
         <div className="state-box state-box-error" style={{ marginBottom: 16 }}>
           <ShieldAlert size={28} style={{ color: 'var(--status-danger)' }} />
@@ -169,7 +184,7 @@ export const SystemHealthView: React.FC = () => {
               <div style={{ marginBottom: 8 }}>
                 <span style={{ color: 'var(--text-muted)' }}>Status Received: </span>
                 <span className="mono" style={{ fontWeight: 600 }}>
-                  {liveness?.status || '(No response)'}
+                  {liveness?.status || (isLoading ? 'Probing…' : '(No response)')}
                 </span>
               </div>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginTop: 12 }}>
@@ -207,7 +222,7 @@ export const SystemHealthView: React.FC = () => {
               <div style={{ marginBottom: 8 }}>
                 <span style={{ color: 'var(--text-muted)' }}>Readiness Status: </span>
                 <span className="mono" style={{ fontWeight: 600 }}>
-                  {readiness?.status || '(No response)'}
+                  {readiness?.status || (isLoading ? 'Probing…' : '(No response)')}
                 </span>
               </div>
               <div style={{ marginBottom: 8 }}>
@@ -215,7 +230,7 @@ export const SystemHealthView: React.FC = () => {
                 <span className="mono">{readiness?.environment || 'Not provided'}</span>
               </div>
               <p style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', marginTop: 12 }}>
-                Readiness confirms that the backend application has completed initialization and is ready to ingest CI webhook payloads.
+                Readiness returns a fixed value from the process. It does not check the database, so a ready response does not confirm that the database is available.
               </p>
             </div>
           </div>
@@ -232,20 +247,23 @@ export const SystemHealthView: React.FC = () => {
         </div>
         <div className="panel-body">
           <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: 12 }}>
-            The following subsystems are not queried directly by the browser for security isolation and minimal privilege:
+            The following are not reported by this console. Nothing here is inferred from them:
           </p>
           <ul style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.8, paddingLeft: 18 }}>
             <li>
-              <strong>PostgreSQL Database:</strong> Inspected internally by the backend API process; not directly exposed to browser clients.
+              <strong>Retry worker:</strong> Not reported by the API. Its health is checked only by a host-side command, so this page cannot show whether it is running.
             </li>
             <li>
-              <strong>Docker Sandbox Daemon:</strong> Isolated on the host backend; container execution occurs synchronously during orchestrator validation.
+              <strong>PostgreSQL database:</strong> Not reported by any endpoint this console calls, so its state is not shown.
             </li>
             <li>
-              <strong>GitHub API & Secrets:</strong> Authentication credentials remain isolated in server environment variables and are never transmitted to browser sessions.
+              <strong>Sandbox validation:</strong> Not reported by any endpoint this console calls. No sandbox status is shown.
             </li>
             <li>
-              <strong>Slack Webhook / Bot Token:</strong> Managed exclusively by backend notification dispatcher.
+              <strong>GitHub credentials:</strong> Not sent to or stored in this browser. Only the operator read token is held here, for the session.
+            </li>
+            <li>
+              <strong>Slack:</strong> Not reported by any endpoint this console calls.
             </li>
           </ul>
         </div>

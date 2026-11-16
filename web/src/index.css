@@ -1,19 +1,20 @@
 :root {
   /* Minimalist IDE-Inspired Color System */
-  --bg-app: #08090b;
-  --bg-sidebar: #0d1013;
-  --bg-workspace: #0d1013;
-  --bg-raised: #12161a;
-  --bg-input: #0a0c0e;
-  --bg-badge: #16191f;
+  /* True black base for OLED panels. Surfaces lift in small steps so layers stay distinct without glow. */
+  --bg-app: #000000;
+  --bg-sidebar: #040507;
+  --bg-workspace: #040507;
+  --bg-raised: #0a0c0f;
+  --bg-input: #020304;
+  --bg-badge: #0f1217;
 
-  --border-subtle: #1c2126;
-  --border-default: #252b31;
-  --border-focus: #7aa7d9;
+  --border-subtle: #14181d;
+  --border-default: #20262d;
+  --border-focus: #8b8cf6;
 
   --text-primary: #e5e7eb;
   --text-secondary: #9299a2;
-  --text-muted: #69717c;
+  --text-muted: #808a96; /* 5.7:1 on app surface; was 4.0:1 (fails AA for small text) */
   --text-link: #7aa7d9;
 
   --status-success: #3fb950;
@@ -39,8 +40,37 @@
   --diff-hunk-bg: rgba(88, 166, 255, 0.06);
   --diff-hunk-text: #79c0ff;
 
+  /* Typography scale: 12px is the smallest text anywhere; body is 14px. */
+  --text-2xs: 0.75rem;     /* 12px: labels, table headers, metadata */
+  --text-xs: 0.8125rem;    /* 13px: dense table body, supporting text */
+  --text-sm: 0.875rem;     /* 14px: body */
+  --text-md: 1rem;         /* 16px: section headings */
+  --text-lg: 1.25rem;      /* 20px: page titles */
+  --text-xl: 1.75rem;      /* 28px: display */
+  --leading-tight: 1.25;
+  --leading-base: 1.5;
+
+  /* Radius scale */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-pill: 999px;
+
+  /* Accent: indigo for active state and focus. Status colours keep their meaning. */
+  --accent: #8b8cf6;
+  --accent-bg: rgba(139, 140, 246, 0.1);
+  --accent-border: rgba(139, 140, 246, 0.35);
+
+  /* Elevation: floating surfaces only */
+  --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+
+  /* Motion: one curve, two durations. Reduced motion removes both (see below). */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+
   --font-sans: 'Inter', ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
 
   font-family: var(--font-sans);
   line-height: 1.45;
@@ -76,7 +106,7 @@ a:hover {
 
 button, input, select, textarea {
   font-family: inherit;
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
 }
 
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
@@ -86,7 +116,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .mono {
   font-family: var(--font-mono);
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
 }
 
 /* Layout Shell */
@@ -131,7 +161,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .header-org {
-  font-size: 0.65rem;
+  font-size: var(--text-2xs);
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -139,7 +169,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .header-title {
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: -0.01em;
@@ -149,7 +179,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   min-width: 0;
   overflow: hidden;
@@ -192,7 +222,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .panel {
   background-color: var(--bg-workspace);
   border: 1px solid var(--border-default);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -207,7 +237,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .panel-title {
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
   font-weight: 600;
   color: var(--text-primary);
   display: flex;
@@ -217,7 +247,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .panel-subtitle {
-  font-size: 0.6875rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -233,7 +263,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .data-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
   text-align: left;
 }
 
@@ -244,7 +274,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-default);
   text-transform: uppercase;
-  font-size: 0.65rem;
+  font-size: var(--text-2xs);
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
@@ -281,7 +311,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border: none;
   background: none;
   font-family: var(--font-sans);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
@@ -325,8 +355,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   justify-content: center;
   gap: 4px;
   padding: 3px 8px;
-  border-radius: 2px;
-  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
   font-weight: 500;
   cursor: pointer;
   border: 1px solid var(--border-default);
@@ -347,7 +377,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .btn-sm {
   padding: 2px 6px;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
 }
 
 .btn-icon {
@@ -362,7 +392,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 1px 3px;
   display: inline-flex;
   align-items: center;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   margin-left: 4px;
   vertical-align: middle;
 }
@@ -375,10 +405,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .input-text, .select-input {
   background-color: var(--bg-input);
   border: 1px solid var(--border-default);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   padding: 4px 7px;
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
 }
 
 .input-text:focus, .select-input:focus {
@@ -391,7 +421,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   background-color: var(--bg-sidebar);
   border: 1px solid var(--border-default);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   padding: 5px 10px;
   margin-bottom: 10px;
   gap: 14px;
@@ -402,14 +432,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
 }
 
 .status-strip-label {
   color: var(--text-muted);
   font-weight: 500;
   text-transform: uppercase;
-  font-size: 0.65rem;
+  font-size: var(--text-2xs);
   letter-spacing: 0.04em;
 }
 
@@ -444,7 +474,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-workspace);
   min-width: 0;
 }
@@ -546,13 +576,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ws-section-title {
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .ws-section-subtitle {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
 }
 
@@ -562,7 +592,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   grid-template-columns: auto minmax(0, 1fr);
   gap: 5px 10px;
   align-items: baseline;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   min-width: 0;
 }
 
@@ -619,7 +649,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ws-mono-value {
   font-family: var(--font-mono);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .ws-link-value {
@@ -634,7 +664,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   gap: 3px;
   color: var(--text-link);
   font-family: var(--font-mono);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .ws-pr-link {
@@ -643,7 +673,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ws-error-type {
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--status-danger);
   overflow-wrap: anywhere;
@@ -651,7 +681,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ws-assertion {
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   line-height: 1.5;
   color: var(--text-primary);
   padding-left: 8px;
@@ -679,13 +709,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   max-height: 180px;
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   line-height: 1.5;
   color: var(--text-secondary);
   white-space: pre;
   background-color: #050608;
   border: 1px solid var(--border-subtle);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
 }
 
@@ -703,7 +733,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
 }
 
 .ws-rationale-title {
@@ -720,17 +750,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   gap: 6px;
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
 }
 
 .ws-body-text {
-  font-size: 0.84rem;
+  font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--text-primary);
 }
 
 .ws-muted-text {
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
 }
 
@@ -740,12 +770,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ws-sep {
   color: var(--text-muted);
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
 }
 
 .ws-meta-text {
   color: var(--text-secondary);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -766,7 +796,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 
 /* Raw JSON: a bounded inspector drawer, not a card */
@@ -776,7 +806,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-workspace);
 }
 
@@ -829,7 +859,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   flex: 1;
   background-color: var(--bg-raised);
   border: 1px solid var(--border-default);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   padding: 5px 7px;
   display: flex;
   flex-direction: column;
@@ -867,7 +897,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .stage-node-num {
-  font-size: 0.58rem;
+  font-size: var(--text-2xs);
   font-family: var(--font-mono);
   color: var(--text-muted);
 }
@@ -879,7 +909,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .stage-node-title {
-  font-size: 0.65rem;
+  font-size: var(--text-2xs);
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -888,7 +918,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .stage-node-badge {
-  font-size: 0.52rem;
+  font-size: var(--text-2xs);
   font-weight: 700;
   font-family: var(--font-mono);
   letter-spacing: 0.02em;
@@ -913,10 +943,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .diff-container {
   background-color: #0a0c10;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   line-height: 1.6;
   display: flex;
   flex-direction: column;
@@ -930,7 +960,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 4px 10px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-secondary);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1055,7 +1085,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-bottom: 1px solid transparent;
   color: var(--text-muted);
   padding: 0 10px;
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   font-weight: 500;
   cursor: pointer;
   display: inline-flex;
@@ -1100,7 +1130,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
 }
 
 .docked-terminal-body .terminal-output {
@@ -1109,7 +1139,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   height: calc(100% - 0px);
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   line-height: 1.5;
   color: var(--text-secondary);
   white-space: pre;
@@ -1121,7 +1151,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .docked-terminal-body .terminal-empty {
   padding: 8px 10px;
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -1138,10 +1168,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .terminal-view {
   background-color: #030406;
   border: 1px solid var(--border-subtle);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: #c9d1d9;
   max-height: 220px;
   overflow-y: auto;
@@ -1153,7 +1183,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .skeleton-box {
   background: var(--bg-raised);
   border: 1px solid var(--border-subtle);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .terminal-view-stderr {
@@ -1187,13 +1217,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .state-box-title {
-  font-size: 0.8125rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .state-box-desc {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   max-width: 360px;
   margin: 0 auto;
 }
@@ -1201,7 +1231,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .state-box-error {
   border: 1px solid var(--status-danger-border);
   background-color: rgba(248, 81, 73, 0.02);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .state-box-error .state-box-title {
@@ -1245,7 +1275,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 ::-webkit-scrollbar-thumb {
   background: var(--border-default);
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -1281,7 +1311,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .terminal-count {
-  font-size: 0.68rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -1307,7 +1337,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 6px 10px;
   border-bottom: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   color: var(--text-secondary);
   flex: 0 0 auto;
 }
@@ -1336,7 +1366,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .terminal-failure {
   padding: 6px 10px;
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   color: var(--status-danger);
   border-bottom: 1px solid var(--border-subtle);
   flex: 0 0 auto;
@@ -1344,7 +1374,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .terminal-empty {
   padding: 8px 10px;
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -1412,10 +1442,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: flex-start;
   padding: 10px 12px;
   border: 1px solid var(--status-danger-border);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--status-danger-bg);
   color: var(--status-danger);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 
 .ov-notice-title {
@@ -1450,7 +1480,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ov-header-sub {
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -1459,7 +1489,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 0;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-workspace);
 }
 
@@ -1477,7 +1507,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ov-stat dt {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -1485,7 +1515,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   color: var(--text-primary);
   margin: 0;
 }
@@ -1502,7 +1532,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ov-stat-probe dd {
   color: var(--text-secondary);
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
 }
 
 .ov-state {
@@ -1510,7 +1540,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 600;
 }
 
@@ -1534,7 +1564,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ov-env {
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -1566,19 +1596,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ov-section-head h2 {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .ov-link {
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
   color: var(--text-link);
 }
 
 .ov-empty {
   padding: 18px 2px;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   border-top: 1px solid var(--border-subtle);
 }
@@ -1591,13 +1621,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .ov-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   text-align: left;
 }
 
 .ov-table th {
   padding: 6px 10px 6px 0;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   font-weight: 500;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border-subtle);
@@ -1625,18 +1655,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .ov-id {
   color: var(--text-link);
   font-weight: 600;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .ov-id-plain {
   color: var(--text-primary);
   font-weight: 600;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .ov-sha {
   color: var(--text-secondary);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .ov-repo {
@@ -1649,7 +1679,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .ov-sub {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1659,7 +1689,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .ov-sub-link {
   color: var(--text-secondary);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 /* ---- Pipelines ---- */
@@ -1702,14 +1732,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .pl-count {
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   white-space: nowrap;
 }
 
 .pl-muted {
   color: var(--text-muted);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .pl-truncate {
@@ -1724,7 +1754,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   gap: 4px;
   min-width: 0;
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .pl-nowrap {
@@ -1736,7 +1766,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background-color: var(--bg-workspace);
   min-width: 0;
 }
@@ -1759,7 +1789,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .pl-detail-title {
-  font-size: 0.82rem;
+  font-size: var(--text-xs);
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1791,13 +1821,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .pl-detail-facts dt {
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
 .pl-detail-facts dd {
   margin: 0;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   color: var(--text-primary);
   min-width: 0;
 }
@@ -1818,7 +1848,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .pl-ledger-head h2 {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -1831,7 +1861,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .pl-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   text-align: left;
 }
 
@@ -1839,7 +1869,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   position: sticky;
   top: 0;
   padding: 7px 12px 7px 0;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   font-weight: 500;
   color: var(--text-muted);
   background-color: var(--bg-app);
@@ -1896,7 +1926,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .pl-incident {
   color: var(--text-link);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .pl-pr {
@@ -1904,12 +1934,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   gap: 3px;
   color: var(--text-link);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .pl-failure {
   color: var(--status-danger);
-  font-size: 0.74rem;
+  font-size: var(--text-2xs);
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1938,7 +1968,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 32px 16px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -1999,7 +2029,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .in-sub {
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   color: var(--text-muted);
 }
 
@@ -2010,7 +2040,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .in-count {
-  font-size: 0.75rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   white-space: nowrap;
   font-family: var(--font-mono);
@@ -2050,7 +2080,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .in-filter-label {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -2070,13 +2100,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .in-ledger-head h2 {
-  font-size: 0.85rem;
+  font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .in-muted {
   color: var(--text-muted);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .in-nowrap {
@@ -2091,7 +2121,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .in-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   text-align: left;
 }
 
@@ -2099,7 +2129,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   position: sticky;
   top: 0;
   padding: 7px 12px 7px 0;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   font-weight: 500;
   color: var(--text-muted);
   background-color: var(--bg-app);
@@ -2137,12 +2167,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .in-id {
   color: var(--text-link);
   font-weight: 600;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .in-error {
   margin-top: 3px;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   max-width: 220px;
   overflow: hidden;
@@ -2170,7 +2200,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .in-branch {
   margin-top: 2px;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   max-width: 200px;
   overflow: hidden;
@@ -2180,7 +2210,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .in-sha {
   color: var(--text-secondary);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .in-pr {
@@ -2188,7 +2218,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   align-items: center;
   gap: 3px;
   color: var(--text-link);
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
 }
 
 .in-pager {
@@ -2213,7 +2243,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   padding: 32px 16px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -2292,12 +2322,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   background-color: var(--bg-raised);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   font-weight: 600;
 }
 
 .nav-brand-name {
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 650;
   letter-spacing: 0.08em;
   color: var(--text-primary);
@@ -2331,7 +2361,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .nav-item-label {
-  font-size: 0.82rem;
+  font-size: var(--text-xs);
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2355,7 +2385,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   top: 8px;
   bottom: 8px;
   width: 2px;
-  border-radius: 2px;
+  border-radius: var(--radius-sm);
   background-color: var(--text-link);
 }
 
@@ -2383,7 +2413,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-radius: 4px;
   background-color: rgba(18, 22, 26, 0.96);
   color: var(--text-primary);
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   white-space: nowrap;
   opacity: 0;
   pointer-events: none;
@@ -2407,7 +2437,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   cursor: pointer;
 }
 
@@ -2436,19 +2466,19 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .header-title {
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
   font-weight: 650;
   letter-spacing: 0.06em;
 }
 
 .breadcrumbs {
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .breadcrumbs > span:last-child {
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   font-weight: 500;
 }
 
@@ -2548,9 +2578,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sk-bar {
   display: block;
   height: 10px;
-  border-radius: 3px;
-  background-color: #12161a;
-  background-image: linear-gradient(90deg, #12161a 35%, #171c21 50%, #12161a 65%);
+  border-radius: var(--radius-sm);
+  background-color: var(--bg-raised);
+  background-image: linear-gradient(90deg, var(--bg-raised) 35%, #161b21 50%, var(--bg-raised) 65%);
   background-size: 260% 100%;
   animation: sk-sweep 2.4s ease-in-out infinite;
 }
@@ -2588,13 +2618,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   color: var(--text-primary);
   padding: 8px 12px;
   margin-bottom: 12px;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   line-height: 1.45;
 }
 
 .ov-note {
   margin: 6px 0 0;
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
   display: flex;
   gap: 6px;
@@ -2608,7 +2638,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   color: var(--text-primary);
   padding: 12px 14px;
   margin: 8px 0 12px;
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 
 .api-error-head {
@@ -2637,7 +2667,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .api-error-detail {
   margin: 4px 0 8px;
   color: var(--text-muted);
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   word-break: break-word;
 }
 
@@ -2649,7 +2679,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .token-form-label {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -2666,7 +2696,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border: 1px solid var(--border-default);
   padding: 5px 8px;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .token-form-input:focus-visible {
@@ -2676,7 +2706,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .token-form-note {
   margin: 0;
-  font-size: 0.68rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -2715,7 +2745,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .deliveries-sub {
   margin: 4px 0 0;
   color: var(--text-secondary);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   max-width: 760px;
 }
 
@@ -2725,7 +2755,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   gap: 8px;
   align-items: flex-start;
   padding: 8px 10px;
-  font-size: 0.76rem;
+  font-size: var(--text-2xs);
   border: 1px solid var(--border-default);
   color: var(--text-secondary);
 }
@@ -2756,7 +2786,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .deliveries-meta {
-  font-size: 0.72rem;
+  font-size: var(--text-2xs);
   color: var(--text-muted);
 }
 
@@ -2772,7 +2802,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .deliveries-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.78rem;
+  font-size: var(--text-xs);
 }
 
 .deliveries-table th,
@@ -2786,7 +2816,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .deliveries-table th {
   color: var(--text-muted);
   font-weight: 500;
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -2802,7 +2832,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: inline-block;
   padding: 1px 6px;
   border: 1px solid var(--border-default);
-  font-size: 0.7rem;
+  font-size: var(--text-2xs);
   white-space: nowrap;
 }
 
@@ -2828,7 +2858,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .deliveries-empty {
   padding: 16px;
   color: var(--text-secondary);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
   margin: 0;
 }
 
@@ -2836,4 +2866,701 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* ── Project Phoenix: motion, focus and reduced-motion rules ─────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Project Phoenix: deliveries workspace, drawer and skeletons ─────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.deliveries-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.deliveries-title h1 {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.deliveries-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.deliveries-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 0 6px 0 8px;
+  min-width: 260px;
+  color: var(--text-muted);
+}
+
+.deliveries-search input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 6px 0;
+  outline: none;
+}
+
+.deliveries-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.summary-tile {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.summary-tile.tone-info { border-left: 2px solid var(--status-info); }
+.summary-tile.tone-danger { border-left: 2px solid var(--status-danger); }
+.summary-tile.tone-warn { border-left: 2px solid var(--status-warning); }
+
+.summary-label {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.summary-value {
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.summary-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.attempt-meter {
+  display: grid;
+  gap: 4px;
+  min-width: 96px;
+}
+
+.attempt-text {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.attempt-track {
+  display: block;
+  height: 3px;
+  background: var(--border-subtle);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.attempt-fill {
+  display: block;
+  height: 100%;
+  background: var(--status-info);
+  transition: width var(--dur-base) var(--ease-out);
+}
+
+.attempt-fill-exhausted { background: var(--status-danger); }
+.attempt-fill-provider_hold { background: var(--status-warning); }
+
+.failure-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.failure-human {
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+}
+
+.failure-code {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.delivery-row {
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.delivery-row:hover,
+.delivery-row:focus-visible {
+  background: var(--bg-raised);
+}
+
+.copy-btn {
+  opacity: 0.5;
+}
+
+.delivery-row:hover .copy-btn,
+.delivery-row:focus-visible .copy-btn,
+.copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.deliveries-skeleton {
+  display: grid;
+  gap: 2px;
+  padding: 8px;
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 2fr 1.2fr;
+  gap: 16px;
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.skeleton-cell {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--bg-raised) 0%, var(--border-subtle) 50%, var(--bg-raised) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.6s var(--ease-out) infinite;
+}
+
+.skeleton-cell.w-16 { width: 40%; }
+.skeleton-cell.w-24 { width: 65%; }
+.skeleton-cell.w-32 { width: 80%; }
+.skeleton-cell.w-40 { width: 95%; }
+
+@keyframes skeleton-sweep {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+.drawer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+}
+
+.drawer-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 5, 8, 0.55);
+  border: 0;
+  cursor: default;
+  animation: fade-in var(--dur-base) var(--ease-out);
+}
+
+.drawer-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100%);
+  background: rgba(18, 22, 26, 0.92);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border-left: 1px solid var(--border-default);
+  box-shadow: var(--shadow-float);
+  display: flex;
+  flex-direction: column;
+  animation: drawer-in var(--dur-base) var(--ease-out);
+  outline: none;
+}
+
+.drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.drawer-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+
+.detail-list {
+  margin: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 12px;
+  align-items: start;
+  font-size: var(--text-xs);
+}
+
+.detail-row dt {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-top: 2px;
+}
+
+.detail-row dd {
+  margin: 0;
+  color: var(--text-primary);
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.detail-id {
+  font-size: var(--text-xs);
+}
+
+.detail-note {
+  margin: 8px 0 0;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  line-height: var(--leading-base);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes drawer-in {
+  from { transform: translateX(16px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (max-width: 860px) {
+  .deliveries-summary { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .deliveries-search { min-width: 0; width: 100%; }
+}
+
+/* ── Project Phoenix: command center sections ───────────────────────────────────────────── */
+
+.ov-block-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+}
+
+.ov-block-note {
+  margin: 0 0 12px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  max-width: 720px;
+  line-height: var(--leading-base);
+}
+
+.ov-status,
+.ov-metrics,
+.ov-trends {
+  margin-top: 20px;
+}
+
+.ov-status-grid {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.ov-status-item {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  display: grid;
+  gap: 6px;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.ov-status-item:hover {
+  border-color: var(--border-default);
+}
+
+.ov-status-item dt {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ov-status-item dd {
+  margin: 0;
+}
+
+.ov-state.is-muted {
+  color: var(--text-muted);
+}
+
+.ov-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ov-metric {
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-left-width: 2px;
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.ov-metric.tone-info { border-left-color: var(--status-info); }
+.ov-metric.tone-danger { border-left-color: var(--status-danger); }
+.ov-metric.tone-warn { border-left-color: var(--status-warning); }
+
+.ov-metric-label {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.ov-metric-value {
+  font-size: var(--text-lg);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.ov-trends {
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+}
+
+/* Command center: spacing and type fixes found in browser review. */
+.ov-env {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-sans);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.ov-status-item dd {
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  line-height: var(--leading-base);
+}
+
+.ov-status-item dd .ov-state {
+  font-size: var(--text-xs);
+}
+
+.detail-id-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.detail-id-row .copy-btn {
+  flex: 0 0 auto;
+  opacity: 1;
+}
+
+/* Responsive: let shell and view columns shrink so wide tables scroll inside their own wrapper. */
+.app-shell,
+.main-wrapper,
+.content-area,
+.deliveries-view,
+.deliveries-table-wrap,
+.overview-view,
+.pl-view {
+  min-width: 0;
+  max-width: 100%;
+}
+
+@media (max-width: 860px) {
+  .deliveries-header {
+    flex-direction: column;
+  }
+  .deliveries-actions {
+    width: 100%;
+  }
+  .deliveries-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .deliveries-filters {
+    width: 100%;
+  }
+  .drawer-panel {
+    width: 100%;
+  }
+}
+
+/* Screen-reader-only text is absolutely positioned. Make its scroll container its containing block,
+   so it cannot extend the page width. */
+.deliveries-table-wrap {
+  position: relative;
+}
+
+/* ── Project Phoenix: grouped navigation and command palette ───────────────────────────── */
+
+.nav-group + .nav-group {
+  margin-top: 10px;
+}
+
+.nav-group-label {
+  padding: 6px 12px 4px;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-group-divider {
+  height: 1px;
+  margin: 8px 12px;
+  background: var(--border-subtle);
+}
+
+.palette-trigger {
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.palette-trigger-label {
+  font-size: var(--text-xs);
+}
+
+.palette-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 4px;
+  line-height: 1.6;
+  background: var(--bg-raised);
+}
+
+.palette-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh 16px 16px;
+}
+
+.palette-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 5, 8, 0.5);
+  border: 0;
+  cursor: default;
+  animation: fade-in var(--dur-base) var(--ease-out);
+}
+
+/* Glass is reserved for floating surfaces such as this palette. Dense data stays on solid surfaces. */
+.palette {
+  position: relative;
+  width: min(600px, 100%);
+  background: rgba(22, 26, 31, 0.86);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  animation: palette-in var(--dur-base) var(--ease-out);
+}
+
+.palette-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+}
+
+.palette-input-row input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+}
+
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.palette-option {
+  display: grid;
+  grid-template-columns: 18px 1fr auto 14px;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.palette-option.is-active {
+  background: var(--accent-bg);
+  color: var(--text-primary);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.palette-option-group {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.palette-enter {
+  color: var(--text-muted);
+}
+
+.palette-empty {
+  margin: 0;
+  padding: 18px 16px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.palette-foot {
+  display: flex;
+  gap: 16px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+.palette-foot span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@keyframes palette-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 860px) {
+  .palette-trigger-label,
+  .palette-trigger .palette-kbd {
+    display: none;
+  }
+}
+
+/* Inline placeholder for a metric that is still loading. Keeps the tile's size so nothing shifts. */
+.sk-inline {
+  display: inline-block;
+  width: 56px;
+  height: 16px;
+  vertical-align: middle;
+  border-radius: var(--radius-sm);
+}
+
+/* Button labels must not wrap onto two lines in toolbars. */
+.btn {
+  white-space: nowrap;
+}
+
+/* The delivery ID is the keyboard target for opening details. Keep it looking like text until focused. */
+.delivery-open {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.delivery-open:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }

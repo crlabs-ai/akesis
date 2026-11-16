@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiClient } from '../../services/api'
 import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
-import type { IncidentSummary, PipelineSummary, ReadinessResponse } from '../../types/api'
+import type { IncidentSummary, PipelineSummary, ReadinessResponse, WebhookDelivery } from '../../types/api'
 import { StatusBadge } from '../Common/StatusBadge'
 import { CopyButton } from '../Common/CopyButton'
 import { TableSkeleton } from '../Common/Skeleton'
@@ -19,6 +19,10 @@ export const OverviewView: React.FC = () => {
   const [readinessError, setReadinessError] = useState<unknown>(null)
   const [incidentsError, setIncidentsError] = useState<unknown>(null)
   const [pipelinesError, setPipelinesError] = useState<unknown>(null)
+  const [liveness, setLiveness] = useState<string | null>(null)
+  const [livenessError, setLivenessError] = useState<unknown>(null)
+  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([])
+  const [deliveriesError, setDeliveriesError] = useState<unknown>(null)
   const [isLoading, setIsLoading] = useState<boolean>(true)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
@@ -26,11 +30,29 @@ export const OverviewView: React.FC = () => {
   // becomes an empty list, and it never hides the other sources.
   const loadData = useCallback(async () => {
     setIsLoading(true)
-    const [readinessResult, incidentsResult, pipelinesResult] = await Promise.allSettled([
+    const [readinessResult, incidentsResult, pipelinesResult, livenessResult, deliveriesResult] = await Promise.allSettled([
       apiClient.getReadiness(),
       apiClient.getIncidents({ limit: RECENT_LIMIT, offset: 0 }),
       apiClient.getPipelines({ limit: RECENT_LIMIT, offset: 0 }),
+      apiClient.getLiveness(),
+      apiClient.getWebhookDeliveries({ limit: 25 }),
     ])
+
+    if (livenessResult.status === 'fulfilled') {
+      setLiveness(livenessResult.value.status)
+      setLivenessError(null)
+    } else {
+      setLiveness(null)
+      setLivenessError(livenessResult.reason)
+    }
+
+    if (deliveriesResult.status === 'fulfilled') {
+      setDeliveries(deliveriesResult.value.items)
+      setDeliveriesError(null)
+    } else {
+      setDeliveries([])
+      setDeliveriesError(deliveriesResult.reason)
+    }
 
     if (readinessResult.status === 'fulfilled') {
       setReadiness(readinessResult.value)
@@ -86,13 +108,28 @@ export const OverviewView: React.FC = () => {
 
       <header className="ov-header">
         <div className="ov-header-title">
-          <h1>Overview</h1>
-          <span className="ov-header-sub">Remediation control plane</span>
+          <h1>Command center</h1>
+          <span className="ov-header-sub">What is running, and what needs attention</span>
         </div>
+      </header>
 
-        <dl className="ov-stats" aria-label="System Operational Strip">
-          <div className="ov-stat">
-            <dt>API probe:</dt>
+      <section className="ov-status" aria-labelledby="ov-status-title">
+        <h2 id="ov-status-title" className="ov-block-title">System status</h2>
+        <dl className="ov-status-grid" aria-label="System Operational Strip">
+          <div className="ov-status-item">
+            <dt>API process</dt>
+            <dd>
+              {livenessError !== null ? (
+                <span className="ov-state is-fail"><span className="ov-dot" aria-hidden="true" />Unreachable</span>
+              ) : liveness === 'ok' ? (
+                <span className="ov-state is-ok"><span className="ov-dot" aria-hidden="true" />Responding</span>
+              ) : (
+                <span className="ov-state">Checking…</span>
+              )}
+            </dd>
+          </div>
+          <div className="ov-status-item">
+            <dt>API probe</dt>
             <dd>
               <span className={`ov-state ${probeTone}`}>
                 <span className="ov-dot" aria-hidden="true" />
@@ -101,27 +138,76 @@ export const OverviewView: React.FC = () => {
               <span className="ov-env">process only · database not checked</span>
             </dd>
           </div>
+          <div className="ov-status-item">
+            <dt>Database</dt>
+            <dd><span className="ov-state is-muted">Not checked by any endpoint</span></dd>
+          </div>
+          <div className="ov-status-item">
+            <dt>Retry worker</dt>
+            <dd><span className="ov-state is-muted">Not reported: the API has no worker status</span></dd>
+          </div>
+          <div className="ov-status-item">
+            <dt>Webhook deliveries</dt>
+            <dd>
+              {deliveriesError !== null ? (
+                <span className="ov-state is-fail"><span className="ov-dot" aria-hidden="true" />Unavailable</span>
+              ) : isLoading ? (
+                <span className="ov-state">Checking…</span>
+              ) : (
+                <span className="ov-state is-ok"><span className="ov-dot" aria-hidden="true" />Readable · newest {deliveries.length}</span>
+              )}
+            </dd>
+          </div>
+          <div className="ov-status-item ov-status-probe">
+            <dt>Last checked</dt>
+            <dd className="mono">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'checking…'}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="ov-metrics" aria-labelledby="ov-metrics-title">
+        <h2 id="ov-metrics-title" className="ov-block-title">Needs attention</h2>
+        <p className="ov-block-note">
+          Counts cover the newest 25 deliveries only. The backend does not provide totals, so these are not
+          fleet-wide figures.
+        </p>
+        <div className="ov-metric-grid">
+          <div className="ov-metric tone-info">
+            <span className="ov-metric-label">Retryable (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'retryable_error').length}</span>
+          </div>
+          <div className="ov-metric tone-danger">
+            <span className="ov-metric-label">Exhausted (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'exhausted').length}</span>
+          </div>
+          <div className="ov-metric tone-warn">
+            <span className="ov-metric-label">Provider hold (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'provider_hold').length}</span>
+          </div>
+        </div>
+        <dl className="ov-stats" aria-label="Loaded record counts">
           <div className="ov-stat">
             <dt>Incidents shown (newest {RECENT_LIMIT}):</dt>
-            <dd className="ov-num">{isLoading ? '—' : incidentsError !== null ? 'n/a' : incidents.length}</dd>
+            <dd className="ov-num">{isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : incidentsError !== null ? 'n/a' : incidents.length}</dd>
           </div>
           <div className="ov-stat">
             <dt>Pipelines shown (newest {RECENT_LIMIT}):</dt>
-            <dd className="ov-num">{isLoading ? '—' : pipelinesError !== null ? 'n/a' : pipelines.length}</dd>
-          </div>
-          <div className="ov-stat ov-stat-probe">
-            <dt>Last probe</dt>
-            <dd className="mono">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'probing…'}</dd>
+            <dd className="ov-num">{isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : pipelinesError !== null ? 'n/a' : pipelines.length}</dd>
           </div>
         </dl>
         <p className="ov-note">
-          <Info size={12} aria-hidden="true" /> These are page sizes. The backend does not provide totals, so this
-          page never states one.{' '}
-          <Link to="/deliveries" className="ov-link">
-            Open webhook deliveries
-          </Link>
+          <Info size={12} aria-hidden="true" /> Page sizes, not totals.{' '}
+          <Link to="/deliveries" className="ov-link">Open webhook deliveries</Link>
         </p>
-      </header>
+      </section>
+
+      <section className="ov-trends" aria-labelledby="ov-trends-title">
+        <h2 id="ov-trends-title" className="ov-block-title">Trends</h2>
+        <p className="ov-block-note">
+          No trend chart is drawn. The API exposes the current state of deliveries, not their history, so a chart
+          would have to invent a series. Charts will appear once the backend provides history.
+        </p>
+      </section>
 
       {readinessError !== null && (
         <ApiErrorPanel error={readinessError} subject="API probe" onRetry={() => void loadData()} />

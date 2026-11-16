@@ -26,8 +26,8 @@ describe('SystemHealthView', () => {
 
     // Unexposed subsystems transparency
     expect(screen.getByText(/Unexposed Integrations & Boundary Status/)).toBeInTheDocument()
-    expect(screen.getByText(/PostgreSQL Database/)).toBeInTheDocument()
-    expect(screen.getByText(/Docker Sandbox Daemon/)).toBeInTheDocument()
+    expect(screen.getByText(/PostgreSQL database/)).toBeInTheDocument()
+    expect(screen.getByText(/Sandbox validation/)).toBeInTheDocument()
   })
 
   it('renders down / error badge when probe fails', async () => {

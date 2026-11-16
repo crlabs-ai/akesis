@@ -9,6 +9,7 @@ import { PipelineExplorer } from './components/Pipelines/PipelineExplorer'
 import { WebhookDeliveriesView } from './components/Deliveries/WebhookDeliveriesView'
 import { SystemHealthView } from './components/Health/SystemHealthView'
 import { PageTransition } from './components/Layout/PageTransition'
+import { CommandPalette } from './components/Command/CommandPalette'
 
 export const App: React.FC = () => {
   const [refreshKey, setRefreshKey] = useState<number>(0)
@@ -41,6 +42,7 @@ export const App: React.FC = () => {
           </main>
         </div>
       </div>
+      <CommandPalette />
     </BrowserRouter>
   )
 }
