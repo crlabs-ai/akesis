@@ -6,6 +6,7 @@ import { OverviewView } from './components/Overview/OverviewView'
 import { IncidentsList } from './components/Incidents/IncidentsList'
 import { IncidentDetailWorkspace } from './components/IncidentDetail/IncidentDetailWorkspace'
 import { PipelineExplorer } from './components/Pipelines/PipelineExplorer'
+import { WebhookDeliveriesView } from './components/Deliveries/WebhookDeliveriesView'
 import { SystemHealthView } from './components/Health/SystemHealthView'
 import { PageTransition } from './components/Layout/PageTransition'
 
@@ -32,6 +33,7 @@ export const App: React.FC = () => {
                 <Route path="/incidents" element={<IncidentsList />} />
                 <Route path="/incidents/:incidentId" element={<IncidentDetailWorkspace />} />
                 <Route path="/pipelines" element={<PipelineExplorer />} />
+                <Route path="/deliveries" element={<WebhookDeliveriesView />} />
                 <Route path="/health" element={<SystemHealthView />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 import { gsap } from 'gsap'
-import { Activity, AlertOctagon, GitMerge, LayoutDashboard, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
+import { Activity, AlertOctagon, GitMerge, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Webhook, X } from 'lucide-react'
 
 const STORAGE_KEY = 'akesis.sidebar.expanded'
 const EXPANDED_WIDTH = 224
@@ -34,6 +34,7 @@ const ROUTES = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true },
   { to: '/incidents', label: 'Incidents', icon: AlertOctagon, end: false },
   { to: '/pipelines', label: 'Pipelines', icon: GitMerge, end: false },
+  { to: '/deliveries', label: 'Deliveries', icon: Webhook, end: false },
   { to: '/health', label: 'System Health', icon: Activity, end: false },
 ]
 

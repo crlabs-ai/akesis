@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiClient, ApiError } from '../../services/api'
+import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
 import type { PipelineSummary } from '../../types/api'
 import { PipelineStageGraph } from '../Common/PipelineStageGraph'
 import { StatusBadge } from '../Common/StatusBadge'
@@ -37,6 +38,8 @@ export const PipelineExplorer: React.FC = () => {
     }
   }
 
+  useTokenChangeReload(() => void loadPipelines())
+
   useEffect(() => {
     loadPipelines()
   }, [page])
@@ -59,6 +62,12 @@ export const PipelineExplorer: React.FC = () => {
 
   return (
     <div className="pl-view">
+      <div className="hold-banner" role="note">
+        <strong>Remediation disabled (ADR-0010 hold).</strong> A pipeline below that reports
+        &ldquo;Remediation disabled&rdquo; was verified and recorded, but nothing was remediated. The stage
+        diagram shows which stages exist in the design; it does not show progress. Reasons are shown exactly
+        as the backend stored them.
+      </div>
       {/* Toolbar: search, counts and refresh */}
       <div className="pl-toolbar">
         <div className="pl-search">

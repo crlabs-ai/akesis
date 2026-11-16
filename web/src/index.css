@@ -2579,3 +2579,261 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     animation: none;
   }
 }
+
+/* ── Phase 16: integration states, access control, webhook deliveries ───────────────────── */
+
+.hold-banner {
+  border: 1px solid var(--status-warning-border);
+  background: var(--status-warning-bg);
+  color: var(--text-primary);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.ov-note {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.api-error {
+  border: 1px solid var(--status-danger-border);
+  background: var(--status-danger-bg);
+  color: var(--text-primary);
+  padding: 12px 14px;
+  margin: 8px 0 12px;
+  font-size: 0.8rem;
+}
+
+.api-error-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--status-danger);
+}
+
+.api-error-unauthorized,
+.api-error-forbidden {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.api-error-unauthorized .api-error-head,
+.api-error-forbidden .api-error-head {
+  color: var(--status-warning);
+}
+
+.api-error-guidance {
+  margin: 6px 0;
+  color: var(--text-secondary);
+}
+
+.api-error-detail {
+  margin: 4px 0 8px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  word-break: break-word;
+}
+
+.token-form {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  max-width: 420px;
+}
+
+.token-form-label {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.token-form-row {
+  display: flex;
+  gap: 6px;
+}
+
+.token-form-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+}
+
+.token-form-input:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.token-form-note {
+  margin: 0;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.access-control {
+  position: relative;
+  margin-right: 8px;
+}
+
+.access-control-trigger.is-attention {
+  border-color: var(--status-warning-border);
+  color: var(--status-warning);
+}
+
+.access-control-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  width: 320px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-default);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.deliveries-view {
+  display: grid;
+  gap: 12px;
+}
+
+.deliveries-header h1 {
+  margin: 0;
+}
+
+.deliveries-sub {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  max-width: 760px;
+}
+
+.deliveries-notice,
+.deliveries-stale {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+
+.deliveries-stale {
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+  color: var(--text-primary);
+}
+
+.deliveries-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.deliveries-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.deliveries-filters .btn.is-active {
+  border-color: var(--border-focus);
+  color: var(--text-primary);
+}
+
+.deliveries-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.deliveries-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle);
+}
+
+.deliveries-table-wrap.is-loading {
+  opacity: 0.6;
+}
+
+.deliveries-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.deliveries-table th,
+.deliveries-table td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: top;
+}
+
+.deliveries-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deliveries-table .delivery-id {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delivery-status {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border-default);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.delivery-status-retryable_error {
+  color: var(--status-info);
+  border-color: var(--status-info-border);
+  background: var(--status-info-bg);
+}
+
+.delivery-status-provider_hold {
+  color: var(--status-warning);
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.delivery-status-exhausted {
+  color: var(--status-danger);
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+}
+
+.deliveries-loading,
+.deliveries-empty {
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.deliveries-pager {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

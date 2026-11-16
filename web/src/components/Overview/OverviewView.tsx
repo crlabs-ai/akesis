@@ -1,84 +1,89 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { apiClient, ApiError } from '../../services/api'
+import { apiClient } from '../../services/api'
+import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
 import type { IncidentSummary, PipelineSummary, ReadinessResponse } from '../../types/api'
 import { StatusBadge } from '../Common/StatusBadge'
 import { CopyButton } from '../Common/CopyButton'
 import { TableSkeleton } from '../Common/Skeleton'
-import { AlertTriangle } from 'lucide-react'
+import { ApiErrorPanel } from '../Common/ApiErrorPanel'
+import { Info } from 'lucide-react'
 
+/** Size of each list on this page. Counts shown here are page sizes, never totals. */
 const RECENT_LIMIT = 8
 
 export const OverviewView: React.FC = () => {
   const [incidents, setIncidents] = useState<IncidentSummary[]>([])
   const [pipelines, setPipelines] = useState<PipelineSummary[]>([])
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
+  const [readinessError, setReadinessError] = useState<unknown>(null)
+  const [incidentsError, setIncidentsError] = useState<unknown>(null)
+  const [pipelinesError, setPipelinesError] = useState<unknown>(null)
   const [isLoading, setIsLoading] = useState<boolean>(true)
-  const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  const loadData = async () => {
+  // Each source settles independently. A failed source shows its own error state; it never
+  // becomes an empty list, and it never hides the other sources.
+  const loadData = useCallback(async () => {
     setIsLoading(true)
-    setError(null)
-    try {
-      const [readinessRes, incidentsRes, pipelinesRes] = await Promise.all([
-        apiClient.getReadiness().catch((err) => {
-          console.error('Readiness check error:', err)
-          return null
-        }),
-        apiClient.getIncidents({ limit: 10, offset: 0 }).catch((err) => {
-          console.error('Incidents load error:', err)
-          return []
-        }),
-        apiClient.getPipelines({ limit: 10, offset: 0 }).catch((err) => {
-          console.error('Pipelines load error:', err)
-          return []
-        }),
-      ])
+    const [readinessResult, incidentsResult, pipelinesResult] = await Promise.allSettled([
+      apiClient.getReadiness(),
+      apiClient.getIncidents({ limit: RECENT_LIMIT, offset: 0 }),
+      apiClient.getPipelines({ limit: RECENT_LIMIT, offset: 0 }),
+    ])
 
-      setReadiness(readinessRes)
-      setIncidents(incidentsRes)
-      setPipelines(pipelinesRes)
-      setLastUpdated(new Date())
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Failed to fetch operational status from backend')
-      }
-    } finally {
-      setIsLoading(false)
+    if (readinessResult.status === 'fulfilled') {
+      setReadiness(readinessResult.value)
+      setReadinessError(null)
+    } else {
+      setReadiness(null)
+      setReadinessError(readinessResult.reason)
     }
-  }
 
-  useEffect(() => {
-    loadData()
+    if (incidentsResult.status === 'fulfilled') {
+      setIncidents(incidentsResult.value)
+      setIncidentsError(null)
+    } else {
+      setIncidents([])
+      setIncidentsError(incidentsResult.reason)
+    }
+
+    if (pipelinesResult.status === 'fulfilled') {
+      setPipelines(pipelinesResult.value)
+      setPipelinesError(null)
+    } else {
+      setPipelines([])
+      setPipelinesError(pipelinesResult.reason)
+    }
+
+    setLastUpdated(new Date())
+    setIsLoading(false)
   }, [])
 
-  // Derived metrics from loaded records ONLY
-  const loadedIncidentCount = incidents.length
-  const loadedPipelineCount = pipelines.length
-  const pendingApprovalsCount = incidents.filter(
-    (inc) => inc.approval_status === 'pending' || inc.current_stage === 'awaiting_approval'
-  ).length
+  useEffect(() => {
+    void loadData()
+  }, [loadData])
+  useTokenChangeReload(() => void loadData())
 
-  const readinessTone =
-    readiness?.status === 'ready' ? 'is-ok' : readiness ? 'is-warn' : 'is-fail'
-  const readinessLabel = readiness?.status === 'ready' ? 'READY' : readiness ? readiness.status.toUpperCase() : 'UNREACHABLE'
+  const probeLabel =
+    readinessError !== null
+      ? 'UNREACHABLE'
+      : readiness?.status === 'ready'
+        ? 'REPORTS READY'
+        : readiness
+          ? readiness.status.toUpperCase()
+          : '—'
+  const probeTone =
+    readinessError !== null ? 'is-fail' : readiness?.status === 'ready' ? 'is-ok' : 'is-warn'
 
   return (
     <div className="overview-view">
-      {error && (
-        <div className="ov-notice" role="alert">
-          <AlertTriangle size={14} />
-          <div>
-            <div className="ov-notice-title">Backend connection notice</div>
-            <div className="ov-notice-desc">{error}</div>
-          </div>
-        </div>
-      )}
+      <div className="hold-banner" role="note">
+        <strong>Remediation disabled (ADR-0010 hold).</strong> Verified webhook deliveries are recorded. No fix
+        is generated, approved or merged, and no pull request is created. This is the policy in force, not a
+        live status reading.
+      </div>
 
-      {/* Control-plane header: service state and loaded counts, stated plainly */}
       <header className="ov-header">
         <div className="ov-header-title">
           <h1>Overview</h1>
@@ -87,35 +92,40 @@ export const OverviewView: React.FC = () => {
 
         <dl className="ov-stats" aria-label="System Operational Strip">
           <div className="ov-stat">
-            <dt>API Readiness:</dt>
+            <dt>API probe:</dt>
             <dd>
-              <span className={`ov-state ${readinessTone}`}>
+              <span className={`ov-state ${probeTone}`}>
                 <span className="ov-dot" aria-hidden="true" />
-                {readinessLabel}
+                {probeLabel}
               </span>
-              {readiness?.environment && <span className="ov-env mono">{readiness.environment}</span>}
+              <span className="ov-env">process only · database not checked</span>
             </dd>
           </div>
           <div className="ov-stat">
-            <dt>Loaded Incidents:</dt>
-            <dd className="ov-num">{isLoading ? '—' : loadedIncidentCount}</dd>
+            <dt>Incidents shown (newest {RECENT_LIMIT}):</dt>
+            <dd className="ov-num">{isLoading ? '—' : incidentsError !== null ? 'n/a' : incidents.length}</dd>
           </div>
           <div className="ov-stat">
-            <dt>Pending Approvals:</dt>
-            <dd className={`ov-num ${pendingApprovalsCount > 0 ? 'is-warn' : ''}`}>
-              {isLoading ? '—' : pendingApprovalsCount}
-            </dd>
-          </div>
-          <div className="ov-stat">
-            <dt>Loaded Pipelines:</dt>
-            <dd className="ov-num">{isLoading ? '—' : loadedPipelineCount}</dd>
+            <dt>Pipelines shown (newest {RECENT_LIMIT}):</dt>
+            <dd className="ov-num">{isLoading ? '—' : pipelinesError !== null ? 'n/a' : pipelines.length}</dd>
           </div>
           <div className="ov-stat ov-stat-probe">
             <dt>Last probe</dt>
             <dd className="mono">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'probing…'}</dd>
           </div>
         </dl>
+        <p className="ov-note">
+          <Info size={12} aria-hidden="true" /> These are page sizes. The backend does not provide totals, so this
+          page never states one.{' '}
+          <Link to="/deliveries" className="ov-link">
+            Open webhook deliveries
+          </Link>
+        </p>
       </header>
+
+      {readinessError !== null && (
+        <ApiErrorPanel error={readinessError} subject="API probe" onRetry={() => void loadData()} />
+      )}
 
       <div className="ov-grid">
         {/* Incidents */}
@@ -127,8 +137,10 @@ export const OverviewView: React.FC = () => {
 
           {isLoading ? (
             <TableSkeleton label="Loading incident queue" columns={[3, 3, 1, 1]} rows={6} />
+          ) : incidentsError !== null ? (
+            <ApiErrorPanel error={incidentsError} subject="incidents" onRetry={() => void loadData()} />
           ) : incidents.length === 0 ? (
-            <div className="ov-empty">No incidents recorded in database.</div>
+            <div className="ov-empty">The backend returned no incidents.</div>
           ) : (
             <div className="ov-table-wrap">
               <table className="ov-table">
@@ -141,7 +153,7 @@ export const OverviewView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {incidents.slice(0, RECENT_LIMIT).map((inc) => (
+                  {incidents.map((inc) => (
                     <tr key={inc.incident_id}>
                       <td>
                         <div className="ov-cell-id">
@@ -180,8 +192,10 @@ export const OverviewView: React.FC = () => {
 
           {isLoading ? (
             <TableSkeleton label="Loading pipeline ledger" columns={[3, 2, 2, 2]} rows={6} />
+          ) : pipelinesError !== null ? (
+            <ApiErrorPanel error={pipelinesError} subject="pipelines" onRetry={() => void loadData()} />
           ) : pipelines.length === 0 ? (
-            <div className="ov-empty">No orchestration pipelines recorded.</div>
+            <div className="ov-empty">The backend returned no pipelines.</div>
           ) : (
             <div className="ov-table-wrap">
               <table className="ov-table">
@@ -194,7 +208,7 @@ export const OverviewView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {pipelines.slice(0, RECENT_LIMIT).map((pipe) => (
+                  {pipelines.map((pipe) => (
                     <tr key={pipe.pipeline_id}>
                       <td>
                         <div className="ov-cell-id">

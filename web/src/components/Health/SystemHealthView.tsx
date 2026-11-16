@@ -66,7 +66,8 @@ export const SystemHealthView: React.FC = () => {
               <span>System Health & Diagnostics</span>
             </div>
             <div className="panel-subtitle">
-              Verified backend probes: GET /health/liveness and GET /health/readiness
+              Backend probes: GET /health/liveness (process responding). GET /health/readiness returns a fixed
+              value and does not check the database. Neither probe reports the retry worker.
             </div>
           </div>
 

@@ -1,6 +1,7 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { RefreshCw } from 'lucide-react'
+import { AccessControl } from '../Access/AccessControl'
 
 interface HeaderProps {
   onRefresh?: () => void
@@ -27,6 +28,9 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
     }
     if (pathname === '/pipelines') {
       return [{ label: 'Pipelines', to: '/pipelines' }]
+    }
+    if (pathname === '/deliveries') {
+      return [{ label: 'Webhook deliveries', to: '/deliveries' }]
     }
     if (pathname === '/health') {
       return [{ label: 'System Health', to: '/health' }]
@@ -64,6 +68,7 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
       </div>
 
       <div className="header-right">
+        <AccessControl />
         {onRefresh && (
           <button
             type="button"
