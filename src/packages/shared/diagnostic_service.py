@@ -47,7 +47,9 @@ class DiagnosticService:
 
         # Resolve codebase evidence if not explicitly passed
         if evidence_package is None and self.context_resolver:
-            evidence_package = self.context_resolver.resolve_context(context, provenance=provenance)
+            evidence_package = await self.context_resolver.resolve_context(
+                context, provenance=provenance
+            )
 
         system_instruction = self.prompt_builder.build_system_instruction()
         user_prompt = self.prompt_builder.build_user_prompt(

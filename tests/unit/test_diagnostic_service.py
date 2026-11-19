@@ -50,7 +50,7 @@ class MockLLMClient:
 class _NoEvidenceResolver:
     """Explicit test double: diagnosis proceeds without repository evidence (no checkout)."""
 
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Path | None = None,
@@ -66,7 +66,7 @@ class _StaticEvidenceResolver:
     def __init__(self, package: EvidencePackage) -> None:
         self.package = package
 
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Path | None = None,

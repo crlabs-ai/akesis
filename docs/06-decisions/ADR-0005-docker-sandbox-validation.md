@@ -18,7 +18,7 @@ Key architectural and security constraints:
 
 ## Decision
 1. **Protocol Decoupling**: We define `SandboxRunnerProtocol` in `src/packages/sdk/sandbox_runner.py` and implement `DockerSandboxRunner`. `ValidationService` depends exclusively on the protocol, enabling offline unit testing without requiring Docker.
-2. **Ephemeral Workspace Lifecycle**: Disposable temporary directories are created per validation run, materialized at the exact `commit_sha` via `GitRepositoryCheckoutManager`, patched via verbatim `git apply`, and unconditionally destroyed in `finally:` blocks.
+2. **Ephemeral Workspace Lifecycle**: Disposable temporary directories are created per validation run, materialized at the exact `commit_sha` (since ADR-0011: from a verified snapshot), patched via verbatim `git apply`, and unconditionally destroyed in `finally:` blocks.
 3. **Dedicated Validator Image**: `docker/Dockerfile.validator` defines `akesis-validator:v1` based on `python:3.12-slim` containing pre-installed `pytest`, `ruff`, `mypy`, and `git`. No packages are installed dynamically at runtime.
 4. **Deterministic Command Allowlist**: Commands are strictly mapped from `FailureContext.signal.category` without allowing arbitrary shell string execution.
 5. **In-Memory ValidationResult**: `ValidationResult` is returned directly to the pipeline in-memory. PostgreSQL table migrations are deferred to Phase 6/7.

@@ -70,7 +70,7 @@ class MockIntDiagService:
 
 
 class MockIntContextResolver:
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Any = None,

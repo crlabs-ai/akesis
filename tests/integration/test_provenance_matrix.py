@@ -17,7 +17,6 @@ from src.packages.database.repositories import (
     MutationRepository,
 )
 from src.packages.database.session import get_session_factory
-from src.packages.sdk.repo_checkout import GitRepositoryCheckoutManager
 from src.packages.sdk.sandbox_runner import DockerSandboxRunner
 from src.packages.shared.approval_service import ApprovalService
 from src.packages.shared.context_resolver import CodebaseContextResolver
@@ -79,14 +78,14 @@ async def _resume(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
 
 async def _resolve(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
     token = await verify_context_provenance(s.context)  # the only way to obtain a token
-    return CodebaseContextResolver(checkout_manager=mocks[5]).resolve_context(
+    return await CodebaseContextResolver(snapshot_service=mocks[5]).resolve_context(
         s.context, provenance=token
     )
 
 
 async def _resolve_with_caller_source(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
     token = await verify_context_provenance(s.context)
-    return CodebaseContextResolver(checkout_manager=mocks[5]).resolve_context(
+    return await CodebaseContextResolver(snapshot_service=mocks[5]).resolve_context(
         s.context, tmp, provenance=token
     )
 
@@ -114,16 +113,6 @@ async def _mutate(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
         snapshot_service=mocks[5],
         sandbox_runner=mocks[7],
     ).create_pull_request(s.context, s.proposal, s.validation, s.approval)
-
-
-async def _checkout(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
-    token = await verify_context_provenance(s.context)
-    return GitRepositoryCheckoutManager(base_dir=tmp).checkout_commit(
-        s.context.repository_owner,
-        s.context.repository_name,
-        s.context.commit_sha,
-        provenance=token,
-    )
 
 
 async def _sandbox(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
@@ -168,7 +157,6 @@ ENTRY_POINTS: dict[str, EntryCall] = {
     "validate_fix": _validate,
     "request_approval": _approve,
     "create_pull_request": _mutate,
-    "checkout_commit": _checkout,
     "run_validation": _sandbox,
 }
 
@@ -233,7 +221,7 @@ async def test_entry_point_matrix(entry: str, case: str, tmp_path: Path) -> None
         code = EXPECTED_CODE_OVERRIDES.get((entry, case), INVALID_CASES[case])
         assert cast(ProvenanceRejected, error).code == code
     _no_side_effects(mocks)
-    if entry in {"checkout_commit", "run_validation"}:
+    if entry == "run_validation":
         assert not list(tmp_path.iterdir())
 
 
@@ -257,17 +245,12 @@ async def test_valid_record_passes_verification_and_stops_at_hold() -> None:
     token = await verify_context_provenance(seeded.context)
     assert token.incident_id == seeded.context.incident_id
     assert token.semantic_key == semantic_key_for(42, 1001, seeded.context.run_id, 1)
+    snapshots = Mock()
     with pytest.raises(UnverifiedProvenanceError):
-        await _checkout_with_token(seeded, token)
-
-
-async def _checkout_with_token(seeded: Seeded, token: Any) -> None:
-    GitRepositoryCheckoutManager(base_dir=Path("/nonexistent-never-used")).checkout_commit(
-        seeded.context.repository_owner,
-        seeded.context.repository_name,
-        seeded.context.commit_sha,
-        provenance=token,
-    )
+        await CodebaseContextResolver(snapshot_service=snapshots).resolve_context(
+            seeded.context, provenance=token
+        )
+    assert not snapshots.mock_calls  # a valid token still stops at the hold before any snapshot
 
 
 @pytest.mark.asyncio
@@ -300,7 +283,7 @@ _ = (AsyncMock, Awaitable)  # imports used by type annotations in helpers
 
 @pytest.mark.asyncio
 async def test_caller_supplied_source_is_refused_even_with_valid_provenance(tmp_path: Path) -> None:
-    """Repository content must come from the bound checkout, never from a caller-chosen path."""
+    """Repository content must come from the bound verified snapshot, never a caller-chosen path."""
     seeded = await _seed("valid")
     mocks = _collaborators()
     with pytest.raises(ProvenanceRejected) as resolved:

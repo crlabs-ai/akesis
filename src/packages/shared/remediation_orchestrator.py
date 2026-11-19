@@ -59,7 +59,7 @@ class DiagnosticServiceProtocol(Protocol):
 
 
 class ContextResolverProtocol(Protocol):
-    def resolve_context(
+    async def resolve_context(
         self, failure_context: FailureContext, repo_root: Any = None, *, provenance: Any = None
     ) -> EvidencePackage: ...
 
@@ -230,7 +230,7 @@ class RemediationOrchestrator:
                 return updated or record
 
             # 3. Stage: Codebase Context Resolution
-            evidence_pkg = self.context_resolver.resolve_context(
+            evidence_pkg = await self.context_resolver.resolve_context(
                 failure_context=context,
                 provenance=provenance,
             )

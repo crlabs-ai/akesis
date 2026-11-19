@@ -86,9 +86,10 @@ src/
     │   ├── repositories.py # Atomic repository implementations
     │   └── session.py      # Async engine & session factory
     ├── sdk/                # Decoupled External Integrations
-    │   ├── github_client.py   # GitHub REST API client (logs, PRs, commits)
+    │   ├── github_app_auth.py # GitHub App installation tokens
+    │   ├── github_git_source.py # Verified Git Data API reads (snapshots)
+    │   ├── github_git_writer.py # Scoped Git Data API writes (branch, PR)
     │   ├── llm_client.py      # Google Gemini structured REST adapter
-    │   ├── repo_checkout.py   # GitPython exact commit materialization
     │   ├── sandbox_runner.py  # Docker sandbox execution runner
     │   └── slack_client.py    # Slack Block Kit dispatcher & signature verifier
     └── shared/             # Domain Logic & Business Services
@@ -155,8 +156,8 @@ sequenceDiagram
     API-->>GH: 200 OK (IngestionResponse: accepted)
 
     %% Diagnosis & Context
-    API->>Git: checkout_commit(repo, commit_sha)
-    Git-->>API: Local repository root
+    API->>Git: verified snapshot (Git Data API, commit_sha)
+    Git-->>API: Private snapshot workspace
     API->>Diag: diagnose_failure(FailureContext)
     Diag->>LLM: generate_structured(DiagnosisProposal schema)
     LLM-->>Diag: Structured root cause & evidence
@@ -297,7 +298,7 @@ Akesis enforces a defense-in-depth security model across five strict trust perim
 | **Duplicate Slack Button Click** | Database executes conditional update (`WHERE status = 'pending'`). Subsequent clicks return existing status with `is_duplicate=True`. | `200 OK` with `is_duplicate=True` |
 | **Expired Approval Action** | If `now > expires_at`, `ApprovalService` transitions status to `expired` and returns HTTP 409 Conflict. | `ApprovalStatus.EXPIRED` (PR not created) |
 | **Stale Commit on Target Branch** | If target repository HEAD has advanced past the failing commit SHA, mutation service halts with `StaleCommitError`. | `MutationStatus.FAILED` (PR aborted) |
-| **GitHub API Rate Limit / Network Outage** | `GitHubClient` raises typed `GitHubRateLimitError` or `GitHubAPIError`; mutation status recorded as failed in database. | `MutationStatus.FAILED` with error log |
+| **GitHub API Rate Limit / Network Outage** | `GitHubRepositoryWriter` raises `GitHubWriteError` with a stable code; mutation status recorded as failed in database. | `MutationStatus.FAILED` with error log |
 
 ---
 

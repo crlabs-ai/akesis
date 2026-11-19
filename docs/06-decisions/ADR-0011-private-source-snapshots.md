@@ -85,9 +85,9 @@ containers are named and force-removed on timeout or cancellation.
   large repositories exceed the default limits and fail closed.
 * Commit objects are trusted to the API response, not reconstructed locally.
 * The live handle registry is in-process. Handles do not survive a restart and fail closed.
-* The shared checkout is still used by the context resolver (evidence reads, bounded to the
-  repository root), behind the hold. Its clone URL can still embed the personal access token in
-  `.git/config`. Migrating it is future work.
+* Phase 1.8: the context resolver reads evidence from a verified snapshot workspace as well. The
+  shared checkout (`GitRepositoryCheckoutManager`) and the personal access token setting are
+  removed, so no path clones a repository or writes a credential to `.git/config`.
 * Phase 1.7: the mutation workflow no longer uses the shared checkout or the personal access token.
   It applies the patch to a workspace copy of a verified snapshot, reads the changes back with links
   refused, and writes blobs, tree, commit, branch and pull request through the Git Data API with an

@@ -9,7 +9,7 @@ This document specifies the integration protocols, authentication methods, and p
 * **Protocol:** HTTPS / REST API v3 & Webhooks.
 * **Authentication:**
   * **Inbound (Webhook):** HMAC-SHA256 signature verification over request body using `GITHUB_WEBHOOK_SECRET` passed in header `X-Hub-Signature-256`.
-  * **Outbound (REST API):** GitHub Personal Access Token or GitHub App Installation Token via `Bearer` token in `Authorization` header (`GITHUB_TOKEN`).
+  * **Outbound (REST API):** Short-lived GitHub App installation tokens (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`), sent only as a `Bearer` token in the `Authorization` header. No personal access token is used.
 * **Endpoints Used:**
   * `GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs` (Fetch raw workflow run console logs)
   * `GET /repos/{owner}/{repo}/commits/{commit_sha}` (Retrieve commit metadata)

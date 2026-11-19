@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.packages.sdk.repo_checkout import GitRepositoryCheckoutManager
 from src.packages.sdk.sandbox_runner import DockerSandboxRunner
 from src.packages.shared.approval_service import ApprovalService
 from src.packages.shared.context_resolver import CodebaseContextResolver
@@ -135,17 +134,13 @@ async def test_resume_fails_closed_without_persisted_approval() -> None:
     appr_repo.get_approval.assert_not_awaited()
 
 
-def test_sync_entry_points_require_a_token_before_io(tmp_path: Path) -> None:
-    checkout = Mock()
+@pytest.mark.asyncio
+async def test_context_resolution_requires_a_token_before_any_snapshot() -> None:
+    snapshots = Mock()
     with pytest.raises(ProvenanceRejected) as resolved:
-        CodebaseContextResolver(checkout_manager=checkout).resolve_context(_context())
+        await CodebaseContextResolver(snapshot_service=snapshots).resolve_context(_context())
     assert resolved.value.code == "missing"
-    checkout.checkout_commit.assert_not_called()
-
-    with pytest.raises(ProvenanceRejected) as cloned:
-        GitRepositoryCheckoutManager(base_dir=tmp_path).checkout_commit("owner", "repo", "a" * 40)
-    assert cloned.value.code == "missing"
-    assert not list(tmp_path.iterdir())
+    assert not snapshots.mock_calls
 
 
 @pytest.mark.asyncio

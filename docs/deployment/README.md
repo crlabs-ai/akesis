@@ -40,9 +40,8 @@ DATABASE_URL=postgresql+asyncpg://akesis_user:SECURE_DB_PASSWORD@localhost:5432/
 
 # GitHub Integration
 GITHUB_WEBHOOK_SECRET=your_generated_hmac_secret_32_chars_min
-GITHUB_TOKEN=ghp_your_github_personal_access_token_or_app_token
 GITHUB_API_URL=https://api.github.com
-# GitHub App identity (required by the retry worker and provenance verification)
+# GitHub App identity: required for every GitHub call (verification, snapshots, branch and PR creation)
 GITHUB_APP_ID=123456
 # Multi-line PEM: place this in /opt/akesis/.env as a double-quoted value, not in the systemd
 # EnvironmentFile (systemd cannot carry multi-line values). The settings loader reads .env from the
@@ -82,7 +81,6 @@ SANDBOX_TIMEOUT_SECONDS=30.0
 SANDBOX_MEMORY_LIMIT=512m
 SANDBOX_CPU_LIMIT=1.0
 SANDBOX_BASE_DIR=/tmp/akesis/sandbox
-REPO_CHECKOUT_BASE_DIR=/tmp/akesis/repos
 ```
 
 ---

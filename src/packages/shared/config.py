@@ -74,10 +74,6 @@ class Settings(BaseSettings):
         default="test_webhook_secret",
         description="HMAC secret used to verify incoming GitHub webhooks",
     )
-    github_token: str = Field(
-        default="",
-        description="GitHub token for API access and log retrieval",
-    )
     github_api_url: str = Field(
         default="https://api.github.com",
         description="Base URL for the GitHub REST API",
@@ -121,10 +117,6 @@ class Settings(BaseSettings):
     )
 
     # Codebase Context Retrieval Limits
-    repo_checkout_base_dir: str = Field(
-        default="/tmp/akesis/repos",
-        description="Directory where git repositories are checked out",
-    )
     snapshot_base_dir: str = Field(
         default="/tmp/akesis/snapshots",
         description="Private, owner-only directory for immutable source snapshots",
@@ -280,8 +272,9 @@ class Settings(BaseSettings):
         if not self.github_webhook_secret or self.github_webhook_secret in insecure_webhook_secrets:
             errors.append("GITHUB_WEBHOOK_SECRET is missing or using an insecure test placeholder.")
 
-        if not self.github_token or self.github_token == "your_github_token_here":
-            errors.append("GITHUB_TOKEN is required in production.")
+        # Every GitHub call (verification, snapshots, branch and PR creation) uses the App.
+        if self.github_app_id <= 0 or not self.github_app_private_key.strip():
+            errors.append("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production.")
 
         # Gemini API Key validation
         if not self.gemini_api_key or self.gemini_api_key == "your_gemini_api_key_here":
@@ -333,7 +326,7 @@ class Settings(BaseSettings):
         else:
             secret_pool = {
                 self.github_webhook_secret,
-                self.github_token,
+                self.github_app_private_key,
                 self.gemini_api_key,
                 self.slack_signing_secret,
             }

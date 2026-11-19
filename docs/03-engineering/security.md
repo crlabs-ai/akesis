@@ -6,7 +6,7 @@
 * **Zero Hardcoding:** No API tokens, webhook secrets, or credentials may be committed.
 * **Static Scanning:** CI runs `gitleaks` on all pull requests.
 * **Runtime Config:** Load credentials from environment variables (`.env` in local dev).
-* **Fail-Fast Production Validation:** In `production` environment, application startup enforces non-empty, non-placeholder secrets (`DATABASE_URL`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `GEMINI_API_KEY`, `SLACK_WEBHOOK_URL`, `SLACK_SIGNING_SECRET`).
+* **Fail-Fast Production Validation:** In `production` environment, application startup enforces non-empty, non-placeholder secrets (`DATABASE_URL`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GEMINI_API_KEY`, `SLACK_WEBHOOK_URL`, `SLACK_SIGNING_SECRET`).
 * **Secret Isolation:** `READ_API_TOKEN` must be distinct from all GitHub, Gemini, and Slack credentials.
 * **GitHub App authentication:** Sign short-lived RS256 App JWTs with `PyJWT[crypto]`; use the App ID or client ID as issuer. Verify installation ownership with the App JWT before issuing an installation token. Keep the private key and installation tokens out of logs, Git configuration, and validation workspaces. Installation tokens are short-lived and must be refreshed before expiry.
   The App authentication adapter is not yet wired into webhook processing or repository operations; its presence does not establish repository provenance or make the remediation path production-ready.

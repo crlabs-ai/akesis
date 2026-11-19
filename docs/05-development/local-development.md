@@ -45,7 +45,8 @@ ENVIRONMENT=development
 LOG_LEVEL=INFO
 DATABASE_URL=postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis
 GITHUB_WEBHOOK_SECRET=test_webhook_secret
-GITHUB_TOKEN=your_github_token_here
+GITHUB_APP_ID=0
+GITHUB_APP_PRIVATE_KEY=
 GEMINI_API_KEY=your_gemini_api_key_here
 SLACK_SIGNING_SECRET=test_slack_signing_secret
 ```

@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed (Phase 1.8: snapshot-only source access, personal access token removed)
+* **Context resolution reads verified snapshots.** `CodebaseContextResolver.resolve_context` is now async and extracts evidence from a verified snapshot workspace of the exact commit, removed afterwards. A rejected or mismatched snapshot yields `unavailable` evidence instead of a checkout error.
+* **Removed:** `GitRepositoryCheckoutManager` (`repo_checkout.py`), the unused `GitHubClient` (`github_client.py`), and the `GITHUB_TOKEN` and `REPO_CHECKOUT_BASE_DIR` settings. No code clones a repository or stores a token in `.git/config`. A leftover `GITHUB_TOKEN` in `.env` is ignored.
+* **Production configuration requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`** instead of `GITHUB_TOKEN`, and `READ_API_TOKEN` must differ from the App private key.
+* The provenance matrix drops the removed checkout entry point; the other eight keep all 16 cases.
+
 ### Changed (Phase 1.7: secure mutation and pull request creation)
 * **Mutation no longer clones or uses the personal access token.** `GitMutationService` applies the validated patch to a copy of a verified snapshot of the approved commit and writes blobs, tree, commit, branch and pull request through the GitHub Git Data API (`src/packages/sdk/github_git_writer.py`). Every created object is checked against locally computed object IDs.
 * **Installation tokens can be scoped.** `GitHubAppAuth.installation_token` accepts `repository_ids` and `permissions`, and fails closed if GitHub reports a broader grant. The mutation token is limited to the event repository, `contents`/`pull_requests` write and `metadata` read.

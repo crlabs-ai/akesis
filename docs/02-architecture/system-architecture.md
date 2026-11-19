@@ -80,7 +80,7 @@ graph TD
 1. **Webhook Gateway (`src/apps/api/routes.py`):** Ingests `workflow_run` events, verifies HMAC-SHA256 signatures, and acknowledges immediately.
 2. **Log Parser (`src/packages/shared/log_parser.py`):** Strips ANSI formatting and extracts structured `FailureSignal` (category, error type, target file, stack frames).
 3. **Diagnostic Engine (`src/packages/shared/diagnostic_service.py`):** Uses structured JSON generation with Gemini to produce evidence-backed `DiagnosisProposal`.
-4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Materializes repository at exact failing commit SHA via `GitRepositoryCheckoutManager` and extracts bounded `CodeEvidence`.
+4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Reads a verified, private snapshot of the exact failing commit (ADR-0011) and extracts bounded `CodeEvidence`.
 
 ### 2.2 Synthesis & Sandbox Validation
 1. **Fix Proposal Engine (`src/packages/shared/fix_service.py`):** Prompts LLM for minimal unified diffs bounded by strict patch budgets (max 2 files, 100 lines, 4,000 characters).

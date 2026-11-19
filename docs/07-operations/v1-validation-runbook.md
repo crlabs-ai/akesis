@@ -43,7 +43,7 @@ GitHub Actions CI Failure
    │   └── Gemini structured root-cause diagnosis (is_fixable, confidence score)
    │
    ├── Stage: Codebase Context Retrieval
-   │   └── Clone/checkout exact commit SHA & extract bounded context lines
+   │   └── Verified snapshot of the exact commit SHA & bounded context lines
    │
    ├── Stage: Fix Proposal Generation (`status: proposing`)
    │   ├── Gemini structured unified diff synthesis
@@ -150,7 +150,8 @@ cp .env.example .env
 | `LOG_LEVEL` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
 | `DATABASE_URL` | Async PostgreSQL connection string | `postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis` |
 | `GITHUB_WEBHOOK_SECRET` | Secret to sign/verify GitHub webhooks (HMAC-SHA256) | `your_github_webhook_secret` |
-| `GITHUB_TOKEN` | GitHub Personal Access Token or App Token for API access | `ghp_xxxxxxxxxxxx` |
+| `GITHUB_APP_ID` | GitHub App ID (all GitHub calls use its installation tokens) | `123456` |
+| `GITHUB_APP_PRIVATE_KEY` | GitHub App private key (PEM) | `"-----BEGIN ..."` |
 | `GITHUB_API_URL` | Base GitHub API REST endpoint | `https://api.github.com` |
 | `GEMINI_API_KEY` | Google Gemini API key | `AIzaxxxxxxxxxxxx` |
 | `GEMINI_MODEL` | Gemini model name | `gemini-1.5-flash` |
@@ -259,7 +260,6 @@ curl -i -X POST http://127.0.0.1:8000/v1/webhooks/github \
 ## 14. Required Secrets Checklist (For Live Operator Testing)
 * [ ] `DATABASE_URL` configured and reachable on port 5436.
 * [ ] `GITHUB_WEBHOOK_SECRET` shared between GitHub and Akesis `.env`.
-* [ ] `GITHUB_TOKEN` with read access, used only for exact-commit context checkout.
 * [ ] `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` for a GitHub App installed on the test repository with Contents and Pull requests write and Metadata read. Snapshots, provenance verification, and branch and PR creation use its installation tokens.
 * [ ] `GEMINI_API_KEY` active with quota for `gemini-1.5-flash`.
 * [ ] `SLACK_WEBHOOK_URL` and `SLACK_SIGNING_SECRET` configured.
@@ -331,7 +331,7 @@ git push origin test/smoke-failure
 2. Webhook payload is received by `/v1/webhooks/github`.
 3. Webhook returns HTTP `202 Accepted` within 50ms.
 4. Akesis retrieves CI logs, identifies `AssertionError: assert 1 + 1 == 3`.
-5. Akesis clones repository at exact failing commit SHA.
+5. Akesis reads a verified snapshot of the exact failing commit SHA (no clone).
 6. Gemini synthesizes a patch:
 ```diff
 --- a/test_app.py

@@ -28,7 +28,7 @@ Logging: structlog with Correlation IDs
 ---
 
 ## 3. Codebase Context Retrieval (`src/packages/shared/context_resolver.py`)
-* **Responsibility:** Clones or updates the target repository and checks out the exact failing commit SHA in detached HEAD mode via [`GitRepositoryCheckoutManager`](../../src/packages/sdk/repo_checkout.py).
+* **Responsibility:** Reads source evidence from a verified, private snapshot of the exact failing commit ([`SnapshotService`](../../src/packages/shared/source_snapshot.py), ADR-0011). Nothing is cloned and no shared checkout exists.
 * **Security:** Enforces path validation (`is_path_safe_and_within_root`) to prevent directory traversal escapes.
 * **Budget Limits:** Extracts bounded line windows (default 40 lines) with character budget limits (max 8,000 characters total across candidate files).
 
@@ -59,6 +59,6 @@ Logging: structlog with Correlation IDs
 
 ---
 
-## 8. Controlled Git Mutation & PR Delivery (`src/packages/shared/mutation_service.py` & `src/packages/sdk/github_client.py`)
-* **Responsibility:** Verifies exact commit SHA consistency, creates dedicated fix branch (`akesis/fix/<incident>/<proposal>`), applies patch, executes pre-push sandbox validation, pushes branch, and opens a GitHub Pull Request with complete audit metadata.
+## 8. Controlled Git Mutation & PR Delivery (`src/packages/shared/mutation_service.py` & `src/packages/sdk/github_git_writer.py`)
+* **Responsibility:** Refuses fork-sourced runs, applies the approved patch to a verified snapshot, re-validates it, then, with a scoped GitHub App installation token, creates the commit and the dedicated fix branch (`akesis/fix/<incident>/<proposal>`) through the Git Data API and opens a Pull Request against the exact verified source branch. Never merges.
 * **Persistence:** Records full mutation lifecycle in PostgreSQL table `mutations` via [`MutationRepository`](../../src/packages/database/repositories.py).

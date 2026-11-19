@@ -32,11 +32,11 @@ diagnosis, patch generation, sandbox execution, and PR creation.
 2. The hold is enforced at every production-facing remediation entry point, before any side effect:
    - `RemediationOrchestrator.process_failure` and `resume_approval`
    - `FixProposalService.generate_fix_proposal` (LLM call)
-   - `ValidationService.validate_fix` (checkout and sandbox)
-   - `CodebaseContextResolver.resolve_context` (checkout)
+   - `ValidationService.validate_fix` (snapshot and sandbox)
+   - `CodebaseContextResolver.resolve_context` (snapshot)
    - `ApprovalService.request_approval` (persistence and Slack card)
    - `GitMutationService.create_pull_request` (remote Git objects, branch, PR)
-   - `GitRepositoryCheckoutManager.checkout_commit` (direct SDK clone or fetch)
+   - `GitRepositoryCheckoutManager.checkout_commit` (direct SDK clone or fetch; removed in Phase 1.8)
    - `DockerSandboxRunner.run_validation` (direct sandbox execution)
 3. The hold is not data-dependent. Presence of a `provenance` object on a `FailureContext` does
    not lift it. There is no environment variable, configuration flag, or public parameter that
@@ -143,7 +143,8 @@ active, so no remediation side effect can occur yet.
 
 Entry points covered by the matrix (`tests/integration/test_provenance_matrix.py`): process
 failure, resume approval, context resolution, fix generation, validation, approval request,
-mutation, checkout, and sandbox execution. Each rejects 15 invalid cases before side effects. A
+mutation, and sandbox execution (checkout until Phase 1.8 removed it). Each rejects 15 invalid
+cases before side effects. A
 valid record passes persisted verification and stops at the hold.
 
 Caller-supplied `repo_root` values are rejected at verified entry points, so repository content
@@ -170,3 +171,19 @@ The hold is unchanged and still runs first in `create_pull_request`.
 
 Tests: `tests/unit/test_mutation_service.py`, `tests/unit/test_github_git_writer.py`,
 `tests/unit/test_github_app_auth.py`, `tests/integration/test_mutation_flow.py`.
+
+## Implementation Status (Phase 1.8)
+
+Condition 3 (private snapshots) now covers every path that reads repository content. The hold is
+unchanged.
+
+* `CodebaseContextResolver` reads evidence from a verified snapshot workspace of the exact commit and
+  removes it afterwards. A rejected or mismatched snapshot yields `unavailable` evidence.
+* `GitRepositoryCheckoutManager` (`repo_checkout.py`) and the unused `GitHubClient` are removed, so
+  no code clones a repository or embeds a token in `.git/config`.
+* The `GITHUB_TOKEN` personal access token setting is removed. Production configuration requires
+  `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` instead. A leftover `GITHUB_TOKEN` in an environment
+  file is ignored.
+
+Tests: `tests/unit/test_context_resolver.py`, `tests/unit/test_provenance_hold.py`,
+`tests/unit/test_read_api_security.py`, `tests/integration/test_provenance_matrix.py`.

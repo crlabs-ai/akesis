@@ -29,9 +29,10 @@ src/
     │   └── session.py
     ├── sdk/
     │   ├── __init__.py
-    │   ├── github_client.py
+    │   ├── github_app_auth.py
+    │   ├── github_git_source.py
+    │   ├── github_git_writer.py
     │   ├── llm_client.py
-    │   ├── repo_checkout.py
     │   ├── sandbox_runner.py
     │   └── slack_client.py
     └── shared/
@@ -56,33 +57,34 @@ src/
 | Module Path | Primary Symbols / Classes | Core Responsibilities & Protocols | Dependencies |
 | :--- | :--- | :--- | :--- |
 | `src/apps/api/main.py` | `create_app()`, `lifespan()`, `request_correlation_middleware` | FastAPI application lifecycle, health endpoints (`/health/liveness`, `/health/readiness`), request correlation header (`X-Request-ID`). | FastAPI, `structlog`, `database.session` |
-| `src/apps/api/routes.py` | `handle_github_webhook()`, `handle_slack_interaction()`, `verify_github_signature()` | Ingests `workflow_run` webhooks and handles interactive Slack callbacks. | `shared.models`, `shared.approval_service`, `shared.log_parser`, `sdk.github_client`, `sdk.slack_client` |
+| `src/apps/api/routes.py` | `handle_github_webhook()`, `handle_slack_interaction()`, `verify_github_signature()` | Ingests `workflow_run` webhooks and handles interactive Slack callbacks. | `shared.models`, `shared.approval_service`, `shared.log_parser`, `sdk.github_app_auth`, `sdk.slack_client` |
 | `src/packages/database/models.py` | `Base`, `ApprovalModel`, `MutationModel` | SQLAlchemy 2.0 async ORM declarations mapping to tables `approvals` and `mutations`. | SQLAlchemy |
 | `src/packages/database/repositories.py` | `ApprovalRepositoryProtocol`, `ApprovalRepository`, `MutationRepositoryProtocol`, `MutationRepository` | Atomic conditional SQL persistence for human approval and git mutation entities. | `database.models`, `shared.models`, `sqlalchemy.ext.asyncio` |
 | `src/packages/database/session.py` | `get_engine()`, `get_session_factory()`, `get_db_session()` | Async SQLAlchemy engine configuration and FastAPI dependency injection factory. | `sqlalchemy.ext.asyncio`, `shared.config` |
 | `src/packages/sdk/llm_client.py` | `LLMClientProtocol`, `GeminiClient`, `LLMError`, `LLMAuthError`, `LLMRateLimitError` | Schema-enforced structured JSON generation adapter calling Google Gemini REST API. | `httpx`, `pydantic`, `shared.config` |
-| `src/packages/sdk/github_client.py` | `GitHubClientProtocol`, `GitHubClient`, `GitHubAPIError`, `GitHubResourceNotFoundError` | Async REST client for GitHub API: workflow run logs, commit metadata, search/create Pull Requests. | `httpx`, `shared.config` |
-| `src/packages/sdk/repo_checkout.py` | `RepoCheckoutProtocol`, `GitRepositoryCheckoutManager`, `InvalidCommitError` | Clones and checks out exact target commit SHAs in detached HEAD working trees. | `gitpython`, `shared.config` |
+| `src/packages/sdk/github_git_writer.py` | `GitHubRepositoryWriter`, `GitHubWriteError` | Installation-token-scoped Git Data API writes: verified blobs, tree and commit, create-only branch, pull request. | `httpx`, `sdk.github_git_source` |
 | `src/packages/sdk/sandbox_runner.py` | `SandboxRunnerProtocol`, `DockerSandboxRunner`, `DockerUnavailableError`, `SandboxTimeoutError`, `PatchApplicationError` | Materializes ephemeral workspaces, applies verbatim unified diffs, and executes container validation. | `asyncio`, `shared.config`, `shared.models` |
 | `src/packages/sdk/slack_client.py` | `SlackClientProtocol`, `SlackClient`, `verify_slack_signature()`, `SlackError` | Dispatches Block Kit approval cards, updates message cards via `response_url`, and verifies HMAC signatures. | `httpx`, `shared.config`, `shared.models` |
 | `src/packages/shared/config.py` | `Settings`, `settings` | Typed application settings loaded from environment variables using `pydantic-settings`. | `pydantic_settings` |
 | `src/packages/shared/models.py` | `FailureCategory`, `FailureSignal`, `FailureContext`, `CodeEvidence`, `EvidencePackage`, `DiagnosisProposal`, `DiagnosticResult`, `FixProposal`, `ValidationResult`, `ApprovalRecord`, `MutationRecord` | Domain Pydantic models, enums, and data schemas across all pipeline stages. | `pydantic` |
 | `src/packages/shared/log_parser.py` | `filter_and_extract_signal()`, `strip_ansi_codes()` | Regex-based ANSI stripping and failure signal extraction (Python traceback, Pytest, Ruff, Mypy, Pip). | `shared.models` |
-| `src/packages/shared/context_resolver.py` | `CodebaseContextResolver`, `normalize_repo_relative_path()`, `is_path_safe_and_within_root()` | Resolves target files at commit SHA, enforces path security, and extracts bounded code snippets. | `sdk.repo_checkout`, `shared.models`, `shared.config` |
+| `src/packages/shared/context_resolver.py` | `CodebaseContextResolver`, `normalize_repo_relative_path()`, `is_path_safe_and_within_root()` | Resolves target files in a verified snapshot of the commit, enforces path security, and extracts bounded code snippets. | `shared.source_snapshot`, `shared.models`, `shared.config` |
 | `src/packages/shared/prompt_builder.py` | `DiagnosticPromptBuilder` | Builds deterministic system instructions and evidence-grounded user prompts for diagnosis. | `shared.models` |
 | `src/packages/shared/diagnostic_service.py` | `DiagnosticService` | Coordinates context resolution, prompt creation, Gemini structured generation, and fallback handling. | `sdk.llm_client`, `shared.context_resolver`, `shared.prompt_builder`, `shared.models` |
 | `src/packages/shared/fix_prompt_builder.py` | `FixPromptBuilder` | Builds system instructions and evidence prompts for minimal unified diff synthesis. | `shared.models` |
 | `src/packages/shared/patch_validator.py` | `PatchValidator`, `PatchValidationResult` | Parses unified diffs into `FilePatch`/`PatchHunk`, enforces budget caps, and checks evidence grounding. | `shared.models`, `shared.config` |
 | `src/packages/shared/fix_service.py` | `FixProposalService` | Coordinates diagnostic eligibility checking, fix prompt creation, LLM synthesis, and patch validation. | `sdk.llm_client`, `shared.patch_validator`, `shared.fix_prompt_builder`, `shared.models` |
-| `src/packages/shared/validation_service.py` | `ValidationService` | Maps failure category to allowlisted validation command and orchestrates sandbox runner. | `sdk.sandbox_runner`, `sdk.repo_checkout`, `shared.models` |
+| `src/packages/shared/validation_service.py` | `ValidationService` | Maps failure category to allowlisted validation command and orchestrates sandbox runner. | `sdk.sandbox_runner`, `sdk.github_app_auth`, `shared.models` |
 | `src/packages/shared/approval_service.py` | `ApprovalService`, `IneligibleApprovalError`, `IllegalStateTransitionError` | Evaluates eligibility, creates pending records, dispatches Slack cards, and commits decisions. | `database.repositories`, `sdk.slack_client`, `shared.models` |
-| `src/packages/shared/mutation_service.py` | `GitMutationService`, `PreflightCheckError`, `StaleCommitError`, `UnsafeBranchError` | Manages git branch creation, patch application, pre-push validation, commit, push, and PR opening. | `database.repositories`, `sdk.github_client`, `sdk.repo_checkout`, `sdk.sandbox_runner`, `shared.models` |
+| `src/packages/shared/mutation_service.py` | `GitMutationService`, `PreflightCheckError`, `ForkSourceRefusedError`, `StaleCommitError`, `UnsafeBranchError` | Applies the approved patch to a verified snapshot, re-validates it, and creates the branch and PR against the verified source branch through the Git Data API. | `database.repositories`, `sdk.github_app_auth`, `sdk.github_git_writer`, `shared.source_snapshot`, `shared.models` |
 
 ---
 
 ## 2. Runtime Call Flow & Sequence Diagram
 
-The following sequence diagram traces the complete runtime execution path through real functions and symbols:
+> **Note:** this diagram predates ADR-0010 and Phases 1.5 to 1.8. The webhook route no longer runs remediation, `GitHubClient` and `repo_checkout` are removed, and source comes from verified snapshots (ADR-0011). Treat it as the original V1 call sequence, not current runtime behaviour.
+
+The following sequence diagram traces the original V1 runtime execution path:
 
 ```mermaid
 sequenceDiagram
@@ -384,7 +386,6 @@ The repository maintains strict unit and integration test coverage across all su
 | `tests/unit/test_webhook_security.py` | Ingestion Gateway | HMAC-SHA256 signature verification, rejection of invalid/missing signatures. |
 | `tests/unit/test_event_normalization.py` | Event Ingestion | Normalization of `workflow_run` JSON into `WorkflowRunEvent`. |
 | `tests/unit/test_log_parser.py` | Signal Parsing | ANSI stripping, traceback extraction, Pytest/Ruff/Mypy/Pip pattern matching. |
-| `tests/unit/test_repo_checkout.py` | Code Context | Commit SHA format validation, detached HEAD checkout verification. |
 | `tests/unit/test_context_resolver.py` | Code Context | Line windowing, path traversal blocking (`is_path_safe_and_within_root`), character budget caps. |
 | `tests/unit/test_gemini_client.py` | AI SDK Client | Pydantic JSON schema generation, error translations (auth, rate limits, timeouts). |
 | `tests/unit/test_prompt_builder.py` | AI Prompting | Passive untrusted data wrapping, prompt injection boundary formatting. |
@@ -397,7 +398,7 @@ The repository maintains strict unit and integration test coverage across all su
 | `tests/unit/test_validation_service.py` | Sandbox Validation | Command selection matrix, outcome mapping (`passed`, `failed`, `patch_rejected`). |
 | `tests/unit/test_slack_client.py` | Human Gate SDK | Block Kit card building, signature verification, 300s replay window check. |
 | `tests/unit/test_approval_service.py` | Human Gate Service | Eligibility gating, atomic state transitions, duplicate idempotency, TTL expiration. |
-| `tests/unit/test_github_client.py` | GitHub SDK | Log streaming, commit fetching, PR search and creation error handling. |
+| `tests/unit/test_github_git_writer.py` | GitHub SDK | Canonical API only, exact ref matching, create-only branches, credential-free errors. |
 | `tests/unit/test_mutation_service.py` | Git Mutation | Preflight checks, SHA matching, branch safety, pre-push Docker validation, PR generation. |
 | `tests/integration/test_webhook_api.py` | Ingestion API | FastAPI test client verification of webhook ingress and signature gating. |
 | `tests/integration/test_database_repository.py` | Persistence | PostgreSQL async persistence, atomic SQL transitions, duplicate handling. |

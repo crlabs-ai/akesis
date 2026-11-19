@@ -244,7 +244,7 @@ class MockDiagService:
 
 
 class MockContextResolver:
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Any = None,
@@ -999,7 +999,7 @@ async def test_orchestrator_halts_when_codebase_context_unavailable(
     pipe_repo = MockPipelineRepo()
 
     class UnavailableContextResolver:
-        def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
+        async def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
             return EvidencePackage(
                 incident_id=sample_context.incident_id,
                 commit_sha=sample_context.commit_sha,
@@ -1058,7 +1058,7 @@ async def test_orchestrator_halts_when_zero_relevant_source_snippets(
     pipe_repo = MockPipelineRepo()
 
     class EmptyContextResolver:
-        def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
+        async def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage:
             return EvidencePackage(
                 incident_id=sample_context.incident_id,
                 commit_sha=sample_context.commit_sha,

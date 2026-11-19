@@ -101,7 +101,7 @@ class BenchmarkContextResolver:
     def __init__(self, target_file: str = "src/calculator.py") -> None:
         self.target_file = target_file
 
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Any = None,

@@ -492,9 +492,8 @@ async def test_installation_token_is_scoped_to_the_event_repository() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pat_is_never_used(monkeypatch: pytest.MonkeyPatch) -> None:
-    pat = "ghp_personal_access_token_sentinel"  # noqa: S105 - synthetic sentinel
-    monkeypatch.setattr(settings, "github_token", pat)
+async def test_pat_is_never_used() -> None:
+    assert not hasattr(settings, "github_token")  # Phase 1.8: the PAT setting no longer exists
     harness = _harness()
     await harness.run()
     assert harness.fake.authorizations
@@ -506,15 +505,16 @@ async def test_pat_is_never_used(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_no_clone_and_no_shared_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
-    import git
+    import importlib.util
 
-    from src.packages.sdk.repo_checkout import GitRepositoryCheckoutManager
+    import git
 
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("mutation must not clone or check out a repository")
 
     monkeypatch.setattr(git.Repo, "clone_from", refuse)
-    monkeypatch.setattr(GitRepositoryCheckoutManager, "checkout_commit", refuse)
+    # Phase 1.8 removed the shared-checkout manager entirely.
+    assert importlib.util.find_spec("src.packages.sdk.repo_checkout") is None
     record = await _harness().run()
     assert record.status == MutationStatus.PR_CREATED
 
