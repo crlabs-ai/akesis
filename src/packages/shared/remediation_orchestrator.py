@@ -210,8 +210,13 @@ class RemediationOrchestrator:
             async with self.repository_factory() as (_, _, pipe_repo):
                 await pipe_repo.update_pipeline_state(pipeline_id, PipelineStatus.DIAGNOSING)
 
+            # One verified snapshot per incident: diagnosis and fix synthesis share this evidence.
+            evidence_pkg = await self.context_resolver.resolve_context(
+                failure_context=context,
+                provenance=provenance,
+            )
             diag_result = await self.diagnostic_service.diagnose_failure(
-                context=context, provenance=provenance
+                context=context, evidence_package=evidence_pkg, provenance=provenance
             )
             diag_id = f"diag_{context.incident_id}"
 
@@ -229,12 +234,7 @@ class RemediationOrchestrator:
                 logger.info("pipeline_halted_unfixable", incident_id=context.incident_id)
                 return updated or record
 
-            # 3. Stage: Codebase Context Resolution
-            evidence_pkg = await self.context_resolver.resolve_context(
-                failure_context=context,
-                provenance=provenance,
-            )
-
+            # 3. Stage: Codebase context availability (resolved once, before diagnosis)
             if (
                 evidence_pkg.retrieval_status in ("unavailable", "empty")
                 or len(evidence_pkg.code_evidences) == 0

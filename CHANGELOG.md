@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed (Phase 1.9: one verified snapshot per incident)
+* **Context is resolved once per incident.** The orchestrator resolves evidence before diagnosis and passes the same package to `diagnose_failure` and fix synthesis, halving snapshot acquisitions (and GitHub API requests) for context. `DiagnosticService` rejects supplied evidence that does not match the incident, commit and repository (`ProvenanceRejected`, code `binding`) and still resolves context itself only when none is supplied.
+
 ### Changed (Phase 1.8: snapshot-only source access, personal access token removed)
 * **Context resolution reads verified snapshots.** `CodebaseContextResolver.resolve_context` is now async and extracts evidence from a verified snapshot workspace of the exact commit, removed afterwards. A rejected or mismatched snapshot yields `unavailable` evidence instead of a checkout error.
 * **Removed:** `GitRepositoryCheckoutManager` (`repo_checkout.py`), the unused `GitHubClient` (`github_client.py`), and the `GITHUB_TOKEN` and `REPO_CHECKOUT_BASE_DIR` settings. No code clones a repository or stores a token in `.git/config`. A leftover `GITHUB_TOKEN` in `.env` is ignored.

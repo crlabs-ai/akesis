@@ -1,6 +1,9 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -10,6 +13,9 @@ from src.packages.database.repositories import (
     MutationRepositoryProtocol,
     PipelineRepositoryProtocol,
 )
+from src.packages.shared.config import settings
+from src.packages.shared.context_resolver import CodebaseContextResolver
+from src.packages.shared.diagnostic_service import DiagnosticService
 from src.packages.shared.models import (
     ApprovalRecord,
     ApprovalStatus,
@@ -37,6 +43,8 @@ from src.packages.shared.remediation_orchestrator import (
     OrchestrationError,
     RemediationOrchestrator,
 )
+from src.packages.shared.source_snapshot import SnapshotService, VerifiedSnapshot
+from tests.support.fake_github import FakeGitHub, FakeInstallationAuth
 
 
 class MockApprovalRepo(ApprovalRepositoryProtocol):
@@ -1102,3 +1110,198 @@ async def test_orchestrator_halts_when_zero_relevant_source_snippets(
     assert pipe_rec.status == PipelineStatus.FAILED
     assert "Codebase context unavailable" in (pipe_rec.failure_reason or "")
     assert spy_fix.called is False
+
+
+# ---- Phase 1.9: one verified snapshot per incident ------------------------------------------
+
+
+class _UngatedSnapshotResolver(CodebaseContextResolver):
+    """Real snapshot-backed resolver; skips only the public token type check (no database here)."""
+
+    async def resolve_context(
+        self, failure_context: FailureContext, repo_root: Any = None, *, provenance: Any = None
+    ) -> EvidencePackage:
+        return await self._resolve_context_unchecked(failure_context, provenance)
+
+
+class _CountingPreparer:
+    """Real snapshot engine over the synthetic Git Data API, counting acquisitions."""
+
+    def __init__(self, fake: FakeGitHub) -> None:
+        self._service = SnapshotService(auth=FakeInstallationAuth(), client_factory=fake.client)
+        self.acquisitions = 0
+
+    def prepare(self, token: object) -> AbstractAsyncContextManager[VerifiedSnapshot]:
+        self.acquisitions += 1
+        return self._service._open_unchecked(token)
+
+
+class _ScriptedLLM:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+        self.prompts: list[str] = []
+
+    async def generate_structured(
+        self,
+        prompt: str,
+        response_model: Any,
+        system_instruction: Any = None,
+        temperature: float = 0.0,
+    ) -> Any:
+        self.prompts.append(prompt)
+        if self.error is not None:
+            raise self.error
+        return DiagnosisProposal(
+            category=FailureCategory.TEST,
+            root_cause="Assertion failed",
+            evidence=[EvidenceItem(source="log", observation="assert 1 == 2")],
+            target_file="test_app.py",
+            remediation_direction=RemediationDirection(
+                summary="Fix assertion", suggested_action="Update expected", risk_assessment="None"
+            ),
+            is_fixable=True,
+            confidence_score=0.9,
+            evidence_sufficiency="sufficient",
+            reasoning="Simple fix",
+        )
+
+
+def _snapshot_token(context: FailureContext) -> Any:
+    return SimpleNamespace(
+        incident_id=context.incident_id,
+        pipeline_id=f"pipe_{context.incident_id}",
+        delivery_id="delivery-orch",
+        event_repository_id=1001,
+        source_repository_id=1001,
+        owner=context.repository_owner,
+        name=context.repository_name,
+        installation_id=42,
+        head_sha=context.commit_sha,
+        head_branch=context.branch,
+    )
+
+
+def _snapshot_orchestrator(
+    context: FailureContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, llm: _ScriptedLLM
+) -> tuple[RemediationOrchestrator, _CountingPreparer, MockPipelineRepo, Path]:
+    root = tmp_path / "snapshots"
+    monkeypatch.setattr(settings, "snapshot_base_dir", str(root))
+    fake = FakeGitHub(
+        repo_id=1001,
+        full_name=f"{context.repository_owner}/{context.repository_name}",
+        files={"test_app.py": ("100644", b"def test_x():\n    assert 1 == 2\n")},
+        commit_sha=context.commit_sha,
+    )
+    preparer = _CountingPreparer(fake)
+    resolver = _UngatedSnapshotResolver(snapshot_service=preparer)
+    appr_repo, mut_repo, pipe_repo = MockApprovalRepo(), MockMutationRepo(), MockPipelineRepo()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol, PipelineRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        # The same resolver instance is wired into diagnosis, as in production defaults.
+        diagnostic_service=DiagnosticService(llm_client=llm, context_resolver=resolver),
+        context_resolver=resolver,
+        fix_service=MockFixService(),
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+    return orch, preparer, pipe_repo, root
+
+
+@pytest.mark.asyncio
+async def test_one_snapshot_per_incident_and_diagnosis_sees_it(
+    sample_context: FailureContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = _ScriptedLLM()
+    orch, preparer, _, root = _snapshot_orchestrator(sample_context, tmp_path, monkeypatch, llm)
+
+    record = await orch._process_failure_unchecked(sample_context, _snapshot_token(sample_context))
+
+    assert record.status == PipelineStatus.AWAITING_APPROVAL
+    assert preparer.acquisitions == 1  # was 2 before Phase 1.9
+    assert "assert 1 == 2" in llm.prompts[0]  # diagnosis received the snapshot evidence
+    assert not any(root.iterdir())  # snapshot and workspace removed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("provider down"), asyncio.CancelledError()])
+async def test_diagnosis_error_or_cancellation_leaves_no_workspace(
+    error: BaseException,
+    sample_context: FailureContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = _ScriptedLLM(error=error)
+    orch, preparer, pipe_repo, root = _snapshot_orchestrator(
+        sample_context, tmp_path, monkeypatch, llm
+    )
+    token = _snapshot_token(sample_context)
+    if isinstance(error, asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await orch._process_failure_unchecked(sample_context, token)
+    else:  # diagnosis falls back to a non-fixable result; the pipeline halts
+        record = await orch._process_failure_unchecked(sample_context, token)
+        assert record.status == PipelineStatus.FAILED
+    assert preparer.acquisitions == 1
+    assert not any(root.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_resolved_evidence_is_the_object_passed_to_diagnosis_and_fix(
+    sample_context: FailureContext,
+) -> None:
+    resolver = MockContextResolver()
+    resolved: list[EvidencePackage] = []
+    original = resolver.resolve_context
+
+    async def counting(*args: Any, **kwargs: Any) -> EvidencePackage:
+        package = await original(*args, **kwargs)
+        resolved.append(package)
+        return package
+
+    resolver.resolve_context = counting  # type: ignore[method-assign]
+    seen: dict[str, Any] = {}
+
+    diag, fix = MockDiagService(), MockFixService()
+    diagnose, propose = diag.diagnose_failure, fix.generate_fix_proposal
+
+    async def recording_diagnose(context: FailureContext, **kwargs: Any) -> DiagnosticResult:
+        seen["diagnosis"] = kwargs.get("evidence_package")
+        return await diagnose(context, **kwargs)
+
+    async def recording_propose(**kwargs: Any) -> Any:
+        seen["fix"] = kwargs.get("evidence_package")
+        return await propose(**kwargs)
+
+    diag.diagnose_failure = recording_diagnose  # type: ignore[assignment]
+    fix.generate_fix_proposal = recording_propose  # type: ignore[assignment]
+
+    appr_repo, mut_repo, pipe_repo = MockApprovalRepo(), MockMutationRepo(), MockPipelineRepo()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol, PipelineRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=diag,
+        context_resolver=resolver,
+        fix_service=fix,
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+    )
+    await orch._process_failure_unchecked(sample_context)
+
+    assert len(resolved) == 1
+    assert seen["diagnosis"] is resolved[0]
+    assert seen["fix"] is resolved[0]

@@ -226,3 +226,85 @@ async def test_diagnostic_service_with_codebase_evidence(
     assert result.evidence_package is not None
     assert result.proposal.confidence_score == 0.98
     assert result.human_review_required is True
+
+
+# ---- Phase 1.9: supplied evidence is bound to the incident; resolution happens at most once ---
+
+
+class _CountingResolver:
+    def __init__(self, package: EvidencePackage | None = None) -> None:
+        self.package = package
+        self.calls = 0
+
+    async def resolve_context(self, *args: Any, **kwargs: Any) -> EvidencePackage | None:
+        self.calls += 1
+        return self.package
+
+
+def _evidence(base: FailureContext, **overrides: Any) -> EvidencePackage:
+    bound = base.model_copy(update=overrides.pop("context", {}))
+    values: dict[str, Any] = {
+        "incident_id": base.incident_id,
+        "commit_sha": base.commit_sha,
+        "failure_context": bound,
+        "retrieval_status": "success",
+    }
+    values.update(overrides)
+    return EvidencePackage(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"incident_id": "inc_other"},
+        {"commit_sha": "ffffffffffff"},
+        {"context": {"incident_id": "inc_other"}},
+        {"context": {"commit_sha": "ffffffffffff"}},
+        {"context": {"repository_owner": "attacker"}},
+        {"context": {"repository_name": "elsewhere"}},
+    ],
+)
+async def test_supplied_evidence_for_other_work_fails_closed(
+    overrides: dict[str, Any], sample_failure_context: FailureContext
+) -> None:
+    from src.packages.shared.persisted_provenance import ProvenanceRejected
+
+    llm = MockLLMClient(raise_exc=AssertionError("LLM must not be called"))
+    resolver = _CountingResolver()
+    service = DiagnosticService(llm_client=llm, context_resolver=cast(Any, resolver))
+    with pytest.raises(ProvenanceRejected) as rejected:
+        await service.diagnose_failure(
+            sample_failure_context, evidence_package=_evidence(sample_failure_context, **overrides)
+        )
+    assert rejected.value.code == "binding"
+    assert resolver.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_supplied_evidence_is_used_without_another_resolution(
+    sample_failure_context: FailureContext,
+) -> None:
+    resolver = _CountingResolver()
+    service = DiagnosticService(
+        llm_client=MockLLMClient(raise_exc=LLMTimeoutError("slow")),
+        context_resolver=cast(Any, resolver),
+    )
+    package = _evidence(sample_failure_context)
+    result = await service.diagnose_failure(sample_failure_context, evidence_package=package)
+    assert resolver.calls == 0
+    assert result.incident_id == sample_failure_context.incident_id
+
+
+@pytest.mark.asyncio
+async def test_missing_evidence_still_resolves_exactly_once(
+    sample_failure_context: FailureContext,
+) -> None:
+    resolver = _CountingResolver(package=None)  # resolver found nothing: diagnosis proceeds safely
+    service = DiagnosticService(
+        llm_client=MockLLMClient(raise_exc=LLMTimeoutError("slow")),
+        context_resolver=cast(Any, resolver),
+    )
+    result = await service.diagnose_failure(sample_failure_context)
+    assert resolver.calls == 1
+    assert result.proposal.is_fixable is False  # fallback stays non-fixable
