@@ -63,28 +63,6 @@ class GitHubClientProtocol(Protocol):
         """Fetches commit metadata from GitHub repository."""
         ...
 
-    async def create_pull_request(
-        self,
-        owner: str,
-        repo: str,
-        title: str,
-        body: str,
-        head: str,
-        base: str,
-    ) -> dict[str, Any]:
-        """Creates a Pull Request on target repository."""
-        ...
-
-    async def find_pull_request(
-        self,
-        owner: str,
-        repo: str,
-        head_branch: str,
-        base_branch: str,
-    ) -> dict[str, Any] | None:
-        """Looks up existing open Pull Request for branch pair."""
-        ...
-
 
 class GitHubClient:
     """Async HTTP client for communicating with GitHub REST API."""
@@ -195,61 +173,3 @@ class GitHubClient:
             except httpx.HTTPStatusError as err:
                 self._handle_error(err, f"Failed to get commit {commit_sha}")
                 return {}
-
-    async def create_pull_request(
-        self,
-        owner: str,
-        repo: str,
-        title: str,
-        body: str,
-        head: str,
-        base: str,
-    ) -> dict[str, Any]:
-        """Creates a Pull Request on target repository."""
-        url = f"{self.base_url}/repos/{owner}/{repo}/pulls"
-        payload = {
-            "title": title,
-            "body": body,
-            "head": head,
-            "base": base,
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                res = await client.post(url, json=payload, headers=self._get_headers())
-                res.raise_for_status()
-                logger.info(
-                    "github_pull_request_created",
-                    repo=f"{owner}/{repo}",
-                    head=head,
-                    base=base,
-                )
-                return cast(dict[str, Any], res.json())
-            except httpx.HTTPStatusError as err:
-                self._handle_error(err, f"Failed to create pull request for {owner}/{repo}")
-                return {}
-
-    async def find_pull_request(
-        self,
-        owner: str,
-        repo: str,
-        head_branch: str,
-        base_branch: str,
-    ) -> dict[str, Any] | None:
-        """Looks up existing open Pull Request matching head and base branches."""
-        url = f"{self.base_url}/repos/{owner}/{repo}/pulls"
-        params = {
-            "state": "open",
-            "head": f"{owner}:{head_branch}",
-            "base": base_branch,
-        }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                res = await client.get(url, params=params, headers=self._get_headers())
-                res.raise_for_status()
-                data = res.json()
-                if isinstance(data, list) and len(data) > 0:
-                    return cast(dict[str, Any], data[0])
-                return None
-            except httpx.HTTPStatusError as err:
-                self._handle_error(err, f"Failed to search pull requests for {owner}/{repo}")
-                return None

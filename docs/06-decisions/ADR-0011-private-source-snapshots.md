@@ -13,8 +13,8 @@ workspace with `shutil.copytree` and `copy2`. Both follow symbolic links. A repo
 link pointing at a host file therefore placed that host file's contents into the workspace that
 Docker mounts. The exposure was reproduced before this decision was implemented.
 
-The mutation path has the same class of problem. Its workspace copy is now link-refusing (see
-Consequences).
+The mutation path had the same class of problem. Since Phase 1.7 it no longer reads the shared
+checkout: it applies the patch to a copy of a verified snapshot (see Consequences).
 
 ## Decision
 
@@ -86,15 +86,19 @@ containers are named and force-removed on timeout or cancellation.
 * Commit objects are trusted to the API response, not reconstructed locally.
 * The live handle registry is in-process. Handles do not survive a restart and fail closed.
 * The shared checkout is still used by the context resolver (evidence reads, bounded to the
-  repository root) and by the mutation workflow. Both are behind the hold. Migrating them is future
-  work.
-* The mutation workflow's shared-checkout remote URL can embed the GitHub token in `.git/config`.
-  This is a separate, pre-existing issue that is not changed in this decision.
-* The mutation's pre-push validation now validates base snapshot plus patch, not the mutated working
-  tree. The verbatim patch yields the same tree, so the result is equivalent.
+  repository root), behind the hold. Its clone URL can still embed the personal access token in
+  `.git/config`. Migrating it is future work.
+* Phase 1.7: the mutation workflow no longer uses the shared checkout or the personal access token.
+  It applies the patch to a workspace copy of a verified snapshot, reads the changes back with links
+  refused, and writes blobs, tree, commit, branch and pull request through the Git Data API with an
+  installation token scoped to the event repository (ADR-0010, Phase 1.7). Fork-sourced runs never
+  reach this point. The pull request targets the verified source branch of the same repository, and
+  its single commit sits on the approved snapshot commit, so the snapshot is the only content base.
+* Pre-push validation validates base snapshot plus patch, which is exactly the tree that is
+  committed: the remote tree must equal the locally computed tree ID.
 
 ## Verification
 See `tests/unit/test_github_git_source.py`, `tests/unit/test_source_snapshot.py`,
-`tests/unit/test_sandbox_runner.py`, `tests/unit/test_mutation_copy.py`,
+`tests/unit/test_sandbox_runner.py`, `tests/unit/test_mutation_service.py`,
 `tests/integration/test_snapshot_boundary.py`, and `tests/integration/test_docker_sandbox.py`.
 Live GitHub behaviour is not exercised by these tests and remains an operator smoke-test item.

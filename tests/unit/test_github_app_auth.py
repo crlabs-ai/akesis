@@ -149,3 +149,78 @@ async def test_app_http_failure_classification(
             await GitHubAppAuth(123, keys[0], client=client).installation_token(456)
     assert exc.value.retryable is retryable and exc.value.code == code
     assert "synthetic secret response" not in str(exc.value)
+
+
+def _scoped_handler(token_response: dict[str, object], bodies: list[bytes]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"id": 456, "app_id": 123, "suspended_at": None})
+        bodies.append(request.content)
+        expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        return httpx.Response(201, json={"token": "t", "expires_at": expires, **token_response})
+
+    return httpx.MockTransport(handler)
+
+
+SCOPE = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_requests_only_the_named_repository_and_permissions(
+    keys: tuple[str, str],
+) -> None:
+    import json
+
+    bodies: list[bytes] = []
+    granted = {"repository_selection": "selected", "repositories": [{"id": 1001}]}
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        transport=_scoped_handler({**granted, "permissions": SCOPE}, bodies),
+    ) as client:
+        auth = GitHubAppAuth(123, keys[0], client=client)
+        await auth.installation_token(456, repository_ids=[1001], permissions=dict(SCOPE))
+        await auth.installation_token(456)  # unscoped callers keep sending no body
+    assert json.loads(bodies[0]) == {"repository_ids": [1001], "permissions": SCOPE}
+    assert bodies[1] == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "grant",
+    [
+        {"repository_selection": "all"},
+        {"repositories": [{"id": 1001}, {"id": 2002}]},
+        {"permissions": {**SCOPE, "administration": "write"}},
+        {"permissions": {**SCOPE, "metadata": "write"}},
+    ],
+)
+async def test_token_broader_than_requested_is_refused(
+    keys: tuple[str, str], grant: dict[str, object]
+) -> None:
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", transport=_scoped_handler(grant, [])
+    ) as client:
+        with pytest.raises(GitHubAppAuthenticationError) as error:
+            await GitHubAppAuth(123, keys[0], client=client).installation_token(
+                456, repository_ids=[1001], permissions=dict(SCOPE)
+            )
+    assert error.value.code == "token_scope_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("repository_ids", "permissions"), [([], None), ([0], None), ([True], None), (None, {})]
+)
+async def test_invalid_scope_request_is_refused_before_any_call(
+    keys: tuple[str, str], repository_ids: list[int] | None, permissions: dict[str, str] | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request may be sent for an invalid scope")
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    ) as client:
+        with pytest.raises(GitHubAppAuthenticationError):
+            await GitHubAppAuth(123, keys[0], client=client).installation_token(
+                456, repository_ids=repository_ids, permissions=permissions
+            )

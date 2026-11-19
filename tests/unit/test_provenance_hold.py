@@ -74,8 +74,8 @@ async def test_async_entry_points_reject_missing_provenance_before_side_effects(
     approval = ApprovalService(slack_client=slack)
 
     github = Mock()
-    github.create_pull_request = AsyncMock()
-    mutation = GitMutationService(github_client=github)
+    github.installation_token = AsyncMock()
+    mutation = GitMutationService(auth=github)
 
     pipe_repo = Mock()
     pipe_repo.get_by_incident_id = AsyncMock(return_value=None)
@@ -114,7 +114,7 @@ async def test_async_entry_points_reject_missing_provenance_before_side_effects(
     llm.generate_structured.assert_not_awaited()
     runner.run_validation.assert_not_awaited()
     slack.post_approval_card.assert_not_awaited()
-    github.create_pull_request.assert_not_awaited()
+    github.installation_token.assert_not_awaited()  # no GitHub credential was issued
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,47 @@ class SandboxWorkspaceError(SandboxError):
     pass
 
 
+def apply_patch_exact(workspace_dir: Path, patch_diff: str) -> None:
+    """Apply a unified diff verbatim to a snapshot workspace (no whitespace fixing).
+
+    The patch file lives outside the workspace, and Git runs with isolated configuration and no
+    repository, so no repository-controlled configuration, hook or credential is involved.
+    """
+    patch_file = workspace_dir.parent / f"{workspace_dir.name}.patch"
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(workspace_dir.parent),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        fd = os.open(patch_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(patch_diff)
+        check_res = subprocess.run(
+            ["git", "apply", "--check", str(patch_file)],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if check_res.returncode != 0:
+            raise PatchApplicationError("git apply --check rejected the patch")
+        apply_res = subprocess.run(
+            ["git", "apply", str(patch_file)],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if apply_res.returncode != 0:
+            raise PatchApplicationError("git apply rejected the patch")
+        logger.info("sandbox_patch_applied_successfully")
+    finally:
+        patch_file.unlink(missing_ok=True)
+
+
 class ValidationExecutionResult(NamedTuple):
     """Raw captured execution result from sandbox runner."""
 
@@ -155,39 +196,7 @@ class DockerSandboxRunner:
 
     def _apply_patch_exact(self, workspace_dir: Path, patch_diff: str) -> None:
         """Applies a unified diff verbatim. The patch file lives outside the mounted workspace."""
-        patch_file = workspace_dir.parent / f"{workspace_dir.name}.patch"
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(workspace_dir.parent),
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-        try:
-            fd = os.open(patch_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(patch_diff)
-            check_res = subprocess.run(
-                ["git", "apply", "--check", str(patch_file)],
-                cwd=workspace_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            if check_res.returncode != 0:
-                raise PatchApplicationError("git apply --check rejected the patch")
-            apply_res = subprocess.run(
-                ["git", "apply", str(patch_file)],
-                cwd=workspace_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-            )
-            if apply_res.returncode != 0:
-                raise PatchApplicationError("git apply rejected the patch")
-            logger.info("sandbox_patch_applied_successfully")
-        finally:
-            patch_file.unlink(missing_ok=True)
+        apply_patch_exact(workspace_dir, patch_diff)
 
     def _verify_docker_available(self) -> None:
         """Verifies Docker daemon is running and accessible."""

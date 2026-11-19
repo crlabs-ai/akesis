@@ -37,7 +37,7 @@ Before generating or modifying code, an AI agent must explicitly read the releva
    * `uv run ruff check .` (linting)
    * `uv run mypy .` (type checking)
 3. **Logging & Observability:** V1 uses **`structlog`** for structured JSON logging with correlation IDs. Do not add OpenTelemetry dependencies or distributed tracing to V1.
-4. **Model Architecture:** Single LLM Provider Interface $ightarrow$ Primary Configured Model $ightarrow$ Structured Pydantic Output $ightarrow$ Application Validation. No multi-tier routing, model selection agents, or dynamic cost/latency optimizers in V1.
+4. **Model Architecture:** Single LLM Provider Interface $\rightarrow$ Primary Configured Model $\rightarrow$ Structured Pydantic Output $\rightarrow$ Application Validation. No multi-tier routing, model selection agents, or dynamic cost/latency optimizers in V1.
 5. **Sandbox Isolation:** Docker-based isolated execution, non-root user, resource caps, temporary directory mount. Network is **disabled by default**, enabled explicitly only during dependency installation steps.
 6. **Minimal Diff Principle:** Make the smallest correct change required. No gratuitous refactoring or unrequested formatting.
 7. **Human-in-the-Loop:** All automated fixes are delivered as approval-gated Pull Requests. Zero unvalidated merges.

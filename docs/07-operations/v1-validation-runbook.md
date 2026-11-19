@@ -259,7 +259,8 @@ curl -i -X POST http://127.0.0.1:8000/v1/webhooks/github \
 ## 14. Required Secrets Checklist (For Live Operator Testing)
 * [ ] `DATABASE_URL` configured and reachable on port 5436.
 * [ ] `GITHUB_WEBHOOK_SECRET` shared between GitHub and Akesis `.env`.
-* [ ] `GITHUB_TOKEN` with `repo` permissions to clone, push branches, and create PRs.
+* [ ] `GITHUB_TOKEN` with read access, used only for exact-commit context checkout.
+* [ ] `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` for a GitHub App installed on the test repository with Contents and Pull requests write and Metadata read. Snapshots, provenance verification, and branch and PR creation use its installation tokens.
 * [ ] `GEMINI_API_KEY` active with quota for `gemini-1.5-flash`.
 * [ ] `SLACK_WEBHOOK_URL` and `SLACK_SIGNING_SECRET` configured.
 * [ ] `akesis-validator:v1` Docker image built locally.
@@ -362,17 +363,18 @@ git push origin test/smoke-failure
 2. Slack dispatches payload to `/v1/slack/interactions`.
 3. Akesis validates Slack signature, updates approval in PostgreSQL to `approved`.
 4. Orchestrator resumes pipeline, reloads exact persisted proposal and validation.
-5. Verifies target repository HEAD has not drifted.
-6. Creates local branch `akesis/fix/<incident-id>/<proposal-id>`.
-7. Applies patch verbatim and commits with structured message.
-8. Pushes branch to origin.
+5. Refuses fork-sourced runs, then applies the patch verbatim to a verified snapshot of the approved commit and re-validates it.
+6. Verifies the failing source branch still points at the approved commit.
+7. Creates blobs, tree and commit through the GitHub Git Data API with a scoped installation token.
+8. Verifies the source branch again, then creates branch `akesis/fix/<incident-id>/<proposal-id>` (never forced). No local clone or `git push` is involved.
 
 ---
 
 ## 22. Expected Pull Request Result
 A new Pull Request appears on GitHub with:
-* Title: `[Akesis] Fix for CI failure in run #<run_id>`
-* Target branch: `test/smoke-failure` (or origin branch).
+* Title: `fix(ci): fix <error type> in <target file>`
+* Base branch: exactly the failing source branch (`test/smoke-failure`). Head: the `akesis/fix/...` branch in the same repository.
+* Not merged automatically.
 * Description containing diagnosis summary, sandbox command output, human approver tag, and audit trail.
 * Clean diff repairing `test_app.py`.
 

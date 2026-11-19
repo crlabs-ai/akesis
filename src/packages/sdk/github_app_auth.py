@@ -61,10 +61,32 @@ class GitHubAppAuth:
         except Exception:
             raise GitHubAppAuthenticationError("Unable to sign GitHub App JWT") from None
 
-    async def installation_token(self, installation_id: int) -> InstallationToken:
-        """Verify App ownership for every issuance; never cache credentials."""
+    async def installation_token(
+        self,
+        installation_id: int,
+        *,
+        repository_ids: list[int] | None = None,
+        permissions: dict[str, str] | None = None,
+    ) -> InstallationToken:
+        """Verify App ownership for every issuance; never cache credentials.
+
+        `repository_ids` and `permissions` narrow the token. When GitHub reports the granted
+        repositories or permissions, any grant beyond the request fails closed.
+        """
         if isinstance(installation_id, bool) or installation_id <= 0:
             raise GitHubAppAuthenticationError("Invalid installation ID")
+        scope: dict[str, object] = {}
+        if repository_ids is not None:
+            if not repository_ids or any(
+                isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                for item in repository_ids
+            ):
+                raise GitHubAppAuthenticationError("Invalid repository scope")
+            scope["repository_ids"] = list(repository_ids)
+        if permissions is not None:
+            if not permissions:
+                raise GitHubAppAuthenticationError("Invalid permission scope")
+            scope["permissions"] = dict(permissions)
         headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self._app_jwt()}",
@@ -88,10 +110,30 @@ class GitHubAppAuth:
             response = await self._client.post(
                 f"/app/installations/{installation_id}/access_tokens",
                 headers=headers,
+                json=scope or None,
                 follow_redirects=False,
             )
             response.raise_for_status()
             data = response.json()
+            if repository_ids is not None:
+                granted = data.get("repositories")
+                if data.get("repository_selection") not in (None, "selected") or (
+                    granted is not None
+                    and {item.get("id") for item in granted} != set(repository_ids)
+                ):
+                    raise GitHubAppAuthenticationError(
+                        "Installation token exceeds the requested repositories",
+                        code="token_scope_mismatch",
+                    )
+            if permissions is not None:
+                granted_permissions = data.get("permissions")
+                if granted_permissions is not None and not set(
+                    granted_permissions.items()
+                ).issubset(permissions.items()):
+                    raise GitHubAppAuthenticationError(
+                        "Installation token exceeds the requested permissions",
+                        code="token_scope_mismatch",
+                    )
             token = data["token"]
             expires_at = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00"))
             if (

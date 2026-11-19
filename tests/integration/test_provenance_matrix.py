@@ -109,8 +109,9 @@ async def _approve(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
 async def _mutate(s: Seeded, tmp: Path, mocks: list[Mock]) -> Any:
     return await GitMutationService(
         repository_factory=_mutation_repo_factory(mocks),
-        github_client=mocks[6],
-        repo_checkout=mocks[5],
+        auth=mocks[6],
+        client_factory=mocks[4],
+        snapshot_service=mocks[5],
         sandbox_runner=mocks[7],
     ).create_pull_request(s.context, s.proposal, s.validation, s.approval)
 

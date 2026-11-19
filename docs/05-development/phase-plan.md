@@ -44,15 +44,14 @@ Source of Truth: ADR-0001 through ADR-0007, AGENTS.md
 ### Phase 4: Deterministic Fix Proposal Engine & Patch Validator
 * [x] **Status:** `COMPLETE` (ADR-0004)
 * `FixService` prompting Gemini for structured fix proposals (`RawFixProposal`).
-* `PatchValidator` enforcing unified diff syntax, max 2 files / 120 lines / 8KB limits.
+* `PatchValidator` enforcing unified diff syntax, max 2 files / 100 lines / 4,000 characters limits (`config.py` defaults).
 * Target-file grounding against codebase evidence and rejection of path traversals / protected workflow files.
 
 ### Phase 5: Isolated Docker Sandbox Validation Engine
 * [x] **Status:** `COMPLETE` (ADR-0005)
 * Dedicated validator image (`docker/Dockerfile.validator` → `akesis-validator:v1`).
 * Isolated execution (`--network none`, `--cap-drop ALL`, non-root, read-only mounts).
-* Verbatim patch application (`git apply --check` $
-ightarrow$ `git apply` without whitespace fixing).
+* Verbatim patch application (`git apply --check` $\rightarrow$ `git apply` without whitespace fixing).
 * Deterministic command selection matrix (`pytest`, `ruff`, `mypy`, `python -m compileall`).
 
 ### Phase 6: Human-in-the-Loop Approval Gate & PostgreSQL Persistence
@@ -60,8 +59,7 @@ ightarrow$ `git apply` without whitespace fixing).
 * Durable PostgreSQL persistence (`approvals` table, `ApprovalModel`, `ApprovalRepository`).
 * Alembic async migration setup (`0001_create_approvals.py`).
 * Slack interactive Block Kit card dispatch and HMAC-SHA256 signature verification.
-* Atomic conditional state transitions (`pending` $
-ightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
+* Atomic conditional state transitions (`pending` $\rightarrow$ `approved`, `rejected`, `expired`, `cancelled`).
 
 ### Phase 7: Controlled Git Mutation & GitHub PR Creation
 * [x] **Status:** `COMPLETE` (ADR-0007)

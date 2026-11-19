@@ -83,7 +83,7 @@ graph TD
 4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Materializes repository at exact failing commit SHA via `GitRepositoryCheckoutManager` and extracts bounded `CodeEvidence`.
 
 ### 2.2 Synthesis & Sandbox Validation
-1. **Fix Proposal Engine (`src/packages/shared/fix_service.py`):** Prompts LLM for minimal unified diffs bounded by strict patch budgets (max 2 files, 120 lines, 8KB).
+1. **Fix Proposal Engine (`src/packages/shared/fix_service.py`):** Prompts LLM for minimal unified diffs bounded by strict patch budgets (max 2 files, 100 lines, 4,000 characters).
 2. **Patch Validator (`src/packages/shared/patch_validator.py`):** Verifies unified diff syntax, target-file grounding, and blocks protected files (`.github/workflows/`).
 3. **Docker Sandbox Runner (`src/packages/sdk/sandbox_runner.py`):** Runs isolated container (`akesis-validator:v1`) with `--network none`, `--cap-drop ALL`, non-root execution, and verbatim `git apply` (no whitespace fixing).
 4. **Validation Service (`src/packages/shared/validation_service.py`):** Executes deterministic allowlisted validation commands (`pytest`, `ruff`, `mypy`, `python -m compileall`).
@@ -95,9 +95,10 @@ graph TD
 
 ### 2.4 Controlled Git Mutation & PR Creation
 1. **Pre-flight & SHA Verification:** Enforces proposal validity, sandbox validation exit code 0, human approval, and exact commit SHA match.
-2. **Deterministic Fix Branch:** Generates collision-resistant branch (`akesis/fix/<incident>/<proposal>`) and protects base branches (`main`, `master`, `develop`).
-3. **Pre-Push Validation:** Re-validates the patched working tree in Docker prior to pushing remote branch.
-4. **GitHub PR Delivery:** Uses `GitHubClient` to push branch and open a Pull Request with complete audit metadata.
+2. **Same-Repository Only:** Fork-sourced runs (event repository ID differs from source repository ID) are refused before any I/O.
+3. **Deterministic Fix Branch:** Generates collision-resistant branch (`akesis/fix/<incident>/<proposal>`) and refuses protected names (`main`, `master`, `develop`, ...).
+4. **Snapshot-Based Patch:** Applies the approved patch verbatim to a copy of a verified snapshot of the approved commit, then re-validates it in Docker before any remote write.
+5. **GitHub Delivery (`src/packages/sdk/github_git_writer.py`):** With a GitHub App installation token scoped to the event repository, creates blobs, tree and commit through the Git Data API (each verified against local object IDs), creates the branch (never forced), and opens a Pull Request whose base is the exact verified source branch. The source branch must still point at the approved commit before each remote step. Akesis never merges.
 
 ---
 

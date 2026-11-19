@@ -1,16 +1,47 @@
-import os
+"""Approval-gated remediation commit, branch and pull request (Phase 1.7).
+
+The mutation never clones, never runs Git against a shared checkout, and never uses a personal
+access token. Content comes from a verified snapshot of the approved commit; every remote object is
+created through the GitHub Git Data API with a short-lived installation token that is scoped to the
+verified event repository and held only in memory.
+
+Order of checks (each fails closed):
+
+1. Same-repository check on the verified provenance token, before any database, network, token or
+   filesystem work. Fork-sourced runs (event repository != source repository) are refused.
+2. Preflight invariants, the persisted approval, and idempotent reuse of the mutation record.
+3. A fresh verified snapshot of the approved commit. The validated patch is applied verbatim to a
+   workspace copy, changes are read back with links refused, scope is checked against the
+   proposal, and the expected tree ID is computed locally.
+4. Pre-push revalidation through the gated ValidationService.
+5. Installation token (contents and pull_requests write, metadata read; event repository only).
+   Repository metadata must match the verified ID and name, and must not be a fork or archived.
+
+Pull request policy (same-repository runs only): the base is the exact verified source branch of the
+failing workflow, and the head is the Akesis remediation branch in the same repository. When the
+failing branch is the default branch, the PR therefore targets the default branch; the default
+branch is otherwise never touched. The remediation commit has the approved commit as its single
+parent, so the PR contains only the approved, validated change.
+
+Freshness: the source branch must exist, be readable, and point at the approved full SHA. This is
+checked before any remote object is created, immediately before the remediation branch is created,
+and immediately before the pull request is created. A missing, inaccessible or moved source branch
+aborts (StaleCommitError or GitPushError); nothing is rebased and no other branch is substituted.
+
+The remediation branch is only ever created. An existing branch is reused only when its head commit
+has exactly the validated tree and the approved commit as its single parent; otherwise the mutation
+stops. Akesis never merges a pull request.
+"""
+
 import re
-import shutil
-import subprocess
-import tempfile
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-import git
+import httpx
 
 from src.packages.database.repositories import (
     ApprovalRepository,
@@ -19,18 +50,15 @@ from src.packages.database.repositories import (
     MutationRepositoryProtocol,
 )
 from src.packages.database.session import get_session_factory
-from src.packages.sdk.github_client import (
-    GitHubClient,
-    GitHubClientProtocol,
-)
-from src.packages.sdk.repo_checkout import (
-    GitRepositoryCheckoutManager,
-    RepoCheckoutProtocol,
-)
+from src.packages.sdk.github_app_auth import GitHubAppAuth, GitHubAppAuthenticationError
+from src.packages.sdk.github_git_source import API_BASE_URL
+from src.packages.sdk.github_git_writer import GitHubRepositoryWriter, GitHubWriteError
 from src.packages.sdk.sandbox_runner import (
-    DockerSandboxRunner,
+    PatchApplicationError,
     SandboxRunnerProtocol,
+    apply_patch_exact,
 )
+from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -47,6 +75,18 @@ from src.packages.shared.persisted_provenance import (
     verify_context_provenance,
 )
 from src.packages.shared.provenance import require_verified_provenance
+from src.packages.shared.source_snapshot import (
+    SnapshotPreparer,
+    SnapshotRejected,
+    SnapshotService,
+    VerifiedSnapshot,
+    WorkspaceChange,
+    create_workspace,
+    discard_workspace,
+    snapshot_matches_token,
+    tree_sha_after,
+    workspace_changes,
+)
 from src.packages.shared.validation_service import ValidationService
 
 logger = get_logger("akesis.mutation_service")
@@ -54,6 +94,10 @@ logger = get_logger("akesis.mutation_service")
 # Regex for safe branch names
 SAFE_BRANCH_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-\./]+$")
 PROTECTED_BRANCHES = frozenset({"main", "master", "develop", "release", "production", "staging"})
+
+# The only permissions the mutation token requests. GitHub cannot grant more than the App holds.
+MUTATION_TOKEN_PERMISSIONS = {"contents": "write", "pull_requests": "write", "metadata": "read"}
+COMMIT_AUTHOR = {"name": "Akesis Self-Healing Agent", "email": "akesis@crlabs.ai"}
 
 
 class MutationError(Exception):
@@ -68,14 +112,26 @@ class PreflightCheckError(MutationError):
     pass
 
 
+class ForkSourceRefusedError(PreflightCheckError):
+    """Raised for fork-sourced or cross-repository work. V1 mutates only same-repository runs."""
+
+    pass
+
+
 class StaleCommitError(MutationError):
-    """Raised when repository commit SHA does not match approved proposal SHA."""
+    """Raised when the source branch no longer points to the approved commit."""
 
     pass
 
 
 class UnsafeBranchError(MutationError):
     """Raised when branch name violates safety constraints or targets protected branch."""
+
+    pass
+
+
+class BranchConflictError(UnsafeBranchError):
+    """Raised when the remediation branch already exists with other content. Never overwritten."""
 
     pass
 
@@ -93,7 +149,13 @@ class PrePushValidationError(MutationError):
 
 
 class GitPushError(MutationError):
-    """Raised when git push operation fails."""
+    """Raised when creating remote Git objects or the remediation branch fails."""
+
+    pass
+
+
+class PullRequestError(MutationError):
+    """Raised when the pull request cannot be created, or an existing one does not match."""
 
     pass
 
@@ -108,23 +170,38 @@ async def default_mutation_repositories() -> AsyncIterator[
         yield (ApprovalRepository(session), MutationRepository(session))
 
 
-def copy_checkout_without_links(source_dir: Path, dest_dir: Path) -> None:
-    """Copy a checkout without ever following a link. Any symbolic link fails closed.
+def require_same_repository(context: FailureContext, token: Any) -> None:
+    """Refuse fork-sourced or mismatched work. Pure: performs no I/O of any kind.
 
-    A link in the shared checkout could point at a host file. Following it would commit that host
-    content into a pull request, so links are refused instead of copied or dereferenced.
+    The token is the verified provenance for this context. Its event and source repositories must
+    be the same repository, and it must describe this exact incident, repository, commit and branch.
     """
-    for root, dirs, files in os.walk(source_dir, followlinks=False):
-        relative = Path(root).relative_to(source_dir)
-        for name in dirs + files:
-            if os.path.islink(os.path.join(root, name)):
-                raise WorkingTreeMismatchError("Symbolic links are not permitted in mutations")
-        for name in dirs:
-            os.makedirs(dest_dir / relative / name, exist_ok=True)
-        for name in files:
-            shutil.copy2(
-                os.path.join(root, name), dest_dir / relative / name, follow_symlinks=False
-            )
+    provenance = context.provenance
+    if token is None or provenance is None:
+        raise PreflightCheckError("Verified provenance is required for mutation")
+    if (
+        token.event_repository_id != token.source_repository_id
+        or provenance.event_repository.id != provenance.source_repository.id
+        or provenance.event_repository.full_name != provenance.source_repository.full_name
+    ):
+        raise ForkSourceRefusedError("Fork-sourced runs are not mutated in V1")
+    full_name = f"{context.repository_owner}/{context.repository_name}"
+    if (
+        token.event_repository_id != provenance.event_repository.id
+        or token.incident_id != context.incident_id
+        or f"{token.owner}/{token.name}" != full_name
+        or provenance.event_repository.full_name != full_name
+        or token.head_sha != context.commit_sha
+        or token.head_branch != context.branch
+    ):
+        raise PreflightCheckError("Verified provenance does not describe this incident")
+
+
+@dataclass(frozen=True)
+class _PreparedChange:
+    changes: list[WorkspaceChange]
+    base_tree: str
+    expected_tree: str
 
 
 class GitMutationServiceProtocol(Protocol):
@@ -142,7 +219,7 @@ class GitMutationServiceProtocol(Protocol):
 
 
 class GitMutationService:
-    """Orchestrates controlled git mutation, pre-push validation, and GitHub PR creation."""
+    """Creates the approved remediation as a branch and PR in the verified event repository."""
 
     def __init__(
         self,
@@ -155,15 +232,30 @@ class GitMutationService:
             ]
             | None
         ) = None,
-        github_client: GitHubClientProtocol | None = None,
-        repo_checkout: RepoCheckoutProtocol | None = None,
+        *,
+        auth: Any = None,
+        client_factory: Callable[[], httpx.AsyncClient] | None = None,
+        snapshot_service: SnapshotPreparer | None = None,
         sandbox_runner: SandboxRunnerProtocol | None = None,
     ) -> None:
         self.repository_factory = repository_factory or default_mutation_repositories
-        self.github_client = github_client or GitHubClient()
-        self.repo_checkout = repo_checkout or GitRepositoryCheckoutManager()
-        self.sandbox_runner = sandbox_runner or DockerSandboxRunner()
-        self.validation_service = ValidationService(sandbox_runner=self.sandbox_runner)
+        self._auth = auth
+        self._client_factory = client_factory or self._default_client
+        self.snapshot_service = snapshot_service or SnapshotService()
+        self.validation_service = ValidationService(
+            sandbox_runner=sandbox_runner, snapshot_service=self.snapshot_service
+        )
+
+    @staticmethod
+    def _default_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=API_BASE_URL, timeout=30.0)
+
+    def _authenticator(self, client: httpx.AsyncClient) -> Any:
+        if self._auth is not None:
+            return self._auth
+        if not settings.github_app_id or not settings.github_app_private_key:
+            raise MutationError("GitHub App authentication is not configured")
+        return GitHubAppAuth(settings.github_app_id, settings.github_app_private_key, client=client)
 
     def generate_branch_name(self, incident_id: str, proposal_id: str) -> str:
         """Generates a deterministic, collision-resistant fix branch name."""
@@ -246,8 +338,8 @@ class GitMutationService:
     ) -> MutationRecord:
         """Executes full mutation pipeline creating PR for approved fix.
 
-        Fails closed before any preflight, checkout, push or PR call while the provenance hold
-        is active.
+        Fails closed before any preflight, snapshot, token or GitHub call while the provenance
+        hold is active.
         """
         require_verified_provenance()  # first: no database read or preflight before the hold
         provenance = await verify_context_provenance(context)
@@ -265,64 +357,63 @@ class GitMutationService:
         provenance: object | None = None,
     ) -> MutationRecord:
         """Mutation body. Private: callers must use the gated public method."""
-        # 1. Preflight safety checks
+        require_same_repository(context, provenance)  # no I/O happens before this check
+        bind_work_to_context(context, proposal, validation, approval)
         self.verify_preflight_invariants(context, proposal, validation, approval)
 
         branch_name = self.generate_branch_name(context.incident_id, proposal.proposal_id)
         self.validate_branch_name(branch_name)
 
-        mutation_id = f"mut_{uuid.uuid4().hex[:12]}"
-        now = datetime.now(UTC)
+        record = await self._claim_record(context, proposal, approval, branch_name)
+        if record.status == MutationStatus.PR_CREATED:
+            return record
+        try:
+            return await self._mutate(record, context, proposal, validation, approval, provenance)
+        except Exception as error:
+            reason = str(error) or type(error).__name__
+            async with self.repository_factory() as (_, mutation_repo):
+                await mutation_repo.update_status(
+                    record.mutation_id, MutationStatus.FAILED, failure_reason=reason[:1000]
+                )
+            raise
 
+    async def _claim_record(
+        self,
+        context: FailureContext,
+        proposal: FixProposal,
+        approval: ApprovalRecord,
+        branch_name: str,
+    ) -> MutationRecord:
+        """Return the existing record for this proposal and commit, or create one. Never two."""
         async with self.repository_factory() as (approval_repo, mutation_repo):
             persisted_approval = await approval_repo.get_approval(approval.approval_id)
             if persisted_approval is None or persisted_approval != approval:
                 raise PreflightCheckError("Approval does not match persisted approval")
-            # 2. Idempotency Check: Existing mutation in database
-            existing_mut = await mutation_repo.get_by_proposal_and_commit(
+            existing = await mutation_repo.get_by_proposal_and_commit(
                 proposal.proposal_id, proposal.commit_sha
             )
-            if existing_mut and existing_mut.status == MutationStatus.PR_CREATED:
-                logger.info(
-                    "mutation_idempotent_existing_returned",
-                    mutation_id=existing_mut.mutation_id,
-                    pr_number=existing_mut.pr_number,
+            if existing is not None:
+                if (
+                    existing.incident_id != context.incident_id
+                    or existing.approval_id != approval.approval_id
+                    or existing.repository_owner != context.repository_owner
+                    or existing.repository_name != context.repository_name
+                ):
+                    raise PreflightCheckError("Existing mutation record belongs to other work")
+                if existing.status == MutationStatus.PR_CREATED:
+                    logger.info(
+                        "mutation_idempotent_existing_returned",
+                        mutation_id=existing.mutation_id,
+                        pr_number=existing.pr_number,
+                    )
+                    return existing
+                resumed = await mutation_repo.update_status(
+                    existing.mutation_id, MutationStatus.PENDING
                 )
-                return existing_mut
-
-            # Check GitHub for existing open PR
-            existing_pr = await self.github_client.find_pull_request(
-                owner=context.repository_owner,
-                repo=context.repository_name,
-                head_branch=branch_name,
-                base_branch=context.branch,
-            )
-            if existing_pr:
-                pr_num = existing_pr.get("number", 0)
-                pr_html = existing_pr.get("html_url", "")
-                record = MutationRecord(
-                    mutation_id=mutation_id,
-                    proposal_id=proposal.proposal_id,
-                    approval_id=approval.approval_id,
-                    incident_id=context.incident_id,
-                    repository_owner=context.repository_owner,
-                    repository_name=context.repository_name,
-                    base_commit_sha=proposal.commit_sha,
-                    branch_name=branch_name,
-                    resulting_commit_sha=existing_pr.get("head", {}).get("sha"),
-                    validation_status=ValidationStatus.PASSED,
-                    pr_number=pr_num,
-                    pr_url=pr_html,
-                    status=MutationStatus.PR_CREATED,
-                    created_at=now,
-                    updated_at=now,
-                )
-                await mutation_repo.create_mutation(record)
-                return record
-
-            # Initialize mutation record
+                return resumed or existing
+            now = datetime.now(UTC)
             record = MutationRecord(
-                mutation_id=mutation_id,
+                mutation_id=f"mut_{uuid.uuid4().hex[:12]}",
                 proposal_id=proposal.proposal_id,
                 approval_id=approval.approval_id,
                 incident_id=context.incident_id,
@@ -334,257 +425,313 @@ class GitMutationService:
                 created_at=now,
                 updated_at=now,
             )
-            await mutation_repo.create_mutation(record)
+            return await mutation_repo.create_mutation(record)
 
-        # 3. Create isolated ephemeral mutation workspace
-        temp_dir = Path(tempfile.mkdtemp(prefix="akesis_mut_"))
+    async def _status(self, mutation_id: str, status: MutationStatus, **fields: Any) -> None:
+        async with self.repository_factory() as (_, mutation_repo):
+            await mutation_repo.update_status(mutation_id, status, **fields)
+
+    async def _prepare_change(self, token: Any, proposal: FixProposal) -> _PreparedChange:
+        """Apply the validated patch to a verified snapshot copy and describe the exact result."""
         try:
-            # Checkout repository source
-            source_dir = self.repo_checkout.checkout_commit(
-                repo_owner=context.repository_owner,
-                repo_name=context.repository_name,
-                commit_sha=proposal.commit_sha,
-                provenance=provenance,
+            async with self.snapshot_service.prepare(token) as snapshot:
+                if not isinstance(snapshot, VerifiedSnapshot) or not snapshot_matches_token(
+                    token, snapshot
+                ):
+                    raise PreflightCheckError("Snapshot does not match the verified provenance")
+                workspace = create_workspace(snapshot)
+                try:
+                    try:
+                        apply_patch_exact(workspace, proposal.unified_diff)
+                    except PatchApplicationError as error:
+                        raise MutationError(f"Patch apply failed: {error}") from None
+                    changes = workspace_changes(snapshot, workspace)
+                    expected_tree = tree_sha_after(snapshot, changes)
+                    base_tree = snapshot.root_tree_sha
+                finally:
+                    discard_workspace(workspace)
+        except SnapshotRejected as error:
+            if error.code == "symlink":
+                raise WorkingTreeMismatchError(
+                    "Symbolic links are not permitted in mutations"
+                ) from None
+            raise MutationError(f"Source snapshot rejected ({error.code})") from None
+
+        changed = {change.path for change in changes}
+        if not changed:
+            raise MutationError("Patch produced no changes")
+        allowed = set(proposal.target_files)
+        if not changed.issubset(allowed):
+            raise WorkingTreeMismatchError(
+                f"Working tree changes {sorted(changed)} exceed target scope {sorted(allowed)}"
             )
+        return _PreparedChange(changes=changes, base_tree=base_tree, expected_tree=expected_tree)
 
-            # Copy tree to ephemeral mutation workspace
-            copy_checkout_without_links(source_dir, temp_dir)
-            repo = git.Repo(temp_dir)
+    async def _mutate(
+        self,
+        record: MutationRecord,
+        context: FailureContext,
+        proposal: FixProposal,
+        validation: ValidationResult,
+        approval: ApprovalRecord,
+        token: Any,
+    ) -> MutationRecord:
+        mutation_id = record.mutation_id
+        branch_name = self.generate_branch_name(context.incident_id, proposal.proposal_id)
+        approved_sha = proposal.commit_sha
 
-            # Verify exact HEAD SHA matches approved proposal SHA
-            head_sha = repo.head.commit.hexsha
-            if head_sha != proposal.commit_sha:
-                err_msg = (
-                    f"Stale commit detected: Checked out HEAD ({head_sha}) does "
-                    f"not match approved proposal commit ({proposal.commit_sha})."
-                )
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id, MutationStatus.FAILED, failure_reason=err_msg
-                    )
-                raise StaleCommitError(err_msg)
+        await self._status(mutation_id, MutationStatus.APPLYING)
+        prepared = await self._prepare_change(token, proposal)
 
-            # 4. Create dedicated fix branch
-            remote_commit = await self.github_client.get_commit(
-                context.repository_owner, context.repository_name, context.branch
+        post_val = await self.validation_service.validate_fix(proposal=proposal, context=context)
+        if post_val.status != ValidationStatus.PASSED or post_val.exit_code != 0:
+            await self._status(
+                mutation_id, MutationStatus.FAILED, validation_status=post_val.status
             )
-            if remote_commit.get("sha") != proposal.commit_sha:
-                raise StaleCommitError("Remote base branch no longer points to approved commit")
-            current_branches = [h.name for h in repo.heads]
-            if branch_name in current_branches:
-                repo.git.checkout(branch_name)
-            else:
-                repo.git.checkout("-b", branch_name)
-
-            # 5. Apply unified diff patch verbatim
-            async with self.repository_factory() as (_, mutation_repo):
-                await mutation_repo.update_status(mutation_id, MutationStatus.APPLYING)
-
-            patch_file = temp_dir / "fix.patch"
-            patch_file.write_text(proposal.unified_diff, encoding="utf-8")
-
-            # Check patch applicability
-            check_res = subprocess.run(
-                ["git", "apply", "--check", str(patch_file)],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                check=False,
+            raise PrePushValidationError(
+                f"Pre-push validation failed "
+                f"(status: {post_val.status}, exit code: {post_val.exit_code})"
             )
-            if check_res.returncode != 0:
-                err_msg = f"Patch check failed: {check_res.stderr.strip()}"
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id, MutationStatus.FAILED, failure_reason=err_msg
-                    )
-                raise MutationError(err_msg)
+        await self._status(
+            mutation_id, MutationStatus.VALIDATED, validation_status=ValidationStatus.PASSED
+        )
 
-            # Apply patch
-            apply_res = subprocess.run(
-                ["git", "apply", str(patch_file)],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if apply_res.returncode != 0:
-                err_msg = f"Patch apply failed: {apply_res.stderr.strip()}"
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id, MutationStatus.FAILED, failure_reason=err_msg
-                    )
-                raise MutationError(err_msg)
-
-            # Remove temp patch file so it is not in working tree
-            if patch_file.exists():
-                patch_file.unlink()
-
-            # 6. Verify working tree matches proposal scope exactly
-            diff_files = [item.a_path for item in repo.index.diff(None)]
-            untracked = repo.untracked_files
-
-            if untracked:
-                err_msg = f"Unexpected untracked files in working tree: {untracked}"
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id, MutationStatus.FAILED, failure_reason=err_msg
-                    )
-                raise WorkingTreeMismatchError(err_msg)
-
-            target_set = set(proposal.target_files)
-            changed_set = set(diff_files)
-            if not changed_set.issubset(target_set):
-                err_msg = f"Working tree changes {changed_set} exceed target scope {target_set}"
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id, MutationStatus.FAILED, failure_reason=err_msg
-                    )
-                raise WorkingTreeMismatchError(err_msg)
-
-            # 7. Post-patch pre-push validation
-            # Validates base snapshot + patch; the verbatim patch yields the same tree as the
-            # mutated working tree, and the snapshot path never reads the mutable checkout.
-            post_val = await self.validation_service.validate_fix(
-                proposal=proposal, context=context
-            )
-            if post_val.status != ValidationStatus.PASSED or post_val.exit_code != 0:
-                err_msg = (
-                    f"Pre-push validation failed "
-                    f"(status: {post_val.status}, exit code: {post_val.exit_code})"
-                )
-                async with self.repository_factory() as (_, mutation_repo):
-                    await mutation_repo.update_status(
-                        mutation_id,
-                        MutationStatus.FAILED,
-                        validation_status=post_val.status,
-                        failure_reason=err_msg,
-                    )
-                raise PrePushValidationError(err_msg)
-
-            async with self.repository_factory() as (_, mutation_repo):
-                await mutation_repo.update_status(
-                    mutation_id,
-                    MutationStatus.VALIDATED,
-                    validation_status=ValidationStatus.PASSED,
-                )
-
-            # 8. Deterministic Commit
-            repo.git.add("-A")
-            commit_msg = (
-                f"fix(akesis): apply approved remediation {proposal.proposal_id}\n\n"
-                f"Incident: {context.incident_id}\n"
-                f"Approval: {approval.approval_id}\n"
-                f"Reviewer: {approval.decided_by or 'human_reviewer'}\n"
-                f"Confidence: {proposal.confidence_score:.2f}\n"
-            )
-            author = git.Actor("Akesis Self-Healing Agent", "akesis@crlabs.ai")
-            new_commit = repo.index.commit(commit_msg, author=author, committer=author)
-            resulting_sha = new_commit.hexsha
-
-            async with self.repository_factory() as (_, mutation_repo):
-                await mutation_repo.update_status(
-                    mutation_id,
-                    MutationStatus.COMMITTED,
-                    resulting_commit_sha=resulting_sha,
-                )
-
-            # 9. Push to GitHub remote
-            remote_commit = await self.github_client.get_commit(
-                context.repository_owner, context.repository_name, context.branch
-            )
-            if remote_commit.get("sha") != proposal.commit_sha:
-                raise StaleCommitError("Remote base branch no longer points to approved commit")
-            self._push_branch_safely(repo, branch_name)
-
-            async with self.repository_factory() as (_, mutation_repo):
-                await mutation_repo.update_status(mutation_id, MutationStatus.PUSHED)
-
-            # 10. Create GitHub Pull Request
-            target_desc = context.signal.target_file or "repo"
-            pr_title = f"fix(ci): fix {context.signal.error_type} in {target_desc}"
-            pr_body = self._build_pr_body(context, proposal, validation, approval, resulting_sha)
-
-            pr_data = await self.github_client.create_pull_request(
-                owner=context.repository_owner,
-                repo=context.repository_name,
-                title=pr_title,
-                body=pr_body,
-                head=branch_name,
-                base=context.branch,
-            )
-
-            pr_number = pr_data.get("number", 1)
-            pr_url = pr_data.get(
-                "html_url",
-                f"https://github.com/{context.repository_owner}/{context.repository_name}/pull/{pr_number}",
-            )
-
-            # 11. Finalize mutation record state
-            async with self.repository_factory() as (_, mutation_repo):
-                updated_record = await mutation_repo.update_status(
-                    mutation_id,
-                    MutationStatus.PR_CREATED,
-                    pr_number=pr_number,
-                    pr_url=pr_url,
-                )
-                if updated_record is None:
-                    raise MutationError(f"Failed to finalize mutation record '{mutation_id}'")
-
-            logger.info(
-                "mutation_pipeline_completed_successfully",
-                mutation_id=mutation_id,
-                pr_number=pr_number,
-                branch=branch_name,
-            )
-            return updated_record
-
-        finally:
-            # Clean up ephemeral working tree
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir, ignore_errors=True)
-
-    def _push_branch_safely(self, repo: git.Repo, branch_name: str) -> None:
-        """Executes safe git push for the dedicated fix branch."""
+        phase = "authentication"
         try:
-            if "origin" in [r.name for r in repo.remotes]:
-                # If remote is configured in local repo
-                repo.git.push("origin", branch_name)
-            else:
-                raise GitPushError("Repository has no origin remote")
-        except Exception:
-            logger.error("git_push_failed", branch=branch_name)
-            raise GitPushError(f"Failed to push branch '{branch_name}'") from None
+            async with self._client_factory() as client:
+                installation = await self._authenticator(client).installation_token(
+                    token.installation_id,
+                    repository_ids=[token.event_repository_id],
+                    permissions=dict(MUTATION_TOKEN_PERMISSIONS),
+                )
+                writer = GitHubRepositoryWriter(
+                    client,
+                    installation.token,
+                    repository_id=token.event_repository_id,
+                    full_name=f"{token.owner}/{token.name}",
+                )
+
+                phase = "repository metadata"
+                repository = await writer.get_repository()
+                if repository.get("fork") is not False:
+                    raise ForkSourceRefusedError(
+                        "Target repository is a fork; V1 does not mutate it"
+                    )
+                if repository.get("archived") is not False:
+                    raise MutationError("Target repository is archived")
+                source_branch = token.head_branch  # the verified failing branch is the PR base
+                if source_branch == branch_name:
+                    raise UnsafeBranchError("Source branch collides with the remediation branch")
+
+                phase = "freshness check"
+                await self._require_fresh(writer, source_branch, approved_sha)
+
+                phase = "remediation branch"
+                commit_sha = await self._existing_branch_head(
+                    writer, branch_name, prepared, approved_sha
+                )
+                if commit_sha is None:
+                    phase = "git objects"
+                    commit_sha = await self._write_commit(
+                        writer, prepared, approved_sha, context, proposal, approval
+                    )
+                    await self._status(
+                        mutation_id, MutationStatus.COMMITTED, resulting_commit_sha=commit_sha
+                    )
+                    phase = "freshness check"
+                    await self._require_fresh(writer, source_branch, approved_sha)
+                    phase = "remediation branch"
+                    if not await writer.create_branch(branch_name, commit_sha):
+                        # Created concurrently: accept it only if it is exactly this remediation.
+                        commit_sha = await self._existing_branch_head(
+                            writer, branch_name, prepared, approved_sha
+                        )
+                        if commit_sha is None:
+                            raise BranchConflictError("Remediation branch could not be created")
+                await self._status(
+                    mutation_id, MutationStatus.PUSHED, resulting_commit_sha=commit_sha
+                )
+                logger.info(
+                    "remediation_branch_ready",
+                    mutation_id=mutation_id,
+                    branch=branch_name,
+                    commit_sha=commit_sha,
+                )
+
+                phase = "freshness check"
+                await self._require_fresh(writer, source_branch, approved_sha)
+                phase = "pull request"
+                pull = await self._open_pull_request(
+                    writer,
+                    branch_name=branch_name,
+                    base_branch=source_branch,
+                    commit_sha=commit_sha,
+                    title=self._pr_title(context),
+                    body=self._build_pr_body(
+                        context, proposal, validation, post_val, approval, commit_sha
+                    ),
+                )
+        except GitHubAppAuthenticationError as error:
+            raise MutationError(f"GitHub App authentication failed ({error.code})") from None
+        except GitHubWriteError as error:
+            failure = PullRequestError if phase == "pull request" else GitPushError
+            raise failure(f"GitHub request failed during {phase} ({error.code})") from None
+
+        async with self.repository_factory() as (_, mutation_repo):
+            updated = await mutation_repo.update_status(
+                mutation_id,
+                MutationStatus.PR_CREATED,
+                resulting_commit_sha=commit_sha,
+                pr_number=pull["number"],
+                pr_url=pull["html_url"],
+            )
+            if updated is None:
+                raise MutationError(f"Failed to finalize mutation record '{mutation_id}'")
+        logger.info(
+            "mutation_pipeline_completed_successfully",
+            mutation_id=mutation_id,
+            pr_number=pull["number"],
+            branch=branch_name,
+        )
+        return updated
+
+    async def _require_fresh(
+        self, writer: GitHubRepositoryWriter, source_branch: str, approved_sha: str
+    ) -> None:
+        """Fail unless the verified source branch exists and still points at the approved SHA."""
+        head = await writer.branch_head(source_branch)
+        if head is None:
+            raise StaleCommitError(f"Source branch '{source_branch}' no longer exists")
+        if head != approved_sha:
+            raise StaleCommitError(
+                f"Source branch '{source_branch}' no longer points to the approved commit"
+            )
+
+    async def _existing_branch_head(
+        self,
+        writer: GitHubRepositoryWriter,
+        branch_name: str,
+        prepared: _PreparedChange,
+        approved_sha: str,
+    ) -> str | None:
+        """Head of an existing remediation branch, only if it is exactly this remediation."""
+        head = await writer.branch_head(branch_name)
+        if head is None:
+            return None
+        tree, parents = await writer.get_commit(head)
+        if tree != prepared.expected_tree or parents != [approved_sha]:
+            raise BranchConflictError(
+                f"Branch '{branch_name}' exists with other content and is never overwritten"
+            )
+        return head
+
+    async def _write_commit(
+        self,
+        writer: GitHubRepositoryWriter,
+        prepared: _PreparedChange,
+        approved_sha: str,
+        context: FailureContext,
+        proposal: FixProposal,
+        approval: ApprovalRecord,
+    ) -> str:
+        entries: list[dict[str, Any]] = []
+        for change in prepared.changes:
+            if change.content is None:
+                entries.append({"path": change.path, "mode": "100644", "type": "blob", "sha": None})
+                continue
+            sha = await writer.create_blob(change.content)
+            entries.append({"path": change.path, "mode": change.mode, "type": "blob", "sha": sha})
+        tree = await writer.create_tree(prepared.base_tree, entries, prepared.expected_tree)
+        message = (
+            f"fix(akesis): apply approved remediation {proposal.proposal_id}\n\n"
+            f"Incident: {context.incident_id}\n"
+            f"Approval: {approval.approval_id}\n"
+            f"Reviewer: {approval.decided_by or 'not recorded'}\n"
+            f"Confidence: {proposal.confidence_score:.2f}\n"
+        )
+        return await writer.create_commit(message, tree, approved_sha, dict(COMMIT_AUTHOR))
+
+    async def _open_pull_request(
+        self,
+        writer: GitHubRepositoryWriter,
+        *,
+        branch_name: str,
+        base_branch: str,
+        commit_sha: str,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        """Reuse the one matching open PR, or open a new one. Any other existing PR stops here."""
+        existing = await writer.find_pull_requests(branch_name, base_branch)
+        if len(existing) > 1:
+            raise PullRequestError("More than one pull request exists for the remediation branch")
+        if existing:
+            if existing[0].get("state") != "open":
+                raise PullRequestError("A closed remediation pull request exists; not reopened")
+            pull = self._checked_pull(writer, existing[0], branch_name, base_branch, commit_sha)
+            logger.info("mutation_existing_pull_request_reused", pr_number=pull["number"])
+            return pull
+        created = await writer.create_pull_request(title, body, branch_name, base_branch)
+        return self._checked_pull(writer, created, branch_name, base_branch, commit_sha)
+
+    @staticmethod
+    def _checked_pull(
+        writer: GitHubRepositoryWriter,
+        pull: dict[str, Any],
+        branch_name: str,
+        base_branch: str,
+        commit_sha: str,
+    ) -> dict[str, Any]:
+        head, base = pull.get("head") or {}, pull.get("base") or {}
+        number = pull.get("number")
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number <= 0
+            or head.get("ref") != branch_name
+            or head.get("sha") != commit_sha
+            or (head.get("repo") or {}).get("id") != writer.repository_id
+            or base.get("ref") != base_branch
+            or (base.get("repo") or {}).get("id") != writer.repository_id
+            or pull.get("html_url") != f"https://github.com/{writer.full_name}/pull/{number}"
+        ):
+            raise PullRequestError("Pull request does not match the remediation")
+        return pull
+
+    @staticmethod
+    def _pr_title(context: FailureContext) -> str:
+        subject = context.signal.error_type or context.signal.category
+        return f"fix(ci): fix {subject} in {context.signal.target_file or 'repo'}"
 
     def _build_pr_body(
         self,
         context: FailureContext,
         proposal: FixProposal,
         validation: ValidationResult,
+        pre_push: ValidationResult,
         approval: ApprovalRecord,
         resulting_sha: str,
     ) -> str:
-        """Builds authoritative structured Markdown description for the Pull Request."""
+        """Describe only what the persisted records and this run actually established."""
         return (
-            f"## 🤖 Akesis CI Self-Healing Remediation\n\n"
-            f"This pull request contains a verified code remediation generated by Akesis "
-            f"and **explicitly authorized by a human engineer**.\n\n"
-            f"### 📋 Incident & Approval Metadata\n"
+            "## Akesis CI remediation\n\n"
+            "This pull request applies a fix proposed by Akesis and approved by a human reviewer. "
+            "Akesis never merges it: a maintainer must review and merge it.\n\n"
+            "### Incident\n"
             f"* **Incident ID:** `{context.incident_id}`\n"
-            f"* **Workflow Run ID:** [#{context.run_id}]({context.run_url})\n"
-            f"* **Failure Category:** `{context.signal.category}`\n"
-            f"* **Base Commit SHA:** `{proposal.commit_sha}`\n"
-            f"* **Resulting Commit SHA:** `{resulting_sha}`\n"
-            f"* **Human Reviewer:** `{approval.decided_by or 'lead_engineer'}`\n"
-            f"* **Approved At:** `{approval.decided_at or 'recently'}`\n\n"
-            f"### 🛡️ Validation Outcome\n"
-            f"* **Status:** `{validation.status.value.upper()}` "
-            f"(Exit code `{validation.exit_code}`)\n"
-            f"* **Validation Command:** `{validation.command_executed}`\n"
-            f"* **Execution Time:** `{validation.duration_ms:.1f}ms`\n\n"
-            f"### 💡 Remediation Rationale\n"
+            f"* **Workflow run:** [#{context.run_id}]({context.run_url})\n"
+            f"* **Failure category:** `{context.signal.category}`\n"
+            f"* **Base (failing source) branch:** `{context.branch}`\n"
+            f"* **Approved base commit:** `{proposal.commit_sha}`\n"
+            f"* **Remediation commit:** `{resulting_sha}`\n"
+            f"* **Approved by:** `{approval.decided_by or 'not recorded'}`\n"
+            f"* **Approved at:** `{approval.decided_at or 'not recorded'}`\n\n"
+            "### Validation\n"
+            f"* **Validation before approval:** `{validation.status.value.upper()}` "
+            f"(exit code `{validation.exit_code}`, command `{validation.command_executed}`)\n"
+            f"* **Revalidation before push:** `{pre_push.status.value.upper()}` "
+            f"(exit code `{pre_push.exit_code}`, command `{pre_push.command_executed}`)\n\n"
+            "### Rationale\n"
             f"{proposal.rationale}\n\n"
-            f"### 🎯 Modified Files\n"
-            + "\n".join(f"* `{f}`" for f in proposal.target_files)
-            + "\n\n---\n"
-            "*Generated by [Akesis Self-Healing CI/CD Agent](https://github.com/crlabs-ai/akesis)*"
+            "### Modified files\n" + "\n".join(f"* `{f}`" for f in proposal.target_files) + "\n"
         )

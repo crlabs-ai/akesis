@@ -124,7 +124,7 @@ graph TD
     MutationSvc -->|16. Verify SHA & Invariants| ApprTable
     MutationSvc -->|17. Pre-Push Validation| DockerBox
     MutationSvc -->|18. Persist Mutation State| MutTable
-    MutationSvc -->|19. Push Branch & Open PR| GHAPI
+    MutationSvc -->|19. Create Branch & Open PR| GHAPI
 ```
 
 ---
@@ -137,7 +137,7 @@ graph TD
 | **CI Log Signal Extraction** | **Implemented** | Strips ANSI codes; parses tracebacks, Pytest, Ruff, Mypy, and Pip failures. |
 | **Exact Commit Context Retrieval** | **Implemented** | GitPython detached HEAD checkout; bounded 40-line windowing; path traversal prevention. |
 | **Structured AI Diagnosis** | **Implemented** | Gemini REST API adapter with Pydantic JSON schema generation and 0.0 confidence fallback. |
-| **Deterministic Fix Synthesis** | **Implemented** | Prompt engineering for unified diffs; strict budget enforcement (max 2 files / 100 lines / 4KB). |
+| **Deterministic Fix Synthesis** | **Implemented** | Prompt engineering for unified diffs; strict budget enforcement (max 2 files / 100 lines / 4,000 characters). |
 | **Protected File Shielding** | **Implemented** | Blocks modifications to `.github/workflows/`, `.git/`, `.env*`, and binaries. |
 | **Docker Sandbox Validation** | **Implemented** | Unprivileged container (`uid 1000`), `--network none`, allowlisted commands (`pytest`, `ruff`, `mypy`). |
 | **PostgreSQL Persistence** | **Implemented** | Async SQLAlchemy models for `approvals` and `mutations`; Alembic migrations. |

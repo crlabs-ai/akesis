@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed (Phase 1.7: secure mutation and pull request creation)
+* **Mutation no longer clones or uses the personal access token.** `GitMutationService` applies the validated patch to a copy of a verified snapshot of the approved commit and writes blobs, tree, commit, branch and pull request through the GitHub Git Data API (`src/packages/sdk/github_git_writer.py`). Every created object is checked against locally computed object IDs.
+* **Installation tokens can be scoped.** `GitHubAppAuth.installation_token` accepts `repository_ids` and `permissions`, and fails closed if GitHub reports a broader grant. The mutation token is limited to the event repository, `contents`/`pull_requests` write and `metadata` read.
+* **Fork-sourced incidents are refused** before any database, network, token or filesystem work (ADR-0010 blocker 1).
+* **Pull requests target the verified source branch** of the failing same-repository workflow (ADR-0010 blocker 2, owner decision). The head is the Akesis remediation branch in the same repository; a default-branch failure therefore targets the default branch, which is otherwise untouched. The source branch must exist and still point at the approved full SHA before any remote object, immediately before the branch is created, and immediately before the pull request is created. A missing, inaccessible or moved source branch aborts; nothing is rebased or substituted.
+* **Safe retries:** one mutation record per proposal and commit; an existing branch or open PR is reused only if it is exactly this remediation, otherwise the mutation stops. Branches are never moved or forced, and Akesis never merges.
+* **Removed:** the shared-checkout clone and push mutation path, `copy_checkout_without_links`, and the unused `GitHubClient.create_pull_request` and `find_pull_request` methods. The remediation hold (ADR-0010) is unchanged.
+
 ### Added
 * **Durable webhook delivery records** (migrations `0005_create_webhook_events`, `0006_webhook_retry_schedule`, `0007_worker_visibility`): deliveries are persisted and claimed atomically, with stale-write protection by attempt count.
 * **Webhook retry policy:** at most `webhook_retry_max_attempts` (default 5) verification attempts per delivery. Computed backoff starts at 60 seconds, doubles with jitter, and is capped at 15 minutes. Provider `Retry-After` and rate-limit reset delays are honoured in full.

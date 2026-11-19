@@ -36,6 +36,7 @@ from src.packages.sdk.github_git_source import (
     FileEntry,
     GitHubGitSource,
     SourceAcquisitionError,
+    tree_object_sha,
 )
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
@@ -233,24 +234,30 @@ def verify_base(record: _Record) -> None:
             raise SnapshotRejected("Snapshot file was modified", code="modified")
 
 
+def snapshot_matches_token(token: Any, snapshot: VerifiedSnapshot) -> bool:
+    """True only if the snapshot describes exactly the identity the provenance token carries."""
+    return all(
+        (
+            token.incident_id == snapshot.incident_id,
+            token.pipeline_id == snapshot.pipeline_id,
+            token.delivery_id == snapshot.delivery_id,
+            token.event_repository_id == snapshot.event_repository_id,
+            token.source_repository_id == snapshot.source_repository_id,
+            f"{token.owner}/{token.name}" == snapshot.source_full_name,
+            token.installation_id == snapshot.installation_id,
+            token.head_sha == snapshot.commit_sha,
+            token.head_branch == snapshot.source_branch,
+        )
+    )
+
+
 def require_snapshot_bound(token: object, snapshot: object) -> None:
     """A provenance token alone is never enough: it must describe this exact snapshot."""
     if not isinstance(token, VerifiedProvenance):
         raise ProvenanceRejected("Verified provenance is required", code="missing")
     if not isinstance(snapshot, VerifiedSnapshot):
         raise ProvenanceRejected("A verified snapshot is required", code="missing")
-    checks = (
-        token.incident_id == snapshot.incident_id,
-        token.pipeline_id == snapshot.pipeline_id,
-        token.delivery_id == snapshot.delivery_id,
-        token.event_repository_id == snapshot.event_repository_id,
-        token.source_repository_id == snapshot.source_repository_id,
-        f"{token.owner}/{token.name}" == snapshot.source_full_name,
-        token.installation_id == snapshot.installation_id,
-        token.head_sha == snapshot.commit_sha,
-        token.head_branch == snapshot.source_branch,
-    )
-    if not all(checks):
+    if not snapshot_matches_token(token, snapshot):
         raise ProvenanceRejected("Snapshot is not bound to this provenance", code="binding")
 
 
@@ -324,6 +331,98 @@ def discard_workspace(workspace: Path) -> None:
         for record in _LIVE.values():
             record.workspaces.discard(workspace)
     _remove_tree(workspace)
+
+
+@dataclass(frozen=True)
+class WorkspaceChange:
+    """One file that differs between a workspace and its snapshot. `mode` None means deleted."""
+
+    path: str
+    mode: str | None
+    content: bytes | None
+    blob_sha: str | None
+
+
+def workspace_changes(snapshot: object, workspace: Path) -> list[WorkspaceChange]:
+    """Every file a workspace adds, modifies or deletes relative to its verified snapshot.
+
+    The workspace must belong to this live snapshot. Symbolic links, non-regular files, and
+    `.git` or traversal components fail closed: their content is never read.
+    """
+    _, record = _live_record(snapshot)
+    with _LOCK:
+        owned = workspace in record.workspaces
+    if not owned:
+        raise SnapshotRejected("Workspace does not belong to this snapshot", code="binding")
+    found: dict[str, tuple[str, Path]] = {}
+    for root, dirs, files in os.walk(workspace, followlinks=False):
+        for name in dirs + files:
+            info = os.lstat(Path(root) / name)
+            if stat.S_ISLNK(info.st_mode):
+                raise SnapshotRejected("Workspace contains a symbolic link", code="symlink")
+            if name in files and not stat.S_ISREG(info.st_mode):
+                raise SnapshotRejected("Workspace contains a non-regular file", code="layout")
+        for name in files:
+            full = Path(root) / name
+            relative = str(full.relative_to(workspace)).replace(os.sep, "/")
+            for part in relative.split("/"):
+                if part in {"", ".", ".."} or part.lower() == ".git" or "\\" in part:
+                    raise SnapshotRejected("Unsafe path component", code="invalid_path")
+            mode = "100755" if os.lstat(full).st_mode & 0o100 else "100644"
+            found[relative] = (mode, full)
+    expected = {entry.path: entry for entry in record.manifest}
+    changes: list[WorkspaceChange] = []
+    for path in sorted(set(found) | set(expected)):
+        if path not in found:
+            changes.append(WorkspaceChange(path=path, mode=None, content=None, blob_sha=None))
+            continue
+        mode, full = found[path]
+        data = _read_nofollow(full)
+        sha = _blob_sha(data)
+        entry = expected.get(path)
+        if entry is None or entry.blob_sha != sha or entry.mode != mode:
+            changes.append(WorkspaceChange(path=path, mode=mode, content=data, blob_sha=sha))
+    return changes
+
+
+def _tree_sha(files: dict[str, tuple[str, str]]) -> str:
+    """Git tree ID for a complete set of `path -> (mode, blob sha)` regular files."""
+    root: dict[str, Any] = {}
+    for path, value in files.items():
+        node = root
+        parts = path.split("/")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+
+    def build(node: dict[str, Any]) -> str:
+        entries = []
+        for name, value in node.items():
+            if isinstance(value, dict):
+                entries.append({"name": name, "mode": "040000", "sha": build(value)})
+            else:
+                entries.append({"name": name, "mode": value[0], "sha": value[1]})
+        return tree_object_sha(entries)
+
+    return build(root)
+
+
+def tree_sha_after(snapshot: object, changes: list[WorkspaceChange]) -> str:
+    """The exact root tree ID that the snapshot plus these changes must produce.
+
+    The unchanged manifest is first rebuilt and checked against the verified root tree, so a
+    remote tree can be compared byte-for-byte with what was validated locally.
+    """
+    handle, record = _live_record(snapshot)
+    files = {entry.path: (entry.mode, entry.blob_sha) for entry in record.manifest}
+    if _tree_sha(files) != handle.root_tree_sha:
+        raise SnapshotRejected("Snapshot manifest does not rebuild its tree", code="integrity")
+    for change in changes:
+        if change.mode is None or change.blob_sha is None:
+            files.pop(change.path, None)
+        else:
+            files[change.path] = (change.mode, change.blob_sha)
+    return _tree_sha(files)
 
 
 def _release(snapshot_id: str) -> None:

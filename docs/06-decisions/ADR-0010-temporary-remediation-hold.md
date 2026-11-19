@@ -35,7 +35,7 @@ diagnosis, patch generation, sandbox execution, and PR creation.
    - `ValidationService.validate_fix` (checkout and sandbox)
    - `CodebaseContextResolver.resolve_context` (checkout)
    - `ApprovalService.request_approval` (persistence and Slack card)
-   - `GitMutationService.create_pull_request` (branch, push, PR)
+   - `GitMutationService.create_pull_request` (remote Git objects, branch, PR)
    - `GitRepositoryCheckoutManager.checkout_commit` (direct SDK clone or fetch)
    - `DockerSandboxRunner.run_validation` (direct sandbox execution)
 3. The hold is not data-dependent. Presence of a `provenance` object on a `FailureContext` does
@@ -85,8 +85,8 @@ All of the following must hold, and each must be demonstrated by a test in the n
 
 The following must be resolved before the hold is lifted. They are blockers, not notes.
 
-1. **Mutation target for fork-sourced runs.** The checkout, push and pull request use the verified *source* repository (`FailureContext.repository_owner/name`). For a fork-sourced run this targets the fork with installation credentials. ADR-0011 states that fork-sourced code never runs with write credentials. Either refuse fork-sourced incidents, or send every mutation to the event (base) repository.
-2. **Pull request base branch.** `base_branch` is the failing run's head branch, which can be a fork branch or a non-default branch. It should be the event repository's default branch.
+1. **Mutation target for fork-sourced runs.** *Resolved in Phase 1.7.* Fork-sourced incidents are refused before any I/O (`require_same_repository` in `mutation_service.py`): the verified event and source repository IDs must be equal, and the target repository must report `fork: false`. Nothing is substituted.
+2. **Pull request base branch.** *Resolved in Phase 1.7 (owner decision).* For same-repository runs the base is the exact verified source branch of the failing workflow, and the head is the Akesis remediation branch in the same event repository. A failure on the default branch therefore yields a PR against the default branch; otherwise the default branch is not touched. The remediation commit's only parent is the approved commit, so the PR contains only the approved, validated change. A missing, inaccessible or moved source branch aborts; nothing is rebased and no other branch is substituted.
 3. **Sandbox root filesystem.** The validator container runs with a writable root filesystem. It has no PID limit before Phase 15 (now 256), and it has no read-only root or tmpfs. Adding `--read-only` needs a validator-image test first.
 4. **Single database role.** The API and the retry worker use one role. The worker should have a role limited to the tables it needs.
 5. **Shared read token.** One token guards every read endpoint and identifies no operator.
@@ -94,7 +94,7 @@ The following must be resolved before the hold is lifted. They are blockers, not
 ## Phase 15 changes that support this ADR
 
 * `require_verified_provenance()` is now the first statement of `process_failure`, `resume_approval` and `create_pull_request`. Before, the provenance read ran first, which contradicted the documented "fail before any database read" invariant.
-* `_safe_process_failure`, the only background path that could have reached `process_failure`, was deleted. The committed `HEAD` still schedules it, so **`HEAD` must not be deployed**.
+* `_safe_process_failure`, the only background path that could have reached `process_failure`, was deleted in commit `b40601c`. No route or worker schedules it.
 * A census test fails if any `process_failure(` or `resume_approval(` call site appears outside the expected set, or if the webhook route schedules anything except approval resumption.
 * A test fails if a remediation or provenance module reads an environment switch, so no test-only setting can alter the hold.
 
@@ -148,3 +148,25 @@ valid record passes persisted verification and stops at the hold.
 
 Caller-supplied `repo_root` values are rejected at verified entry points, so repository content
 can only come from the exact-commit checkout that the token binds.
+
+## Implementation Status (Phase 1.7)
+
+`GitMutationService` no longer clones, uses the shared checkout, or uses the personal access token.
+The hold is unchanged and still runs first in `create_pull_request`.
+
+* Source content: a fresh `VerifiedSnapshot` of the approved commit; the validated patch is applied
+  verbatim to a workspace copy; links fail closed; the expected tree ID is computed locally.
+* Credentials: a GitHub App installation token scoped to the event repository ID with `contents`
+  and `pull_requests` write and `metadata` read, held in memory and sent only as a header.
+* Remote writes (`src/packages/sdk/github_git_writer.py`): blobs, tree and commit through the Git
+  Data API, each verified against local object IDs; the branch is created, never moved or forced.
+* Pull request base: the verified source branch (`provenance.head_branch`); head: the remediation
+  branch in the same repository.
+* Freshness: the source branch must exist, be readable, and point at the approved full SHA. It is
+  checked before any remote object, immediately before the branch is created, and immediately
+  before the pull request is created.
+* Retries reuse one mutation record, an identical existing branch, and an identical open PR. Any
+  other existing branch or PR stops the mutation. Akesis never merges.
+
+Tests: `tests/unit/test_mutation_service.py`, `tests/unit/test_github_git_writer.py`,
+`tests/unit/test_github_app_auth.py`, `tests/integration/test_mutation_flow.py`.
