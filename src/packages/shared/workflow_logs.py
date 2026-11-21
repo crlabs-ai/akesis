@@ -5,10 +5,12 @@ VerifiedProvenance token that verification issued. Nothing here reads raw webhoo
 
 The log archive is untrusted input. It is read entirely in memory (never extracted to disk) under
 limits on entries, per-file and total uncompressed size, and compression ratio. Links, devices,
-encrypted entries and unsafe paths are rejected. Text is decoded leniently, secrets are redacted,
-and only a bounded excerpt reaches the FailureSignal. Ambiguous logs stay UNKNOWN.
+encrypted entries and unsafe paths are rejected. Text is decoded leniently, recognised secret
+formats are redacted (a fixed list, not universal secret detection; see the notes below), and
+only a bounded excerpt reaches the FailureSignal. Ambiguous logs stay UNKNOWN.
 """
 
+import asyncio
 import io
 import re
 import stat
@@ -33,27 +35,46 @@ _ERROR_MARKER = "##[error]"
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?", re.MULTILINE)
 _STEP_PREFIX = re.compile(r"^\d+_")
 REDACTED = "[REDACTED]"
-_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (
-        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
-        REDACTED,
-    ),
-    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"), REDACTED),
-    (re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"), REDACTED),
-    (re.compile(r"\bAIza[0-9A-Za-z_\-]{30,}\b"), REDACTED),
-    (re.compile(r"\bxox[abposr]-[A-Za-z0-9\-]{10,}\b"), REDACTED),
-    (re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b"), REDACTED),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b"), REDACTED),
-    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{12,}"), rf"\1 {REDACTED}"),
-    (re.compile(r"(://)[^/\s:@]+:[^/\s@]+@"), rf"\1{REDACTED}@"),  # credentials in URLs
-    (
-        re.compile(
-            r"(?i)\b([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIALS?)"
-            r"[A-Z0-9_]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
-        ),
-        rf"\1\2{REDACTED}",
-    ),
+
+# Redaction runs on a whole untrusted log file (bounded by the archive's per-file limit), so every
+# step is linear in its input. Python's `re` backtracks; the patterns are safe for these reasons:
+# * Each starts at a fixed literal and consumes its token possessively (`++`, `{n,}+`), so a start
+#   that fails costs at most the literal plus the minimum length, and one that succeeds consumes
+#   the whole token, so later starts inside it are never tried.
+# * Two shapes that cannot be written that way are hand-written scanners: private keys (an
+#   END must be looked for after each BEGIN) and JWTs (three dot-separated segments). Key=value
+#   assignments use a possessive key regex with the keyword check done on the matched key.
+#
+# Adjacency: a credential is recognised even when glued to other word characters ("f_ghp_...",
+# "idAKIA...", "éDB_SECRET=..."). Distinctive prefixes need no boundary at all. Two prefixes that
+# also occur inside ordinary words ("sk-" in "task-", "basic" in "nonbasic") must not follow an
+# ASCII letter or digit; "_" and Unicode letters still count as a boundary for them.
+_PRIVATE_KEY_BODY_MAX = 8192
+# Stored signal fields other than the message and the excerpt (paths, functions, code, names).
+MAX_FIELD_CHARS = 500
+_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_KEY_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+_TOKEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{20,}+|github_pat_[A-Za-z0-9_]{20,}+)"), REDACTED),
+    # The whole [0-9A-Z] run: a key glued to more capitals is redacted with them (over-redaction).
+    (re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16,}+"), REDACTED),
+    (re.compile(r"AIza[0-9A-Za-z_\-]{30,}+"), REDACTED),
+    (re.compile(r"xox[abposr]-[A-Za-z0-9\-]{10,}+"), REDACTED),
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}+"), REDACTED),
 ]
+_JWT_RUN = re.compile(r"[A-Za-z0-9_\-.]++")
+_CONTEXT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"(?i)(?<![A-Za-z0-9])(bearer|basic)\s++[A-Za-z0-9._~+/=\-]{12,}+"),
+        rf"\1 {REDACTED}",
+    ),
+    (re.compile(r"(://)[^/\s:@]++:[^/\s@]++@"), rf"\1{REDACTED}@"),  # credentials in URLs
+]
+# The former key and separator grammar without its backtracking. The key starts where a run of
+# key characters starts (not at a word boundary), so "éDB_SECRET=" is a key too.
+_ASSIGNMENT = re.compile(r"(?i)(?<![A-Z0-9_])([A-Z0-9_]++)\s*+[=:]\s*+")
+_SECRET_KEY = re.compile(r"(?i)PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_?KEY|CREDENTIALS?")
+_NON_SPACE = re.compile(r"\S++")
 
 
 class LogArchiveRejected(Exception):
@@ -95,10 +116,164 @@ class LogOutcome:
     headers: dict[str, str] = field(default_factory=dict)
 
 
+def _redact_private_keys(text: str) -> str:
+    """BEGIN...END within 8 KiB, else the header and the next 8 KiB (over-redaction is safe).
+
+    Linear: BEGIN searches resume after each redacted span, and the END search is cached and
+    only repeated once the scan has passed it, so each character is scanned O(1) times.
+    """
+    parts: list[str] = []
+    pos = 0
+    end: re.Match[str] | None = None
+    no_end_after = len(text) + 1  # no END starts at or after this index
+    while (begin := _KEY_BEGIN.search(text, pos)) is not None:
+        body = begin.end()
+        if body < no_end_after and (end is None or end.start() < body):
+            end = _KEY_END.search(text, body)
+            if end is None:
+                no_end_after = body
+        if end is not None and end.start() >= body and end.start() - body <= _PRIVATE_KEY_BODY_MAX:
+            stop = end.end()
+        else:
+            stop = min(body + _PRIVATE_KEY_BODY_MAX, len(text))
+        parts += (text[pos : begin.start()], REDACTED)
+        pos = stop
+    parts.append(text[pos:])
+    return "".join(parts)
+
+
+def _jwt_start(segment: str) -> int | None:
+    """Leftmost `eyJ` in the first segment leaving 11+ characters, glued or not ("f_eyJ...").
+
+    No boundary is needed: the next segment must itself start with `eyJ`, which ordinary text
+    practically never does.
+    """
+    pos = segment.find("eyJ")
+    return pos if pos != -1 and len(segment) - pos >= 11 else None
+
+
+def _redact_jwt_run(match: re.Match[str]) -> str:
+    run = match.group()
+    if "eyJ" not in run or "." not in run:
+        return run
+    segments = run.split(".")
+    out: list[str] = []
+    i = 0
+    while i < len(segments):
+        if (
+            i + 2 < len(segments)
+            and segments[i + 1].startswith("eyJ")
+            and len(segments[i + 1]) >= 11
+            and len(segments[i + 2]) >= 8
+            and (start := _jwt_start(segments[i])) is not None
+        ):
+            out.append(segments[i][:start] + REDACTED)
+            i += 3
+            continue
+        out.append(segments[i])
+        i += 1
+    return ".".join(out)
+
+
+def _is_escaped(text: str, pos: int) -> bool:
+    """True when an odd number of backslashes immediately precedes `pos`.
+
+    The backslash run cannot extend past the value's opening quote (a quote is not a backslash),
+    so the answer does not depend on where a search started.
+    """
+    before = pos - 1
+    while before >= 0 and text[before] == "\\":
+        before -= 1
+    return (pos - 1 - before) % 2 == 1
+
+
+def _redact_assignments(text: str) -> str:
+    """KEY=value / KEY: value where KEY contains a secret keyword.
+
+    * A quoted value runs to its first unescaped closing quote, across spaces and lines. Escapes
+      are honoured for both quote kinds: where a backslash is literal (shell single quotes) the
+      value runs on to a later quote, which over-redacts and never exposes.
+    * With no closing quote the rest of the text is redacted: the value's end cannot be
+      established, so over-redaction is the safe failure.
+    * An unquoted value is the next run of non-space characters.
+    * Every value is searched for further assignments, so in "SECRET=token: hunter2" the value
+      "token:" is a key too and "hunter2" is redacted. Overlapping spans merge. This also makes
+      coverage a superset of the former regex's whichever way quotes pair up. A key inside a quoted
+      value can therefore extend redaction past the outer closing quote (deliberate over-redaction).
+
+    Linear: each search starts at the previous value's start or later; the next unescaped quote
+    of each kind is cached and only moves forward; and every unquoted value inside one non-space
+    run ends at that run's end, which is found once and cached.
+    """
+    spans: list[list[int]] = []
+    pos = 0
+    run_end = -1  # end of the non-space run holding the latest unquoted value
+    next_quote = {'"': -2, "'": -2}  # first unescaped quote at or after the last search; -1 none
+    while (match := _ASSIGNMENT.search(text, pos)) is not None:
+        value = match.end()
+        pos = value
+        if value >= len(text) or not _SECRET_KEY.search(match.group(1)):
+            continue
+        quote = text[value]
+        if quote in next_quote:
+            close = next_quote[quote]
+            if close != -1 and close <= value:
+                close = text.find(quote, value + 1)
+                while close != -1 and _is_escaped(text, close):
+                    close = text.find(quote, close + 1)
+                next_quote[quote] = close
+            stop = len(text) if close == -1 else close + 1
+        else:
+            if value >= run_end:
+                run_end = _NON_SPACE.match(text, value).end()  # type: ignore[union-attr]
+            stop = run_end
+        if spans and value <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], stop)
+        else:
+            spans.append([value, stop])
+        if stop == len(text):
+            break  # everything after is redacted; nothing further can matter
+    parts: list[str] = []
+    last = 0
+    for start, stop in spans:
+        parts += (text[last:start], REDACTED)
+        last = stop
+    parts.append(text[last:])
+    return "".join(parts)
+
+
 def redact(text: str) -> str:
-    for pattern, replacement in _SECRET_PATTERNS:
+    """Redact every recognised secret format. Linear in len(text); see the notes above."""
+    text = _redact_private_keys(text)
+    for pattern, replacement in _TOKEN_PATTERNS:
         text = pattern.sub(replacement, text)
-    return text
+    if "eyJ" in text:
+        text = _JWT_RUN.sub(_redact_jwt_run, text)
+    for pattern, replacement in _CONTEXT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return _redact_assignments(text)
+
+
+def redact_tail(text: str, limit: int) -> str:
+    """The last `limit` characters of `text`, with no secret in them, whole or cut.
+
+    Every cut in this module goes through this function or `redact_head`, and both rely on two
+    steps rather than on a fixed overlap margin:
+    1. All of `text` is redacted before the cut. Every secret recognisable anywhere in it is
+       already a marker, so the cut can split only a marker or ordinary text. A quoted value or a
+       key/value gap of any length within `text` is seen whole.
+    2. The cut result is redacted again, so anything the cut made recognisable (a token whose
+       preceding character was cut off) is replaced too.
+
+    Linear in len(text). The result can exceed `limit` by at most len(REDACTED) - 1: only a
+    match that starts at the cut can be new, and replacing a one-character value grows it by 9.
+    """
+    return redact(redact(text)[-limit:]) if text else text
+
+
+def redact_head(text: str, limit: int) -> str:
+    """The first `limit` characters of `text`; the same two steps as `redact_tail`."""
+    return redact(redact(text)[:limit]) if text else text
 
 
 def _safe_name(name: str) -> bool:
@@ -190,18 +365,37 @@ def extract_signal(entries: list[tuple[str, str]], limits: LogLimits) -> Failure
     # Per-step files ("job/1_step.txt") are preferred over the combined per-job copy.
     candidates = [e for e in failing if "/" in e[0]] or failing or entries
     name, text = candidates[0]
-    cleaned = redact(_TIMESTAMP.sub("", text))[-limits.max_parse_chars :]
+    # The whole file is redacted before the parse window is cut from it, so a secret that starts
+    # before the window cannot leave a fragment inside it. The parser still sees at most
+    # `max_parse_chars` (plus at most len(REDACTED) - 1, see `redact_tail`).
+    cleaned = redact_tail(_TIMESTAMP.sub("", text), limits.max_parse_chars)
     if not cleaned.strip():
         return None
     signal = filter_and_extract_signal(cleaned)
     job, step = _job_and_step(name)
+
+    # Every stored string is bounded, and redacted again after its cut.
+    def field(value: str | None) -> str | None:
+        return redact_tail(value, MAX_FIELD_CHARS) if value else value
+
     return signal.model_copy(
         update={
-            "message": redact(signal.message)[:MAX_MESSAGE_CHARS],
-            "extracted_snippet": redact(signal.extracted_snippet)[-MAX_EXCERPT_CHARS:],
-            "traceback_frames": signal.traceback_frames[:MAX_FRAMES],
-            "job_name": job[:255] if job else None,
-            "step_name": step[:255] if step else None,
+            "error_type": redact_head(signal.error_type, MAX_FIELD_CHARS),
+            "message": redact_head(signal.message, MAX_MESSAGE_CHARS),
+            "target_file": field(signal.target_file),
+            "extracted_snippet": redact_tail(signal.extracted_snippet, MAX_EXCERPT_CHARS),
+            "traceback_frames": [
+                frame.model_copy(
+                    update={
+                        "file_path": field(frame.file_path),
+                        "function_name": field(frame.function_name),
+                        "code_line": field(frame.code_line),
+                    }
+                )
+                for frame in signal.traceback_frames[:MAX_FRAMES]
+            ],
+            "job_name": redact_head(job, 255) if job else None,
+            "step_name": redact_head(step, 255) if step else None,
         }
     )
 
@@ -254,7 +448,10 @@ async def retrieve_failure_signal(
             max_bytes=limits.max_compressed_bytes,
             allowed_hosts=limits.allowed_hosts,
         )
-        signal = extract_signal(read_log_archive(archive, limits), limits)
+        # CPU-bound and synchronous: run it off the event loop so the worker stays responsive.
+        signal = await asyncio.to_thread(
+            lambda: extract_signal(read_log_archive(archive, limits), limits)
+        )
     except GitHubAppAuthenticationError as error:
         return LogOutcome(
             "retry" if error.retryable else "unavailable", error.code, headers=error.headers

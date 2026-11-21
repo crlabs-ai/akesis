@@ -6,19 +6,21 @@ is checked structurally, by scaling ratios (linear ~4x for 4x input, quadratic ~
 generous absolute bounds at the maximum parse size, so no single timing decides.
 """
 
+import asyncio
 import random
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from src.packages.shared import log_parser
+from src.packages.shared import log_parser, workflow_logs
 from src.packages.shared.log_parser import filter_and_extract_signal
 from src.packages.shared.models import FailureCategory
 from tests.support import legacy_log_parser as legacy
-from tests.unit.test_workflow_logs import FakeGitHubActions, _run, _zip
+from tests.unit.test_workflow_logs import FakeGitHubActions, _limits, _run, _zip
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 MAX_PARSE_CHARS = 2_000_000  # Settings.log_parse_max_chars default
@@ -456,6 +458,70 @@ def test_former_quadratic_patterns_are_gone_and_the_rest_cannot_backtrack() -> N
 
 
 # ---- worker integration --------------------------------------------------------------------------
+
+
+def _hostile_archive(size: int) -> bytes:
+    # Varied enough to pass the compression-ratio limit, hostile in shape.
+    rng = random.Random(3)
+    lines = [HEADER + f"FAILED {rng.getrandbits(64):x}\n" for _ in range(size // 60)]
+    return _zip({"job/1_test.txt": "".join(lines).encode()})
+
+
+def _big_limits() -> Any:
+    return _limits(
+        max_compressed_bytes=50_000_000,
+        max_total_bytes=50_000_000,
+        max_file_bytes=10_000_000,
+        max_parse_chars=MAX_PARSE_CHARS,
+        max_ratio=1_000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_loop_stays_responsive_while_a_maximum_size_log_is_parsed() -> None:
+    fake = FakeGitHubActions(archive=_hostile_archive(MAX_PARSE_CHARS))
+    gaps: list[float] = []
+    done = asyncio.Event()
+
+    async def heartbeat() -> None:
+        last = time.perf_counter()
+        while not done.is_set():
+            await asyncio.sleep(0.005)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    beat = asyncio.create_task(heartbeat())
+    outcome = await _run(fake, limits=_big_limits())
+    done.set()
+    await beat
+    assert outcome.status == "extracted"
+    assert len(gaps) >= 3 and max(gaps) < 1.0  # the loop kept running during the parse
+
+
+@pytest.mark.asyncio
+async def test_timeout_returns_promptly_and_abandoned_parse_work_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finished = threading.Event()
+    real = workflow_logs.extract_signal
+
+    def slow_extract(*args: Any) -> Any:
+        try:
+            time.sleep(0.3)  # longer than the deadline below
+            return real(*args)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(workflow_logs, "extract_signal", slow_extract)
+    fake = FakeGitHubActions(archive=_hostile_archive(200_000))
+    started = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.05):
+            await _run(fake, limits=_big_limits())
+    assert time.perf_counter() - started < 0.25  # cancellation did not wait for the thread
+    # The abandoned thread runs to completion in bounded time; nothing is left running.
+    assert await asyncio.to_thread(finished.wait, 10.0)
 
 
 @pytest.mark.asyncio
