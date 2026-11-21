@@ -14,6 +14,7 @@ from src.packages.database.repositories import (
 from src.packages.database.session import get_session_factory
 from src.packages.shared.approval_service import ApprovalService, approval_id_for
 from src.packages.shared.context_resolver import CodebaseContextResolver
+from src.packages.shared.diagnosis_evidence import load_diagnosis_context
 from src.packages.shared.diagnostic_service import DiagnosticService
 from src.packages.shared.fix_service import FixProposalService
 from src.packages.shared.logging import get_logger
@@ -163,6 +164,10 @@ class RemediationOrchestrator:
         Fails closed before any persistence or external call while the provenance hold is active.
         """
         require_verified_provenance()  # first: no database read before the hold refuses
+        # Diagnose only the persisted, final workflow-log evidence (Phase 1.11), never the
+        # caller's copy of the signal. Raises LogEvidencePending while logs are still in flight.
+        async with get_session_factory()() as session:
+            context = await load_diagnosis_context(context, session=session)
         provenance = await verify_context_provenance(context)
         return await self._process_failure_unchecked(context, provenance)
 

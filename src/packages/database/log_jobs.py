@@ -72,8 +72,14 @@ async def complete(
     code: str | None = None,
     failure_context_json: str | None = None,
     next_attempt_at: datetime | None = None,
+    expected_context_json: str | None = None,
 ) -> bool:
-    """Record one claimed attempt's outcome. False if the claim was superseded."""
+    """Record one claimed attempt's outcome. False if the claim was superseded.
+
+    A new context is written only if the stored context is still the one the worker read, so a
+    concurrent change to the incident is never overwritten; the lease then expires and the
+    attempt is retried against the current row.
+    """
     values: dict[str, object] = {
         "log_status": status,
         "log_failure_code": code,
@@ -81,15 +87,14 @@ async def complete(
     }
     if failure_context_json is not None:
         values["failure_context_json"] = failure_context_json
-    result = await session.execute(
-        update(PipelineModel)
-        .where(
-            PipelineModel.pipeline_id == pipeline_id,
-            PipelineModel.log_status == FETCHING,
-            PipelineModel.log_attempts == attempt,
-        )
-        .values(**values)
-    )
+    guards = [
+        PipelineModel.pipeline_id == pipeline_id,
+        PipelineModel.log_status == FETCHING,
+        PipelineModel.log_attempts == attempt,
+    ]
+    if failure_context_json is not None:
+        guards.append(PipelineModel.failure_context_json == expected_context_json)
+    result = await session.execute(update(PipelineModel).where(*guards).values(**values))
     return bool(getattr(result, "rowcount", 0))
 
 

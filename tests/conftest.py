@@ -42,6 +42,7 @@ _DATABASE_TEST_FILES = frozenset(
         "tests/integration/test_orchestrator_flow.py",
         "tests/integration/test_webhook_api.py",
         "tests/integration/test_workflow_log_worker.py",
+        "tests/integration/test_diagnosis_evidence.py",
     }
 )
 

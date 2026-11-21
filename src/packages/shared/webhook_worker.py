@@ -305,7 +305,7 @@ class RetryWorker:
                 error_type=type(error).__name__,
             )
             return
-        await self._finish_logs(pipeline_id, attempt, outcome, context)
+        await self._finish_logs(pipeline_id, attempt, outcome, context, raw_context)
         self._count(summary, f"logs_{outcome.status}")
 
     async def _finish_logs(
@@ -314,6 +314,7 @@ class RetryWorker:
         attempt: int,
         outcome: LogOutcome,
         context: FailureContext | None,
+        raw_context: str | None = None,
     ) -> None:
         failure_context_json = None
         next_attempt_at = None
@@ -347,6 +348,7 @@ class RetryWorker:
                     code=outcome.code,
                     failure_context_json=failure_context_json,
                     next_attempt_at=next_attempt_at,
+                    expected_context_json=raw_context,
                 )
         logger.info(
             "workflow_logs_recorded", pipeline_id=pipeline_id, status=status, code=outcome.code

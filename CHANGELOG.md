@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed (Phase 1.11: diagnosis uses only final persisted log evidence)
+* **Persisted evidence is authoritative.** `load_diagnosis_context` (`diagnosis_evidence.py`) returns the stored `FailureContext` for the incident after checking incident, commit, repository, run and provenance bindings and re-verifying provenance in PostgreSQL. `process_failure` uses it after the hold, so a caller's stale or forged signal never reaches Gemini. `unavailable` logs keep the empty signal.
+* **No diagnosis while logs are in flight.** `pending` and `fetching` raise `LogEvidencePending` (no side effect, retry later). The wait is bounded: the log worker always ends in `extracted` or `unavailable`.
+* **No lost updates.** The worker writes a context only if the stored one is still the one it read (`expected_context_json`); otherwise the lease expires and the attempt is retried.
+* The remediation hold is unchanged. Nothing schedules diagnosis automatically.
+* **Known limitations (deferred).** A refused conditional write is still logged and counted as recorded (L1). Gemini is not told when logs were unavailable (L2). A hard-cancelled retrieval recovers only after its lease, as a new attempt (L4, now tested). Admission's `FAILED` pipeline rows block the orchestrator handoff, which belongs to condition 6. See ADR-0010, Phase 1.11.
+
 ### Security (redaction hardening, follows the Phase 1.11 review)
 * **Quadratic key=value redaction removed.** The `PASSWORD|SECRET|TOKEN|...` key=value regex backtracked quadratically on hostile input (repeated `PASSWORD_`: 0.91s at 20k characters, 3.7s at 40k, 15.1s at 80k; hours at the 2M parse limit). It is replaced by a possessive key regex plus a forward-only scanner with the same matches (checked against the former regex as an oracle); 2M characters now take about 0.2s. The JWT pattern had the same flaw on repeated `eyJ-` (1.8s at 80k) and is now a segment scanner.
 * **Cost model.** Token patterns are possessive, so a failed start costs at most its literal plus minimum length. Private keys are a scanner that pairs BEGIN with an END within 8 KiB, otherwise redacts the header and the next 8 KiB; work is bounded per header and linear overall. Matches are equal to or wider than before: a trailing word boundary is no longer required, so a token may be redacted with trailing `-` characters.

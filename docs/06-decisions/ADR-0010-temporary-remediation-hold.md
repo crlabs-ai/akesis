@@ -204,3 +204,49 @@ ingestion, in the same class as provenance verification, and runs in the retry w
   context still verifies. Nothing in this stage calls diagnosis, Gemini, the sandbox or mutation.
 
 Tests: `tests/unit/test_workflow_logs.py`, `tests/integration/test_workflow_log_worker.py`.
+
+## Implementation Status (Phase 1.11)
+
+Diagnosis evidence is bound to persisted, verified state. The hold is unchanged and still raises
+first in every gated entry point; nothing schedules diagnosis automatically.
+
+* `load_diagnosis_context` (`src/packages/shared/diagnosis_evidence.py`) returns the persisted
+  `FailureContext` for an incident. It checks the incident, commit, repository, run and the full
+  provenance object against the caller's context and the pipeline row, then re-verifies provenance
+  in PostgreSQL. A caller's stale or forged signal never reaches Gemini.
+* `log_status` `pending` or `fetching` raises `LogEvidencePending`, a refusal with no side effects.
+  The wait is bounded because the log worker always ends in `extracted` or `unavailable`. With
+  `unavailable` logs, diagnosis gets the empty signal, as it did before Phase 1.10.
+* The worker writes a context only if the stored one is unchanged since it read it
+  (`expected_context_json`). Otherwise the write is refused, the lease expires and the attempt is
+  retried against the current row.
+* `process_failure` calls the loader after `require_verified_provenance()`. While the hold is
+  active that call is unreachable, so the loader is tested directly rather than through it.
+
+### Condition 6 handoff (open)
+
+Admission persists each verified incident as a `FAILED` pipeline with the remediation-disabled
+reason. `_process_failure_unchecked` returns an existing pipeline for the incident unchanged, so
+lifting the hold alone would never diagnose an admitted incident. The admission-to-orchestrator
+handoff must be designed together with condition 6.
+
+### Known limitations and follow-ups (deferred)
+
+* **L1, refused-write telemetry.** `_finish_logs` ignores the result of `log_jobs.complete`. When
+  the conditional write is refused, the worker still logs `workflow_logs_recorded` with the
+  intended status and counts `logs_extracted`. No data is lost: the row stays `fetching`, the lease
+  expires and the attempt is retried. The log line and counter are wrong, though. Follow-up: return
+  the result and record `logs_superseded`.
+* **L2, unavailable logs in the prompt.** For `unavailable` logs, Gemini receives an empty signal
+  with no statement that retrieval failed or why (`log_failure_code`). Human approval and sandbox
+  validation still stand behind every proposal. Follow-up: state the log status and code inside
+  the verified-metadata section.
+* **L4, hard cancellation.** `CancelledError` bypasses the worker's exception handlers, so a
+  cancelled retrieval records nothing. The claim stays `fetching` under its lease (600 seconds by
+  default), diagnosis keeps refusing, and the claim is reclaimed only after the lease, as a new
+  attempt that counts against the budget. This is the designed crash recovery and is now tested;
+  it is not prompt.
+* A disabled log stage (`log_retrieval` unset) leaves incidents `pending`, so diagnosis is refused
+  rather than run on missing evidence.
+
+Tests: `tests/integration/test_diagnosis_evidence.py`.
