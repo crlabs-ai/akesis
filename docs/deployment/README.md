@@ -64,6 +64,20 @@ WORKER_BATCH_SIZE=20
 WORKER_HEARTBEAT_PATH=/run/akesis/worker-heartbeat.json
 WORKER_HEARTBEAT_MAX_AGE_SECONDS=300
 
+# Workflow log retrieval by the worker (Phase 1.10; defaults shown). The GitHub App needs
+# Actions: read. Lease must exceed the deadline; every archive limit fails closed.
+LOG_RETRIEVAL_MAX_ATTEMPTS=5
+LOG_RETRIEVAL_DEADLINE_SECONDS=120
+LOG_RETRIEVAL_LEASE_SECONDS=600
+LOG_ARCHIVE_MAX_COMPRESSED_BYTES=20000000
+LOG_ARCHIVE_MAX_ENTRIES=500
+LOG_ARCHIVE_MAX_UNCOMPRESSED_BYTES=100000000
+LOG_ARCHIVE_MAX_FILE_BYTES=20000000
+LOG_ARCHIVE_MAX_COMPRESSION_RATIO=100
+LOG_PARSE_MAX_CHARS=2000000
+# Hosts GitHub may redirect log downloads to; anything else is refused.
+LOG_DOWNLOAD_HOSTS=actions.githubusercontent.com,blob.core.windows.net
+
 # Google Gemini AI Integration
 GEMINI_API_KEY=your_gemini_api_key_from_google_ai_studio
 GEMINI_MODEL=gemini-1.5-flash

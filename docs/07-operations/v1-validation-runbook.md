@@ -260,7 +260,8 @@ curl -i -X POST http://127.0.0.1:8000/v1/webhooks/github \
 ## 14. Required Secrets Checklist (For Live Operator Testing)
 * [ ] `DATABASE_URL` configured and reachable on port 5436.
 * [ ] `GITHUB_WEBHOOK_SECRET` shared between GitHub and Akesis `.env`.
-* [ ] `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` for a GitHub App installed on the test repository with Contents and Pull requests write and Metadata read. Snapshots, provenance verification, and branch and PR creation use its installation tokens.
+* [ ] `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY` for a GitHub App installed on the test repository with Contents and Pull requests write, Actions read and Metadata read. Snapshots, provenance verification, workflow-log retrieval, and branch and PR creation use its installation tokens.
+* [ ] Retry worker running (`python -m src.apps.worker`). It retrieves workflow logs for verified incidents; check `pipelines.log_status` (`extracted`, or `unavailable` with `log_failure_code`).
 * [ ] `GEMINI_API_KEY` active with quota for `gemini-1.5-flash`.
 * [ ] `SLACK_WEBHOOK_URL` and `SLACK_SIGNING_SECRET` configured.
 * [ ] `akesis-validator:v1` Docker image built locally.

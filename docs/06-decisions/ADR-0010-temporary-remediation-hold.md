@@ -187,3 +187,20 @@ unchanged.
 
 Tests: `tests/unit/test_context_resolver.py`, `tests/unit/test_provenance_hold.py`,
 `tests/unit/test_read_api_security.py`, `tests/integration/test_provenance_matrix.py`.
+
+## Implementation Status (Phase 1.10)
+
+Workflow-log retrieval restores real failure evidence without touching the hold. It is read-only
+ingestion, in the same class as provenance verification, and runs in the retry worker:
+
+* Admission persists each verified incident with `log_status = pending`. The worker claims due
+  pipelines (`FOR UPDATE SKIP LOCKED`, lease in `log_next_attempt_at`), re-verifies the persisted
+  context with `verify_context_provenance` (database only), and only then calls GitHub. A rejected
+  check records `unavailable` with a `provenance_*` code and makes no network request.
+* Logs are fetched with an installation token scoped to the event repository (`actions:read`,
+  `metadata:read`) for the exact verified run attempt. The signed redirect is validated and fetched
+  without credentials (see `docs/03-engineering/security.md`, section 5).
+* The stored `FailureSignal` is redacted and bounded; provenance is unchanged, so the persisted
+  context still verifies. Nothing in this stage calls diagnosis, Gemini, the sandbox or mutation.
+
+Tests: `tests/unit/test_workflow_logs.py`, `tests/integration/test_workflow_log_worker.py`.

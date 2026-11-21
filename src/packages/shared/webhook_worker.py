@@ -17,6 +17,11 @@ Guarantees:
   and that reclaim counts as an attempt because verification may already have started.
 - Database outages back off exponentially and keep the process alive. Shutdown finishes the
   deliveries already claimed and then stops without claiming more.
+
+Workflow-log stage (Phase 1.10, optional): after verification work, the worker claims admitted
+pipelines whose logs are still pending, re-verifies each persisted context against PostgreSQL
+(no network), and only then retrieves and parses that run attempt's logs. A rejected provenance
+check makes no GitHub request. The stage never invokes remediation.
 """
 
 import asyncio
@@ -35,14 +40,17 @@ import httpx
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.packages.database.models import WebhookEventModel
+from src.packages.database import log_jobs
+from src.packages.database.models import PipelineModel, WebhookEventModel
 from src.packages.database.webhook_events import WebhookEventRepository
 from src.packages.sdk.github_app_auth import GitHubAppAuth
 from src.packages.shared.logging import get_logger
-from src.packages.shared.models import WorkflowRunConclusion
+from src.packages.shared.models import FailureContext, WorkflowRunConclusion
+from src.packages.shared.persisted_provenance import ProvenanceRejected, verify_context_provenance
 from src.packages.shared.systemd_notify import notify
 from src.packages.shared.webhook_admission import admit_verified_delivery
 from src.packages.shared.webhook_retry import classify_retry
+from src.packages.shared.workflow_logs import LogLimits, LogOutcome, retrieve_failure_signal
 from src.packages.shared.workflow_provenance import (
     ProvenanceVerificationError,
     TransientProvenanceError,
@@ -71,6 +79,19 @@ _IDENTITY_FIELDS = (
 
 
 @dataclass(frozen=True)
+class LogRetrievalConfig:
+    max_attempts: int
+    deadline_seconds: float
+    lease_seconds: int
+    limits: LogLimits
+
+    def __post_init__(self) -> None:
+        # A live retrieval must never outlive its claim, or a second worker could reclaim it.
+        if self.lease_seconds <= self.deadline_seconds:
+            raise ValueError("Log retrieval lease must exceed the retrieval deadline")
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     poll_seconds: float
     batch_size: int
@@ -84,6 +105,8 @@ class WorkerConfig:
     github_app_id: int
     # Secret: never logged, never included in an error message or a heartbeat.
     github_app_private_key: str = field(repr=False)
+    # None disables the workflow-log stage.
+    log_retrieval: LogRetrievalConfig | None = None
 
 
 @dataclass
@@ -205,7 +228,129 @@ class RetryWorker:
             await self._process(delivery_id, attempt, summary)
             if progress is not None:
                 progress()
+        await self._log_stage(stop, progress, summary)
         return summary
+
+    def _count(self, summary: TickSummary, name: str) -> None:
+        summary.counters[name] = summary.counters.get(name, 0) + 1
+
+    async def _log_stage(
+        self,
+        stop: asyncio.Event | None,
+        progress: Callable[[], None] | None,
+        summary: TickSummary,
+    ) -> None:
+        config = self._config.log_retrieval
+        if config is None or (stop is not None and stop.is_set()):
+            return
+        async with self._sessions() as session:
+            async with session.begin():
+                claims, exhausted = await log_jobs.claim_due(
+                    session,
+                    now=self._now(),
+                    batch=self._config.batch_size,
+                    lease_seconds=config.lease_seconds,
+                    max_attempts=config.max_attempts,
+                )
+        summary.counters["logs_exhausted"] = summary.counters.get("logs_exhausted", 0) + exhausted
+        for index, (pipeline_id, attempt) in enumerate(claims):
+            if stop is not None and stop.is_set():
+                for unstarted, unstarted_attempt in claims[index:]:
+                    async with self._sessions() as session:
+                        async with session.begin():
+                            await log_jobs.release_unstarted(session, unstarted, unstarted_attempt)
+                break
+            await self._retrieve_logs(pipeline_id, attempt, config, summary)
+            if progress is not None:
+                progress()
+
+    async def _retrieve_logs(
+        self, pipeline_id: str, attempt: int, config: LogRetrievalConfig, summary: TickSummary
+    ) -> None:
+        async with self._sessions() as session:
+            pipeline = await session.get(PipelineModel, pipeline_id)
+            raw_context = pipeline.failure_context_json if pipeline else None
+            try:
+                if not raw_context:
+                    raise ProvenanceRejected("No persisted context", code="historical")
+                context = FailureContext.model_validate_json(raw_context)
+                # Database-only re-verification: an unverified incident never reaches the network.
+                token = await verify_context_provenance(context, session=session)
+            except (ProvenanceRejected, ValueError) as error:
+                code = error.code if isinstance(error, ProvenanceRejected) else "malformed"
+                await self._finish_logs(
+                    pipeline_id, attempt, LogOutcome("unavailable", f"provenance_{code}"), None
+                )
+                self._count(summary, "logs_rejected")
+                return
+        try:
+            async with asyncio.timeout(config.deadline_seconds):
+                async with httpx.AsyncClient(
+                    base_url=self._config.github_api_url, timeout=30.0
+                ) as api:
+                    auth = GitHubAppAuth(
+                        self._config.github_app_id, self._config.github_app_private_key, client=api
+                    )
+                    outcome = await retrieve_failure_signal(
+                        context, token, auth=auth, api=api, limits=config.limits
+                    )
+        except TimeoutError:
+            outcome = LogOutcome("retry", "log_deadline_exceeded")
+        except Exception as error:
+            # Crash-equivalent: the lease expires and the claim is retried as a new attempt.
+            self._count(summary, "logs_crashed")
+            logger.error(
+                "workflow_logs_interrupted",
+                pipeline_id=pipeline_id,
+                error_type=type(error).__name__,
+            )
+            return
+        await self._finish_logs(pipeline_id, attempt, outcome, context)
+        self._count(summary, f"logs_{outcome.status}")
+
+    async def _finish_logs(
+        self,
+        pipeline_id: str,
+        attempt: int,
+        outcome: LogOutcome,
+        context: FailureContext | None,
+    ) -> None:
+        failure_context_json = None
+        next_attempt_at = None
+        status = log_jobs.UNAVAILABLE
+        if outcome.status == "extracted" and context is not None and outcome.signal is not None:
+            status = log_jobs.EXTRACTED
+            failure_context_json = context.model_copy(
+                update={
+                    "signal": outcome.signal,
+                    "raw_log_excerpt": outcome.signal.extracted_snippet,
+                }
+            ).model_dump_json()
+        elif outcome.status == "retry":
+            status = log_jobs.PENDING
+            next_attempt_at = classify_retry(
+                outcome.headers,
+                attempt,
+                now=self._now(),
+                base_delay=self._config.base_delay_seconds,
+                max_delay=self._config.max_delay_seconds,
+                provider_ceiling=self._config.provider_ceiling_seconds,
+                random_value=self._random,
+            ).next_retry_at
+        async with self._sessions() as session:
+            async with session.begin():
+                await log_jobs.complete(
+                    session,
+                    pipeline_id,
+                    attempt,
+                    status=status,
+                    code=outcome.code,
+                    failure_context_json=failure_context_json,
+                    next_attempt_at=next_attempt_at,
+                )
+        logger.info(
+            "workflow_logs_recorded", pipeline_id=pipeline_id, status=status, code=outcome.code
+        )
 
     async def _release_unstarted(self, claims: list[tuple[str, int]], summary: TickSummary) -> None:
         for delivery_id, attempt in claims:

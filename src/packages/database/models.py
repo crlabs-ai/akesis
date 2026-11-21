@@ -329,6 +329,18 @@ class PipelineModel(Base):
         nullable=True,
         doc="Durable JSON serialization of FailureContext",
     )
+    # Workflow log retrieval (Phase 1.10): pending -> fetching -> extracted | unavailable.
+    # While fetching, log_next_attempt_at is the claim lease; otherwise it is the next retry time.
+    log_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default="pending"
+    )
+    log_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    log_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    log_failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     proposal_json: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,

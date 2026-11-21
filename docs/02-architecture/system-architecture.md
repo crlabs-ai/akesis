@@ -77,8 +77,8 @@ graph TD
 ## 2. Core Subsystems & Components
 
 ### 2.1 Ingestion & Diagnostic Pipeline
-1. **Webhook Gateway (`src/apps/api/routes.py`):** Ingests `workflow_run` events, verifies HMAC-SHA256 signatures, and acknowledges immediately.
-2. **Log Parser (`src/packages/shared/log_parser.py`):** Strips ANSI formatting and extracts structured `FailureSignal` (category, error type, target file, stack frames).
+1. **Webhook Gateway (`src/apps/api/routes.py`):** Ingests `workflow_run` events, verifies HMAC-SHA256 signatures and provenance, and persists the verified incident with an empty `FailureSignal` (log status `pending`).
+2. **Workflow Log Stage (retry worker, `src/packages/shared/workflow_logs.py`):** Claims pending pipelines, re-verifies their persisted provenance (database only), downloads the verified run attempt's log archive with an `actions:read` installation token (`src/packages/sdk/github_actions_logs.py`), and stores a redacted, bounded `FailureSignal` produced by the Log Parser (`src/packages/shared/log_parser.py`). Outcomes: `extracted`, or `unavailable` with a stable code; transient failures retry with backoff up to `LOG_RETRIEVAL_MAX_ATTEMPTS`.
 3. **Diagnostic Engine (`src/packages/shared/diagnostic_service.py`):** Uses structured JSON generation with Gemini to produce evidence-backed `DiagnosisProposal`.
 4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Reads a verified, private snapshot of the exact failing commit (ADR-0011) and extracts bounded `CodeEvidence`.
 

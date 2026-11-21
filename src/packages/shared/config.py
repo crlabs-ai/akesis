@@ -141,6 +141,20 @@ class Settings(BaseSettings):
         ge=1,
         description="Lifetime of a prepared snapshot handle before it must be re-prepared",
     )
+    # Workflow log retrieval (Phase 1.10). The archive is untrusted input: every limit fails closed.
+    log_retrieval_max_attempts: int = Field(default=5, ge=1, le=50)
+    log_retrieval_deadline_seconds: float = Field(default=120.0, gt=0, le=540)
+    log_retrieval_lease_seconds: int = Field(default=600, ge=60, le=3600)
+    log_archive_max_compressed_bytes: int = Field(default=20_000_000, ge=1)
+    log_archive_max_entries: int = Field(default=500, ge=1)
+    log_archive_max_uncompressed_bytes: int = Field(default=100_000_000, ge=1)
+    log_archive_max_file_bytes: int = Field(default=20_000_000, ge=1)
+    log_archive_max_compression_ratio: int = Field(default=100, ge=1)
+    log_parse_max_chars: int = Field(default=2_000_000, ge=1000)
+    # Hosts GitHub redirects log downloads to. A redirect anywhere else is refused.
+    log_download_hosts: list[str] = Field(
+        default_factory=lambda: ["actions.githubusercontent.com", "blob.core.windows.net"]
+    )
     max_context_window_lines: int = Field(
         default=40,
         description="Maximum lines of source code extracted around target line",
@@ -228,6 +242,7 @@ class Settings(BaseSettings):
         "cors_allowed_headers",
         "trusted_hosts",
         "slack_approver_user_ids",
+        "log_download_hosts",
         mode="before",
     )
     @classmethod

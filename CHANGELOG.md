@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added (Phase 1.10: secure workflow log retrieval)
+* **Worker log stage.** Verified incidents are persisted with `log_status = pending` (migration `0008_pipeline_log_retrieval`). The retry worker claims them, re-verifies persisted provenance in PostgreSQL before any network request, retrieves the exact run attempt's logs, and stores a `FailureSignal` (category, error, file and line, frames, job and step, bounded excerpt). Outcomes are `extracted` or `unavailable` with a stable code; transient failures retry with backoff up to `LOG_RETRIEVAL_MAX_ATTEMPTS`, and crashed claims are recovered after their lease.
+* **Least-privilege access.** A GitHub App installation token scoped to the event repository with `actions:read` and `metadata:read`. The run attempt must match the verified identity.
+* **Signed-URL safety.** The redirect is not followed automatically. The URL must be HTTPS on port 443, credential-free, on an allowed host (`LOG_DOWNLOAD_HOSTS`) and resolve to public addresses; it is downloaded without an Authorization header, proxies or `.netrc`, with no further redirect, strict timeouts and a streaming size cap, and is never logged.
+* **Untrusted archives.** Read in memory under entry, uncompressed size, per-file and compression-ratio limits; links, devices, encrypted entries and unsafe paths are rejected. Secrets are redacted.
+* **Prompt hardening.** Log-derived fields go to Gemini only inside a random-id `untrusted_ci_log` block, separate from verified metadata, with code fences neutralized. `FailureSignal` gains optional `job_name` and `step_name`.
+
 ### Changed (Phase 1.9: one verified snapshot per incident)
 * **Context is resolved once per incident.** The orchestrator resolves evidence before diagnosis and passes the same package to `diagnose_failure` and fix synthesis, halving snapshot acquisitions (and GitHub API requests) for context. `DiagnosticService` rejects supplied evidence that does not match the incident, commit and repository (`ProvenanceRejected`, code `binding`) and still resolves context itself only when none is supplied.
 

@@ -11,7 +11,13 @@ import signal
 from src.packages.database.session import get_session_factory
 from src.packages.shared.config import settings
 from src.packages.shared.logging import configure_logging, get_logger
-from src.packages.shared.webhook_worker import HeartbeatFile, RetryWorker, WorkerConfig
+from src.packages.shared.webhook_worker import (
+    HeartbeatFile,
+    LogRetrievalConfig,
+    RetryWorker,
+    WorkerConfig,
+)
+from src.packages.shared.workflow_logs import LogLimits
 
 logger = get_logger("akesis.worker")
 
@@ -29,6 +35,12 @@ def build_config() -> WorkerConfig:
         github_api_url=settings.github_api_url,
         github_app_id=settings.github_app_id,
         github_app_private_key=settings.github_app_private_key,
+        log_retrieval=LogRetrievalConfig(
+            max_attempts=settings.log_retrieval_max_attempts,
+            deadline_seconds=settings.log_retrieval_deadline_seconds,
+            lease_seconds=settings.log_retrieval_lease_seconds,
+            limits=LogLimits.from_settings(),
+        ),
     )
 
 

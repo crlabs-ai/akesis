@@ -68,6 +68,8 @@ class FailureSignal(BaseModel):
         default_factory=list,
         description="Parsed stack trace frames if available",
     )
+    job_name: str | None = Field(default=None, description="Workflow job the evidence came from")
+    step_name: str | None = Field(default=None, description="Workflow step the evidence came from")
 
 
 class WorkflowRunEvent(BaseModel):
