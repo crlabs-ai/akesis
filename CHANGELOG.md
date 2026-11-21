@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Security (bounded-time log parser)
+* **Six quadratic parser patterns replaced.** In `log_parser.py`, the traceback, frame, pytest-failure, pytest line-reference, ruff and mypy regexes backtracked quadratically on hostile logs (repeated traceback headers: 0.45s at 20k characters, 7.2s at 80k; one long path-like run: 13s at 80k). Each is now a linear scanner that returns exactly what the former regex returned: the same leftmost match, groups and backtracking choice. This is verified differentially against the former parser on 120,000 template-generated cases, real fixtures and edge cases. At the 2M parse limit the worst hostile shape now takes about 0.4s.
+* **Oversized line numbers fail closed.** A digit run that `int()` refuses (over 4,300 digits) used to raise `ValueError` out of the parser and fail the whole retrieval. It is now treated as no match.
+* The ANSI, `ModuleNotFoundError` and pip patterns were already linear and are unchanged.
+
 ### Added (Phase 1.10: secure workflow log retrieval)
 * **Worker log stage.** Verified incidents are persisted with `log_status = pending` (migration `0008_pipeline_log_retrieval`). The retry worker claims them, re-verifies persisted provenance in PostgreSQL before any network request, retrieves the exact run attempt's logs, and stores a `FailureSignal` (category, error, file and line, frames, job and step, bounded excerpt). Outcomes are `extracted` or `unavailable` with a stable code; transient failures retry with backoff up to `LOG_RETRIEVAL_MAX_ATTEMPTS`, and crashed claims are recovered after their lease.
 * **Least-privilege access.** A GitHub App installation token scoped to the event repository with `actions:read` and `metadata:read`. The run attempt must match the verified identity.
