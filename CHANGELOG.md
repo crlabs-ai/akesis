@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Security (bounded-time log parser)
 * **Six quadratic parser patterns replaced.** In `log_parser.py`, the traceback, frame, pytest-failure, pytest line-reference, ruff and mypy regexes backtracked quadratically on hostile logs (repeated traceback headers: 0.45s at 20k characters, 7.2s at 80k; one long path-like run: 13s at 80k). Each is now a linear scanner that returns exactly what the former regex returned: the same leftmost match, groups and backtracking choice. This is verified differentially against the former parser on 120,000 template-generated cases, real fixtures and edge cases. At the 2M parse limit the worst hostile shape now takes about 0.4s.
+* **Frame scan follow-up.** On one newline-free line after a traceback header, each frame candidate searched to the end of the text for a newline that never came, which was quadratic at memchr speed (1.3s at the 2M limit, invisible below about 100k characters). The search now runs only when a newline exists ahead, and a match then consumes through it (0.13s at 2M).
 * **Oversized line numbers fail closed.** A digit run that `int()` refuses (over 4,300 digits) used to raise `ValueError` out of the parser and fail the whole retrieval. It is now treated as no match.
 * The ANSI, `ModuleNotFoundError` and pip patterns were already linear and are unchanged.
 

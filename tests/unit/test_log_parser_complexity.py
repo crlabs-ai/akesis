@@ -356,6 +356,37 @@ def test_maximum_parse_size_is_bounded(unit: str) -> None:
     assert time.perf_counter() - started < 10.0  # generous; well under a second in practice
 
 
+NEWLINE_FREE_FRAMES = [
+    'File "a", line 1, in f ',
+    'File "a", line 1, in  ',
+    'File "a", line 1, in\t',
+]
+
+
+@pytest.mark.parametrize("unit", NEWLINE_FREE_FRAMES)
+def test_frame_candidates_after_a_header_with_no_newline_left_are_linear(unit: str) -> None:
+    # Every candidate needs a newline that never comes. A per-candidate search for it was
+    # quadratic, but at memchr speed: invisible below ~100k characters, 1.3s at the 2M limit.
+    small_text = HEADER + _repeat(unit, 3_000)
+    assert list(log_parser._iter_frames(small_text)) == _old_frames(small_text)
+
+    def best(size: int) -> float:
+        text = HEADER + _repeat(unit, size)
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            list(log_parser._iter_frames(text))
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    small, large = best(250_000), best(1_000_000)
+    assert large < max(small, 0.0005) * 8  # linear ~4x; the per-candidate search was ~11x
+    text = HEADER + _repeat(unit, MAX_PARSE_CHARS) + "\nValueError: x"
+    started = time.perf_counter()
+    filter_and_extract_signal(text)
+    assert time.perf_counter() - started < 5.0
+
+
 def _long_frame_log(scale: int) -> tuple[str, str]:
     path = "src/" + "d/" * scale + "m.py"
     text = HEADER + f'  File "{path}", line 4, in ' + "f" * (2 * scale) + "\n    "

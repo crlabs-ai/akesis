@@ -301,19 +301,22 @@ def _space_then_line(text: str, pos: int) -> tuple[int, int] | None:
     return start, len(text) if end == -1 else end
 
 
-def _space_then_line_then_newline(text: str, pos: int) -> tuple[int, int] | None:
+def _space_then_line_then_newline(text: str, pos: int, last_newline: int) -> tuple[int, int] | None:
     """`\\s+([^\\n]+)\\n` at `pos`: the span of the group; a newline follows it, or None.
 
     With a non-space character after the maximal whitespace run and a newline later, the group
     is that rest of the line. Otherwise only a newline inside the run can end the group, so the
     regex settles on the last non-newline character before the run's last newline.
+
+    `last_newline` is text.rfind("\\n"). The forward search runs only when it must find a
+    newline, and then this candidate matches through it; a search that would fail is skipped,
+    because repeating it for every later candidate on a newline-free line was quadratic.
     """
     space_end = _match_end(_SPACE, text, pos)
     if space_end == pos:
         return None
-    newline = text.find("\n", space_end)
-    if space_end < len(text) and newline != -1:
-        return space_end, newline
+    if space_end < len(text) and space_end < last_newline:
+        return space_end, text.find("\n", space_end)
     last = text.rfind("\n", pos, space_end)
     if last == -1:
         return None
@@ -356,9 +359,10 @@ def _iter_frames(text: str) -> Iterator[tuple[str, int, str | None, str | None]]
     The file runs to the first quote, which is at most the next candidate's own quote, so the
     file spans of different candidates never overlap.
     """
+    last_newline = text.rfind("\n")
     pos = text.find('File "')
     while pos != -1:
-        frame = _frame_at(text, pos)
+        frame = _frame_at(text, pos, last_newline)
         if frame is None:
             pos = text.find('File "', pos + 1)
             continue
@@ -367,7 +371,9 @@ def _iter_frames(text: str) -> Iterator[tuple[str, int, str | None, str | None]]
         pos = text.find('File "', end)
 
 
-def _frame_at(text: str, pos: int) -> tuple[tuple[str, int, str | None, str | None], int] | None:
+def _frame_at(
+    text: str, pos: int, last_newline: int
+) -> tuple[tuple[str, int, str | None, str | None], int] | None:
     file_start = pos + len('File "')
     quote = text.find('"', file_start)
     if quote <= file_start or not text.startswith('", line ', quote):
@@ -382,7 +388,7 @@ def _frame_at(text: str, pos: int) -> tuple[tuple[str, int, str | None, str | No
     if text.startswith(",", digits_end):
         in_pos = _match_end(_SPACE, text, digits_end + 1)
         if text.startswith("in", in_pos):
-            span = _space_then_line_then_newline(text, in_pos + 2)
+            span = _space_then_line_then_newline(text, in_pos + 2, last_newline)
             if span is not None:
                 func = text[span[0] : span[1]]
                 after = span[1] + 1
