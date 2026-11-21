@@ -397,7 +397,7 @@ async def test_the_remediation_hold_still_blocks_process_failure() -> None:
 
 
 def test_unterminated_private_keys_redact_with_bounded_work_per_header() -> None:
-    # Each header costs at most one 8 KiB body; complexity is tested in tests/unit/test_redaction.py
+    # The first unterminated header redacts the rest; complexity: tests/unit/test_redaction.py
     hostile = ("-----BEGIN PRIVATE KEY-----\n" + "A" * 50) * 2000
     started = time.perf_counter()
     cleaned = redact(hostile)

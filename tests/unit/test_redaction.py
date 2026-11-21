@@ -8,6 +8,7 @@ generous absolute bound at the 2M parse limit.
 import random
 import re
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -238,15 +239,81 @@ def test_multiple_formats_in_one_input_are_all_redacted() -> None:
     assert "postgres://[REDACTED]@db/x" in out and "DB_PASSWORD=[REDACTED]" in out
 
 
-def test_private_keys_terminated_unterminated_and_oversized() -> None:
-    body = "\n".join(["MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"] * 20)
-    paired = f"a -----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY----- b"
-    assert redact(paired) == f"a {REDACTED} b"
-    unterminated = redact(f"a -----BEGIN EC PRIVATE KEY-----\n{body}")
-    assert "MIIEv" not in unterminated and unterminated.startswith("a ")
-    # An END more than 8 KiB away does not pair; the header still redacts the next 8 KiB.
-    far = redact("-----BEGIN PRIVATE KEY-----" + "Q" * 9000 + "-----END PRIVATE KEY----- tail")
-    assert far.startswith(REDACTED) and "Q" * 900 not in far
+KEY_TYPES = ["", "RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED "]
+
+
+def _key_body(lines: int) -> str:
+    """Distinct base64-looking lines, so any surviving line is detectable."""
+    return "\n".join(f"MII{i:06d}Ev{'Q' * 50}AB{i:06d}" for i in range(lines))
+
+
+def _block(kind: str, body: str, end_kind: str | None = None) -> str:
+    end = kind if end_kind is None else end_kind
+    return f"-----BEGIN {kind}PRIVATE KEY-----\n{body}\n-----END {end}PRIVATE KEY-----"
+
+
+def _body_lines_left(out: str, body: str) -> int:
+    return sum(line in out for line in body.splitlines())
+
+
+@pytest.mark.parametrize("kind", KEY_TYPES)
+@pytest.mark.parametrize("lines", [1, 20, 200, 5_000], ids=["1 line", "20", "12 KiB", "5000 lines"])
+def test_terminated_private_key_blocks_are_redacted_whole(kind: str, lines: int) -> None:
+    body = _key_body(lines)
+    out = redact(f"before {_block(kind, body)} after")
+    assert out == f"before {REDACTED} after"
+    assert _body_lines_left(out, body) == 0
+
+
+@pytest.mark.parametrize("kind", KEY_TYPES)
+def test_unterminated_private_key_redacts_the_rest_of_the_input(kind: str) -> None:
+    body = _key_body(300)
+    out = redact(f"before -----BEGIN {kind}PRIVATE KEY-----\n{body}\nlater log text")
+    assert out == f"before {REDACTED}"
+
+
+def test_multiple_private_key_blocks_are_redacted_separately() -> None:
+    first, second, third = _key_body(5), _key_body(400), _key_body(3)
+    text = f"x {_block('', first)} y {_block('OPENSSH ', second)} z {_block('EC ', third)} w"
+    assert redact(text) == f"x {REDACTED} y {REDACTED} z {REDACTED} w"
+
+
+def test_an_end_marker_of_another_key_type_does_not_close_the_block() -> None:
+    body = _key_body(10)
+    # No END of the same type anywhere: the rest of the input is redacted.
+    lone = redact(f"a {_block('RSA ', body, end_kind='EC ')} tail")
+    assert lone == f"a {REDACTED}"
+    # A later END of the same type closes it; the foreign END is part of the block.
+    text = (
+        f"a {_block('RSA ', body, end_kind='EC ')}\nmore {body}\n-----END RSA PRIVATE KEY----- tail"
+    )
+    assert redact(text) == f"a {REDACTED} tail"
+
+
+def test_end_marker_without_begin_is_left_alone() -> None:
+    text = "log line -----END RSA PRIVATE KEY----- more"
+    assert redact(text) == text
+
+
+def test_private_key_scan_is_linear() -> None:
+    """Each END is examined once: by the block it closes, or skipped inside it."""
+    shapes: dict[str, Callable[[int], str]] = {
+        "many unmatched END markers": lambda n: (
+            "-----BEGIN RSA PRIVATE KEY-----\n" + _repeat("-----END EC PRIVATE KEY-----\n", n)
+        ),
+        "many small blocks": lambda n: _repeat(_block("EC ", "MII") + "\n", n),
+        "nested types": lambda n: (
+            _repeat("-----BEGIN DSA PRIVATE KEY-----\n", n // 2)
+            + _repeat("-----END DSA PRIVATE KEY-----\n", n // 2)
+        ),
+        "headers with long type runs": lambda n: _repeat("-----BEGIN " + "A " * 40 + "x", n),
+    }
+    for name, make in shapes.items():
+        small, large = _best(make(100_000)), _best(make(400_000))
+        assert large < max(small, 0.0005) * 10, name  # linear ~4x for 4x input
+        started = time.perf_counter()
+        redact(make(LIMITS.max_parse_chars))
+        assert time.perf_counter() - started < 5.0, name
 
 
 # ---- complexity ----------------------------------------------------------------------------------
@@ -350,6 +417,14 @@ SECRETS = {
     "key glued to a unicode letter": ("éDB_SECRET=Rt5Yu6Io7Pa8Sd9", "Rt5Yu6Io7Pa8Sd9"),
     "value with escaped quotes": ('API_KEY="Tu2 \\"Vw3\\" Xy4 Za5"', 'Tu2 \\"Vw3\\" Xy4 Za5'),
     "unterminated quoted value": ('API_TOKEN="Gh7 Jk8 Lm9 Np0 Qr1', "Gh7 Jk8 Lm9 Np0 Qr1"),
+    "private key over 8 KiB": (
+        _block("RSA ", "\n".join(["MIIEvQIBADANBgkqhkiG9w0B"] * 500)),
+        "MIIEvQIBADANBgkqhkiG9w0B",
+    ),
+    "unterminated private key": (
+        "-----BEGIN EC PRIVATE KEY-----\n" + "\n".join(["MHcCAQEEIBkg4LVWM9nuwNSk"] * 50),
+        "MHcCAQEEIBkg4LVWM9nuwNSk",
+    ),
 }
 # Growth a final pass can add: only a match that starts at the cut is new (see redact_tail).
 SLACK = len(REDACTED) - 1
@@ -432,9 +507,11 @@ STORAGE_SECRETS = {
     "unicode-glued key": SECRETS["key glued to a unicode letter"],
     "escaped quotes": SECRETS["value with escaped quotes"],
     "unterminated quoted value": SECRETS["unterminated quoted value"],
+    "private key over 8 KiB": SECRETS["private key over 8 KiB"],
+    "unterminated private key": SECRETS["unterminated private key"],
 }
-# An unclosed quote redacts the rest of the file, its neighbouring failure lines included.
-OVER_REDACTING = {"unterminated quoted value"}
+# An unclosed quote or private key redacts the rest of the file, failure lines included.
+OVER_REDACTING = {"unterminated quoted value", "unterminated private key"}
 
 
 def _log_cut_into(secret: str, into: int) -> str:

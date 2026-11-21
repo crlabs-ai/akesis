@@ -49,11 +49,11 @@ REDACTED = "[REDACTED]"
 # "idAKIA...", "éDB_SECRET=..."). Distinctive prefixes need no boundary at all. Two prefixes that
 # also occur inside ordinary words ("sk-" in "task-", "basic" in "nonbasic") must not follow an
 # ASCII letter or digit; "_" and Unicode letters still count as a boundary for them.
-_PRIVATE_KEY_BODY_MAX = 8192
 # Stored signal fields other than the message and the excerpt (paths, functions, code, names).
 MAX_FIELD_CHARS = 500
-_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-_KEY_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+# Group 1 is the key type ("RSA ", "EC ", ...); an END closes only a BEGIN of the same type.
+_KEY_BEGIN = re.compile(r"-----BEGIN ([A-Z ]*)PRIVATE KEY-----")
+_KEY_END = re.compile(r"-----END ([A-Z ]*)PRIVATE KEY-----")
 _TOKEN_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{20,}+|github_pat_[A-Za-z0-9_]{20,}+)"), REDACTED),
     # The whole [0-9A-Z] run: a key glued to more capitals is redacted with them (over-redaction).
@@ -117,27 +117,27 @@ class LogOutcome:
 
 
 def _redact_private_keys(text: str) -> str:
-    """BEGIN...END within 8 KiB, else the header and the next 8 KiB (over-redaction is safe).
+    """Each private-key block, BEGIN through the END marker of the same key type, at any length.
 
-    Linear: BEGIN searches resume after each redacted span, and the END search is cached and
-    only repeated once the scan has passed it, so each character is scanned O(1) times.
+    The END must name the same type as its BEGIN ("RSA ", "EC ", "OPENSSH ", "ENCRYPTED ", or
+    none); an END of another type inside the block is part of the block. With no matching END the
+    rest of the text is redacted: the block's end cannot be established, so over-redaction is the
+    safe failure.
+
+    Linear, one forward pass: a block's END scan starts at its body and stops at its matching END,
+    the next BEGIN search starts after that END, and a block with no matching END ends the pass.
+    No character is scanned twice.
     """
     parts: list[str] = []
     pos = 0
-    end: re.Match[str] | None = None
-    no_end_after = len(text) + 1  # no END starts at or after this index
     while (begin := _KEY_BEGIN.search(text, pos)) is not None:
-        body = begin.end()
-        if body < no_end_after and (end is None or end.start() < body):
-            end = _KEY_END.search(text, body)
-            if end is None:
-                no_end_after = body
-        if end is not None and end.start() >= body and end.start() - body <= _PRIVATE_KEY_BODY_MAX:
-            stop = end.end()
-        else:
-            stop = min(body + _PRIVATE_KEY_BODY_MAX, len(text))
         parts += (text[pos : begin.start()], REDACTED)
-        pos = stop
+        end = _KEY_END.search(text, begin.end())
+        while end is not None and end.group(1) != begin.group(1):
+            end = _KEY_END.search(text, end.end())
+        if end is None:
+            return "".join(parts)
+        pos = end.end()
     parts.append(text[pos:])
     return "".join(parts)
 
