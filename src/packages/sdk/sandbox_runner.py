@@ -150,12 +150,15 @@ class DockerSandboxRunner:
         memory_limit: str | None = None,
         cpu_limit: float | None = None,
         max_output_chars: int | None = None,
+        container_labels: tuple[str, ...] = (),
     ) -> None:
         self.image_name = image_name or settings.sandbox_image
         self.timeout_seconds = timeout_seconds or settings.sandbox_timeout_seconds
         self.memory_limit = memory_limit or settings.sandbox_memory_limit
         self.cpu_limit = cpu_limit or settings.sandbox_cpu_limit
         self.max_output_chars = max_output_chars or settings.sandbox_max_output_chars
+        # The validation executor labels its containers so its startup sweep removes only its own.
+        self.container_labels = container_labels
 
     async def run_validation(
         self,
@@ -194,13 +197,19 @@ class DockerSandboxRunner:
             raise SandboxWorkspaceError(f"Snapshot rejected: {err.code}") from None
         logger.info("sandbox_workspace_created", image=self.image_name, command=command)
         try:
-            if patch_diff and patch_diff.strip():
-                self._apply_patch_exact(workspace, patch_diff)
-            self._verify_docker_available()
-            return await self._execute_container(workspace, cmd_args, timeout)
+            return await self._run_in_workspace(workspace, patch_diff, cmd_args, timeout)
         finally:
             discard_workspace(workspace)
             logger.info("sandbox_workspace_destroyed")
+
+    async def _run_in_workspace(
+        self, workspace: Path, patch_diff: str, cmd_args: list[str], timeout: float
+    ) -> ValidationExecutionResult:
+        """Patch, check Docker, run. Shared by the local path and the validation executor."""
+        if patch_diff and patch_diff.strip():
+            self._apply_patch_exact(workspace, patch_diff)
+        self._verify_docker_available()
+        return await self._execute_container(workspace, cmd_args, timeout)
 
     def _apply_patch_exact(self, workspace_dir: Path, patch_diff: str) -> None:
         """Applies a unified diff verbatim. The patch file lives outside the mounted workspace."""
@@ -242,6 +251,7 @@ class DockerSandboxRunner:
             "--rm",
             "--name",
             container,
+            *(arg for label in self.container_labels for arg in ("--label", label)),
             "--network",
             "none",
             "--cap-drop",

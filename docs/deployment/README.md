@@ -176,6 +176,46 @@ sudo systemctl status akesis
 
 ---
 
+### Step 4b (optional, Phase 1.14a): Validation Executor
+
+Remote validation is off by default (`SANDBOX_EXECUTOR_URL` unset keeps local Docker validation). To run the executor on the same host, create a dedicated user that is the only one in the `docker` group and runs as UID 1000 (the container user), plus a working directory that contains no `.env`. Then create `/etc/systemd/system/akesis-executor.service`:
+
+```ini
+[Unit]
+Description=Akesis validation executor
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=akesis-exec
+Group=akesis-exec
+SupplementaryGroups=docker
+WorkingDirectory=/opt/akesis-exec
+# Only AKESIS_EXECUTOR_* values: never the application .env
+EnvironmentFile=/etc/akesis-exec/executor.env
+Environment=PYTHONPATH=/opt/akesis
+ExecStart=/opt/akesis/.venv/bin/python -m src.apps.executor
+RuntimeDirectory=akesis-exec
+RuntimeDirectoryMode=0750
+StateDirectory=akesis-exec
+StateDirectoryMode=0700
+ProtectSystem=strict
+NoNewPrivileges=yes
+Restart=always
+RestartSec=5s
+```
+
+`executor.env` sets:
+- `AKESIS_EXECUTOR_SOCKET_PATH=/run/akesis-exec/exec.sock`
+- `AKESIS_EXECUTOR_WORK_DIR=/var/lib/akesis-exec/work`
+- `AKESIS_EXECUTOR_ALLOWED_UIDS` to the caller's UID
+- the two keys (`AKESIS_EXECUTOR_REQUEST_KEY` and `AKESIS_EXECUTOR_RESPONSE_KEY`), each at least 32 random characters and different from each other
+
+The caller sets `SANDBOX_EXECUTOR_URL=unix:///run/akesis-exec/exec.sock` and the same two keys (`SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY`). The caller must be in the `akesis-exec` group to reach the 0660 socket.
+
+The executor refuses to start if its working directory has a `.env` or its environment holds any application credential. While the remediation hold is active it answers every job with a signed `rejected/held`. This phase does not change the API's own Docker access; that is Phase 1.14b.
+
 ### Step 4a: Configure the Retry Worker (systemd)
 
 The retry worker executes scheduled webhook verification retries. It is a separate process from the API and shares the same `.env` file and PostgreSQL database. Either process can be restarted independently. Create `/etc/systemd/system/akesis-worker.service`:

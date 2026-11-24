@@ -282,6 +282,22 @@ def verify_snapshot(snapshot: object) -> VerifiedSnapshot:
     return handle
 
 
+def export_snapshot(snapshot: object) -> tuple[VerifiedSnapshot, list[FileEntry], list[bytes]]:
+    """A live, fully re-verified snapshot's manifest and file contents, in manifest order.
+
+    Used to send the snapshot to the validation executor, which verifies every object ID again.
+    """
+    handle, record = _live_record(snapshot)
+    verify_base(record)
+    contents = []
+    for entry in record.manifest:
+        data = _read_nofollow(record.source_dir / entry.path)
+        if _blob_sha(data) != entry.blob_sha:
+            raise SnapshotRejected("Snapshot file was modified", code="modified")
+        contents.append(data)
+    return handle, list(record.manifest), contents
+
+
 def create_workspace(snapshot: object) -> Path:
     """Copy a verified snapshot into a fresh, separate, writable workspace for one validation."""
     _, record = _live_record(snapshot)

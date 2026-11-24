@@ -285,3 +285,30 @@ expiry is refused as `lease_lost` and not counted; a concurrent context change i
 `context_changed`; unavailable and exhausted logs reach the prompt with their reason code
 (`tests/integration/test_workflow_log_worker.py`, `tests/integration/test_diagnosis_evidence.py`,
 `tests/unit/test_prompt_builder.py`).
+
+## Implementation Status (Phase 1.14a)
+
+A separate validation executor (`python -m src.apps.executor`) is the only Docker client when
+`SANDBOX_EXECUTOR_URL` is set. Unset keeps the local runner, so default behaviour is unchanged. The
+protocol and its checks are in `docs/02-architecture/validation-executor.md`.
+
+* **The hold is unchanged and enforced on both sides.** `RemoteSandboxRunner.run_validation` checks
+  snapshot binding and then `require_verified_provenance()`, like the local runner. The executor
+  also checks the hold on every authenticated job and answers with a signed `rejected/held`, so even
+  a caller holding the request key cannot start a container. The real executor process was tested
+  to return `held`.
+* **Fail closed, no fallback.** In remote mode, every executor failure, rejection, bad signature or
+  mismatched echo becomes `INFRASTRUCTURE_ERROR`, and local Docker is never used.
+* **No application credentials in the executor.** A stdlib guard runs before `Settings` (and `.env`)
+  can load, and refuses to start on `.env`, `DATABASE_URL` or any application credential.
+* **Same-host transport:** a Unix socket (0660, owner-only directory), with the SO_PEERCRED caller
+  UID allowlist enforced when each connection is accepted. Verification is incomplete: a
+  genuinely different OS UID was not tested on this host (no root). The deny path was tested by
+  leaving the test's own UID out of the allowlist; a test with a real second user remains to be
+  done before production.
+* **Not changed in 1.14a:** the approval lifecycle; where `resume_approval` runs (the API); the API's
+  Docker group membership (Phase 1.14b); moving remediation execution into the worker (Phase
+  1.14c); a separate executor host (Phase 1.14d). The removal blocker in `security.md` about API
+  Docker access stays open until 1.14b.
+
+Tests: `tests/unit/test_validation_executor.py`, `tests/integration/test_docker_executor.py`.

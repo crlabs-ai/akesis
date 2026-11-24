@@ -166,6 +166,7 @@ async def test_docker_mounts_only_the_writable_workspace(
         assert options[options.index(flag) + 1] == value
     assert "--cpus=1.0" in options and "--rm" in options
     assert not any("docker.sock" in token or token == "--privileged" for token in argv)
+    assert "--label" not in options  # only the executor labels containers (Phase 1.14a)
 
 
 def test_truncate_output() -> None:

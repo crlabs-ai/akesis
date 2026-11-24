@@ -215,6 +215,15 @@ class Settings(BaseSettings):
         default="/tmp/akesis/sandbox",
         description="Base directory on host for ephemeral sandbox workspaces",
     )
+    # Phase 1.14a: remote validation executor. Empty keeps the local DockerSandboxRunner. When set,
+    # validation goes only to the executor and never falls back to local Docker.
+    sandbox_executor_url: str = Field(
+        default="",
+        description="unix:///absolute/path/to/executor.sock for the validation executor",
+    )
+    sandbox_executor_request_key: str = Field(default="", repr=False)
+    sandbox_executor_response_key: str = Field(default="", repr=False)
+    sandbox_executor_timeout_seconds: float = Field(default=120.0, gt=0, le=900)
 
     # Human-in-the-Loop & Slack Integration Settings
     slack_webhook_url: str = Field(
@@ -259,6 +268,22 @@ class Settings(BaseSettings):
                     pass
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @model_validator(mode="after")
+    def _validate_sandbox_executor(self) -> "Settings":
+        """Remote validation requires a Unix socket and two distinct, long signing keys."""
+        if not self.sandbox_executor_url:
+            return self
+        path = self.sandbox_executor_url.removeprefix("unix://")
+        if not self.sandbox_executor_url.startswith("unix:///") or "\0" in path:
+            raise ValueError("SANDBOX_EXECUTOR_URL must be unix:///absolute/path")
+        request_key = self.sandbox_executor_request_key
+        response_key = self.sandbox_executor_response_key
+        if len(request_key) < 32 or len(response_key) < 32:
+            raise ValueError("Sandbox executor request and response keys need 32+ characters")
+        if request_key == response_key:
+            raise ValueError("Sandbox executor request and response keys must differ")
+        return self
 
     @model_validator(mode="after")
     def _validate_production_configuration(self) -> "Settings":

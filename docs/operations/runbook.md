@@ -120,6 +120,26 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
 
 ---
 
+### Runbook 3a: Validation Executor (remote mode)
+* **Symptom:** validation shows `infrastructure_error` with "Validation executor ..." in `stderr`.
+* **Logs:**
+  - caller: `validation_executor_unreachable`, `validation_executor_response_unsigned`, `validation_executor_response_mismatch`
+  - executor: `executor_job_rejected` (with `code`), `executor_peer_refused` (with `peer_uid`)
+* **Reject codes:**
+
+  | Code | Meaning |
+  | :--- | :--- |
+  | `held` | The remediation hold is active. Expected; no action. |
+  | `auth` | Key mismatch or clock skew over 60 s. |
+  | `stale` | The job was issued before the executor restarted. Retry. |
+  | `replay` | The job ID was reused. |
+  | `busy` | Concurrency limit reached. |
+  | `integrity`, `path`, `patch`, `limits`, `schema` | The job failed verification. Investigate the caller; never relax the executor. |
+
+* **Health:** `curl --unix-socket /run/akesis-exec/exec.sock http://e/healthz` returns `{"status":"ok"}`, or `{"status":"unavailable"}` when Docker or the image is missing.
+* **Startup refusals:** "A .env file exists" or "Application credentials are set" means the unit's working directory or environment is wrong. Remove the file or variable. Do not bypass the guard.
+* **Never** set the executor to fall back to local Docker. Remote mode fails closed by design.
+
 ### Runbook 4: Slack Interaction Signature or Replay Failures
 
 * **Symptom:** Reviewer clicks "Approve & Open PR" in Slack, but card displays an error or endpoint returns HTTP 401.

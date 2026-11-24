@@ -1,7 +1,7 @@
 import time
 
+from src.packages.sdk.remote_sandbox_runner import default_sandbox_runner
 from src.packages.sdk.sandbox_runner import (
-    DockerSandboxRunner,
     DockerUnavailableError,
     PatchApplicationError,
     SandboxRunnerProtocol,
@@ -34,7 +34,8 @@ class ValidationService:
         sandbox_runner: SandboxRunnerProtocol | None = None,
         snapshot_service: SnapshotPreparer | None = None,
     ) -> None:
-        self.sandbox_runner = sandbox_runner or DockerSandboxRunner()
+        # Remote executor when SANDBOX_EXECUTOR_URL is set (no local Docker), else local Docker.
+        self.sandbox_runner = sandbox_runner or default_sandbox_runner()
         self.snapshot_service = snapshot_service or SnapshotService()
 
     def select_validation_command(self, context: FailureContext) -> ValidationCommand | None:
