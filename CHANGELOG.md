@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Security (Phase 1.13: read-only sandbox root filesystem)
+* **Read-only root.** Validation containers run with `--read-only`. The only writable paths are the per-run workspace at `/workspace` and a `/tmp` tmpfs (`rw,exec,nosuid,nodev,size=64m,mode=1777`), private to each container and counted against the memory limit. Without the tmpfs, Python's `tempfile` falls back to the working directory, so pytest temp files would have landed in the workspace on host disk. `/tmp` allows exec because the workspace is already executable; `noexec` would add no barrier and would fail tests that run scripts they wrote.
+* **Cleanup on any error.** Any exception after the container starts, not only a timeout or cancellation, now force-removes it. Before, an unexpected client error left the container running until its command ended.
+* **Tested on the real image.** All allowlisted commands pass on `akesis-validator:v1` under the new flags. Docker tests cover root writes, permitted writes, tmpfs bounds, network denial, uid, capabilities, no-new-privileges, memory and PID exhaustion, timeout, cancellation, unexpected errors and concurrent isolation. Existing restrictions are unchanged. Resolves ADR-0010 removal blocker 3.
+
 ### Fixed (Phase 1.12: workflow worker reliability)
 * **Refused writes are no longer reported as recorded (L1).** `log_jobs.complete` returns `recorded`, `lease_lost` or `context_changed`. Outcome counters (`logs_extracted`, `logs_retry`, `logs_unavailable`, `logs_rejected`) and `workflow_logs_recorded` now appear only for a stored result. A refusal counts `logs_lease_lost` or `logs_context_changed` and logs `workflow_logs_write_refused` with the reason. Guards and retry behaviour are unchanged.
 * **Gemini is told when logs are unavailable (L2).** Diagnosis receives `log_evidence` (`retrieved`, or `unavailable` with a bounded reason code such as `log_retrieval_exhausted`), read from the pipeline row and never persisted. With unavailable logs the prompt states the reason, says this is not a run without an identifiable failure, and omits the empty log block. No log evidence is invented, and `pending`/`fetching` still block diagnosis.

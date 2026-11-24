@@ -153,6 +153,19 @@ async def test_docker_mounts_only_the_writable_workspace(
     assert base_text not in " ".join(argv)  # the immutable base is never mounted
     assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
     assert "--cap-drop" in argv and argv[argv.index("--cap-drop") + 1] == "ALL"
+    # Read-only root; the only other writable path is one bounded tmpfs (Phase 1.13).
+    assert "--read-only" in options
+    tmpfs = [options[index + 1] for index, token in enumerate(options) if token == "--tmpfs"]
+    assert tmpfs == ["/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777"]
+    for flag, value in (
+        ("--security-opt", "no-new-privileges"),
+        ("--user", "1000:1000"),
+        ("--pids-limit", "256"),
+        ("--memory", "512m"),
+    ):
+        assert options[options.index(flag) + 1] == value
+    assert "--cpus=1.0" in options and "--rm" in options
+    assert not any("docker.sock" in token or token == "--privileged" for token in argv)
 
 
 def test_truncate_output() -> None:

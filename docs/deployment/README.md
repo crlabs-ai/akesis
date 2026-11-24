@@ -131,6 +131,8 @@ Verify the image is present:
 docker images | grep akesis-validator
 ```
 
+Validation containers run with a read-only root filesystem and a 64 MiB `/tmp` tmpfs (Phase 1.13), plus `--network none`, `--cap-drop ALL`, `no-new-privileges`, uid 1000, `--pids-limit 256` and the configured memory and CPU limits. The tmpfs counts against `SANDBOX_MEMORY_LIMIT`. Run the Docker tests against the built image to confirm compatibility on a new host: `uv run pytest -m docker tests/integration/test_docker_sandbox.py`.
+
 ---
 
 ### Step 3: Install Dependencies

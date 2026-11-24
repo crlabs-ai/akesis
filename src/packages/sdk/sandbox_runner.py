@@ -19,6 +19,14 @@ from src.packages.shared.source_snapshot import (
 
 logger = get_logger("akesis.sandbox_runner")
 
+# The only writable paths are the per-run workspace bind mount and this tmpfs; the root filesystem
+# is read-only. Without it, Python's tempfile falls back to the working directory, so pytest's
+# tmp_path would land in the workspace on host disk. It is bounded and counts against --memory.
+# exec is allowed: the workspace is already writable and executable and pytest runs repository
+# code, so noexec here would only fail legitimate tests that run a script they wrote.
+# ponytail: fixed 64 MiB; make it a setting if a real test suite needs more.
+SANDBOX_TMPFS = "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777"
+
 COMMAND_INVOCATION_MAP: dict[ValidationCommand, list[str]] = {
     ValidationCommand.PYTEST: ["pytest", "-v"],
     ValidationCommand.RUFF: ["ruff", "check", "."],
@@ -224,7 +232,7 @@ class DockerSandboxRunner:
         cmd_args: list[str],
         timeout: float,
     ) -> ValidationExecutionResult:
-        """Runs an isolated container. Timeout or cancellation force-removes it by name."""
+        """Runs an isolated container. Timeout, cancellation or any error force-removes it."""
         start_time = time.perf_counter()
         container = f"akesis-val-{uuid.uuid4().hex[:16]}"
 
@@ -240,6 +248,9 @@ class DockerSandboxRunner:
             "ALL",
             "--security-opt",
             "no-new-privileges",
+            "--read-only",
+            "--tmpfs",
+            SANDBOX_TMPFS,
             "--user",
             "1000:1000",
             "--pids-limit",
@@ -266,7 +277,8 @@ class DockerSandboxRunner:
         except TimeoutError:
             await self._stop_container(proc, container)
             raise SandboxTimeoutError(f"Sandbox execution timed out after {timeout}s") from None
-        except asyncio.CancelledError:
+        except BaseException:
+            # Cancellation or any other failure: never leave the container running.
             await self._stop_container(proc, container)
             raise
 
