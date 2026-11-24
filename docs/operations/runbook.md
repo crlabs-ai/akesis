@@ -99,11 +99,11 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
 * **Symptom:** Sandbox validation returns `status: "infrastructure_error"` or `DockerUnavailableError`.
 * **Root Causes:**
   1. Docker daemon is stopped, crashed, or unreachable at `/var/run/docker.sock`.
-  2. The `akesis` application user lacks permissions to communicate with the Docker socket (`dial unix /var/run/docker.sock: permission denied`).
+  2. The validation executor is down, or the API cannot reach its socket (`infrastructure_error`, "Validation executor unavailable"; see Runbook 3a). The API user `akesis` is deliberately **not** in the `docker` group (Phase 1.14b). A `permission denied` on `/var/run/docker.sock` from the API is expected and correct.
   3. Validator image `akesis-validator:v1` has not been built on the host.
 * **Resolution Steps:**
   1. Check Docker daemon status: `sudo systemctl status docker`.
-  2. Check socket permissions: `sudo usermod -aG docker akesis`.
+  2. Check the executor, not the API: `sudo systemctl status akesis-executor` and `id -nG akesis-exec` (must include `docker`). **Never** add `akesis` to the `docker` group; that gives the public-facing API root on the host.
   3. Verify validator image exists: `docker images | grep akesis-validator`.
   4. If missing, rebuild validator image:
      ```bash

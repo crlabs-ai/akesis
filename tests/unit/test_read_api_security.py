@@ -280,6 +280,9 @@ def test_production_config_valid() -> None:
         slack_approver_user_ids=["U_TEST"],
         slack_workspace_id="T_TEST",
         slack_channel_id="C_TEST",
+        sandbox_executor_url="unix:///run/akesis-exec/exec.sock",
+        sandbox_executor_request_key="q" * 40,
+        sandbox_executor_response_key="r" * 40,
     )
     assert prod_settings.environment == "production"
     assert prod_settings.read_api_token == "prod_read_token_distinct_987654"
@@ -301,6 +304,9 @@ def _valid_production(**overrides: object) -> dict[str, object]:
         "slack_approver_user_ids": ["U_TEST"],
         "slack_workspace_id": "T_TEST",
         "slack_channel_id": "C_TEST",
+        "sandbox_executor_url": "unix:///run/akesis-exec/exec.sock",
+        "sandbox_executor_request_key": "q" * 40,
+        "sandbox_executor_response_key": "r" * 40,
     }
     values.update(overrides)
     return values

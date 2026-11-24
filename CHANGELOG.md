@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Security (Phase 1.14b: no Docker access for the API)
+* **Production requires the executor.** Production `Settings` refuses to load without `SANDBOX_EXECUTOR_URL`. In production, `DockerSandboxRunner` refuses construction, and refuses again before any Docker subprocess, unless it was built by the validation executor (`executor=True`). A real API startup subprocess with full synthetic production configuration fails without the executor URL. With it, every runner is remote and no subprocess starts.
+* **Deployment.** The API unit no longer requires `docker.service` and joins only `akesis-exec`, to reach the 0660 executor socket. Only `akesis-exec` is in the `docker` group, and the runbook no longer adds `akesis` to it. Tests check the documented units and docs.
+* **Different-UID verification.** Without root, a subordinate UID from a user namespace is refused by the 0660 socket and, with the socket opened in the test only, by SO_PEERCRED, against the real executor process. A real second system user in the socket group, and the systemd units at runtime, could not be tested on this host.
+* The approval lifecycle is unchanged: approval resumption, and so the executor keys, stay in the API until Phase 1.14c. The hold is unchanged.
+
 ### Security (Phase 1.14a: signed remote validation executor)
 * **Executor process.** `python -m src.apps.executor` runs validation behind one signed endpoint, and when `SANDBOX_EXECUTOR_URL` is set it is the only Docker client. `RemoteSandboxRunner` implements `SandboxRunnerProtocol` and is injected through `ValidationService`. Leaving the URL unset keeps local validation unchanged.
 * **Authentication.** Requests are signed with HMAC-SHA256 under a request key. Responses are signed under a separate response key and bound to the request signature. There are timestamp, expiry (300 s maximum), job-ID replay and process-start checks.

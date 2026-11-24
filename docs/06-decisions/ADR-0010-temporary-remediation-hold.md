@@ -312,3 +312,22 @@ protocol and its checks are in `docs/02-architecture/validation-executor.md`.
   Docker access stays open until 1.14b.
 
 Tests: `tests/unit/test_validation_executor.py`, `tests/integration/test_docker_executor.py`.
+
+## Implementation Status (Phase 1.14b)
+
+Docker daemon access is removed from the API.
+
+* Production `Settings` refuses to load without `SANDBOX_EXECUTOR_URL`.
+* In production, `DockerSandboxRunner` refuses construction, and refuses again before any Docker
+  subprocess, unless it was built by the executor (`executor=True`). An API or worker process
+  therefore cannot run Docker, even through a direct construction.
+* Deployment: the API unit no longer requires `docker.service` and joins only `akesis-exec`, to
+  reach the 0660 executor socket. Only `akesis-exec` is in the `docker` group, and the runbook no
+  longer adds `akesis` to it. Remote failures still fail closed with no fallback.
+* Approval resumption still runs in the API (Phase 1.14c is not implemented), so the API remains
+  the executor's caller and holds its keys.
+* A genuinely different UID was tested without root: a subordinate UID (host 100001, from a user
+  namespace) is refused by the 0660 socket's file permissions, and, with the socket temporarily
+  opened in the test, by the SO_PEERCRED allowlist. Still not verifiable here without root: a real
+  second system user in the socket's group, the systemd units themselves, and
+  `SupplementaryGroups`.

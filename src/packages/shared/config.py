@@ -360,6 +360,14 @@ class Settings(BaseSettings):
         elif any(host == "*" or "*" in host for host in self.trusted_hosts):
             errors.append("TRUSTED_HOSTS must not contain wildcard '*' in production.")
 
+        # Phase 1.14b: the API and worker never run Docker in production; validation goes only to
+        # the separate validation executor over its Unix socket.
+        if not self.sandbox_executor_url:
+            errors.append(
+                "SANDBOX_EXECUTOR_URL is required in production: validation must run in the "
+                "validation executor, never through local Docker."
+            )
+
         # Read API Token distinctness check
         if not self.read_api_token.strip():
             errors.append("READ_API_TOKEN is required in production.")

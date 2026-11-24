@@ -41,7 +41,7 @@ This document specifies the integration protocols, authentication methods, and p
 
 ## 4. Container Runtime (Docker Engine)
 
-* **Protocol:** Unix Socket (`/var/run/docker.sock`) via asynchronous process execution.
+* **Protocol:** Unix Socket (`/var/run/docker.sock`) via asynchronous process execution, used only by the validation executor process (Phase 1.14a/b). The API reaches the executor, never Docker; see `docs/02-architecture/validation-executor.md`.
 * **Image:** Dedicated validator environment `akesis-validator:v1` built from `docker/Dockerfile.validator` based on `python:3.12-slim`.
 * **Containment Flags:**
   * `--network none` (Network access disabled by default)

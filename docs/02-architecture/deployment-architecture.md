@@ -25,8 +25,9 @@ Akesis V1 deploys as a cohesive, single-host control-plane service designed to b
        ├──► [PostgreSQL 16 Database (Port 5432/5436)]
        │    └── approvals & mutations tables
        │
-       ├──► [Local Docker Daemon (/var/run/docker.sock)]
-       │    └── akesis-validator:v1 ephemeral containers
+       ├──► [Validation Executor (Unix socket /run/akesis-exec/exec.sock, 0660, SO_PEERCRED)]
+       │    └── only Docker client (user akesis-exec, docker group)
+       │         └── akesis-validator:v1 ephemeral containers
        │
        └──► [Outbound HTTPS Integrations (TLS 1.3)]
             ├── Google Gemini REST API

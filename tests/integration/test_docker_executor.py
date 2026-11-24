@@ -8,10 +8,12 @@ Unix socket proves the entrypoint, the credential guard, SO_PEERCRED and the sig
 import asyncio
 import os
 import re
+import shutil
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -464,3 +466,106 @@ def test_real_executor_refuses_credentials_before_importing_settings(
     assert "synthetic" not in stderr  # values are never echoed
     assert "src.packages.shared.config" not in stderr  # refused before Settings was imported
     assert not sock.exists()
+
+
+# --- Phase 1.14b: a genuinely different kernel UID (no root needed) ---------------------------
+
+_SUBUID_CLIENT = """
+import socket, sys
+c = socket.socket(socket.AF_UNIX)
+try:
+    c.connect(sys.argv[1])
+except OSError as error:
+    print("CONNECT_DENIED", error.errno)
+    raise SystemExit
+c.settimeout(5)
+try:
+    c.sendall(b"GET /healthz HTTP/1.1\\r\\nHost: e\\r\\nConnection: close\\r\\n\\r\\n")
+    data = c.recv(4096)
+except OSError:
+    data = b""
+print("RESPONSE " + data.split(b"\\r\\n")[0].decode() if data else "CLOSED")
+"""
+
+
+def _subordinate_uid() -> int | None:
+    """Host UID that namespace UID 1 maps to under `unshare --map-auto`, if the host allows it."""
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True, check=False).stdout.strip()
+    try:
+        line = next(
+            entry
+            for entry in Path("/etc/subuid").read_text().splitlines()
+            if entry.split(":")[0] == user
+        )
+    except (OSError, StopIteration):
+        return None
+    probe = subprocess.run(
+        [
+            "unshare",
+            "--user",
+            "--map-auto",
+            "--setuid",
+            "1",
+            "--setgid",
+            "1",
+            "/usr/bin/python3",
+            "-c",
+            "print(1)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return int(line.split(":")[1]) + 1 if probe.returncode == 0 else None
+
+
+def _client(sock: Path, *, as_other_uid: bool) -> str:
+    prefix = ["unshare", "--user", "--map-auto", "--setuid", "1", "--setgid", "1"]
+    command = [
+        *(prefix if as_other_uid else []),
+        "/usr/bin/python3",
+        "-c",
+        _SUBUID_CLIENT,
+        str(sock),
+    ]
+    return subprocess.run(command, capture_output=True, text=True, timeout=30, check=False).stdout
+
+
+@pytest.mark.asyncio
+async def test_a_different_kernel_uid_is_refused_by_permissions_and_by_so_peercred(
+    tmp_path: Path,
+) -> None:
+    other_uid = _subordinate_uid()
+    if other_uid is None:
+        pytest.skip("host provides no subordinate UID range or unprivileged user namespaces")
+    # The other UID must be able to traverse to the socket, so it lives in a fresh 0755 directory
+    # under /tmp rather than in the 0700 pytest tree. The executor requires it to be owned by us
+    # and not writable by anyone else.
+    base = Path(tempfile.mkdtemp(prefix="akesis-uid-", dir="/tmp"))
+    try:
+        os.chmod(base, 0o755)
+        env, cwd, _ = _executor_env(tmp_path)
+        sock = base / "exec.sock"
+        env["AKESIS_EXECUTOR_SOCKET_PATH"] = str(sock)
+        process = _start(env, cwd)
+        try:
+            deadline = time.monotonic() + 30
+            while "RESPONSE" not in _client(sock, as_other_uid=False):
+                assert process.poll() is None, process.communicate()[1]
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.2)
+
+            # Layer 1, production mode 0660: the other UID cannot even connect.
+            assert stat.S_IMODE(os.lstat(sock).st_mode) == 0o660
+            assert _client(sock, as_other_uid=True).split() == ["CONNECT_DENIED", "13"]
+
+            # Layer 2: with the file permission opened (test only), SO_PEERCRED still refuses it.
+            os.chmod(sock, 0o666)
+            assert _client(sock, as_other_uid=True).strip() == "CLOSED"
+            assert _client(sock, as_other_uid=False).startswith("RESPONSE HTTP/1.1 200")
+        finally:
+            process.terminate()
+            out, _ = process.communicate(timeout=10)
+        assert "executor_peer_refused" in out and str(other_uid) in out
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

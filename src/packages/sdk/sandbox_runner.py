@@ -27,6 +27,16 @@ logger = get_logger("akesis.sandbox_runner")
 # ponytail: fixed 64 MiB; make it a setting if a real test suite needs more.
 SANDBOX_TMPFS = "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777"
 
+# Containers started by the validation executor carry this label; its startup sweep removes only
+# these. The local runner does not label its containers.
+EXECUTOR_LABEL = "akesis.executor=1"
+
+
+def _local_docker_forbidden() -> bool:
+    """Phase 1.14b: in production only the validation executor may run Docker."""
+    return settings.environment.lower() in ("production", "prod")
+
+
 COMMAND_INVOCATION_MAP: dict[ValidationCommand, list[str]] = {
     ValidationCommand.PYTEST: ["pytest", "-v"],
     ValidationCommand.RUFF: ["ruff", "check", "."],
@@ -150,15 +160,24 @@ class DockerSandboxRunner:
         memory_limit: str | None = None,
         cpu_limit: float | None = None,
         max_output_chars: int | None = None,
-        container_labels: tuple[str, ...] = (),
+        *,
+        executor: bool = False,
     ) -> None:
+        """`executor=True` only inside the validation executor process (labels its containers).
+
+        Outside it, construction fails in production: the API and worker must never run Docker.
+        """
+        if not executor and _local_docker_forbidden():
+            raise SandboxError(
+                "Local Docker validation is disabled in production; "
+                "validation runs only in the validation executor (SANDBOX_EXECUTOR_URL)"
+            )
         self.image_name = image_name or settings.sandbox_image
         self.timeout_seconds = timeout_seconds or settings.sandbox_timeout_seconds
         self.memory_limit = memory_limit or settings.sandbox_memory_limit
         self.cpu_limit = cpu_limit or settings.sandbox_cpu_limit
         self.max_output_chars = max_output_chars or settings.sandbox_max_output_chars
-        # The validation executor labels its containers so its startup sweep removes only its own.
-        self.container_labels = container_labels
+        self.executor = executor
 
     async def run_validation(
         self,
@@ -206,6 +225,8 @@ class DockerSandboxRunner:
         self, workspace: Path, patch_diff: str, cmd_args: list[str], timeout: float
     ) -> ValidationExecutionResult:
         """Patch, check Docker, run. Shared by the local path and the validation executor."""
+        if not self.executor and _local_docker_forbidden():  # checked again before any subprocess
+            raise SandboxError("Local Docker validation is disabled in production")
         if patch_diff and patch_diff.strip():
             self._apply_patch_exact(workspace, patch_diff)
         self._verify_docker_available()
@@ -242,6 +263,8 @@ class DockerSandboxRunner:
         timeout: float,
     ) -> ValidationExecutionResult:
         """Runs an isolated container. Timeout, cancellation or any error force-removes it."""
+        if not self.executor and _local_docker_forbidden():
+            raise SandboxError("Local Docker validation is disabled in production")
         start_time = time.perf_counter()
         container = f"akesis-val-{uuid.uuid4().hex[:16]}"
 
@@ -251,7 +274,7 @@ class DockerSandboxRunner:
             "--rm",
             "--name",
             container,
-            *(arg for label in self.container_labels for arg in ("--label", label)),
+            *(("--label", EXECUTOR_LABEL) if self.executor else ()),
             "--network",
             "none",
             "--cap-drop",

@@ -220,6 +220,7 @@ graph TD
     subgraph "Akesis Host Environment"
         AppServer[Akesis Backend API<br/>FastAPI / Uvicorn (Port 8000)]
         Postgres[(PostgreSQL 16<br/>Port 5432/5436)]
+        Executor[Validation Executor<br/>Unix socket, SO_PEERCRED]
         DockerSocket[Docker Daemon Socket<br/>/var/run/docker.sock]
         ValidatorImage[Docker Image Cache<br/>akesis-validator:v1]
     end
@@ -235,7 +236,8 @@ graph TD
     ReverseProxy -->|HTTP Proxy| AppServer
 
     AppServer <-->|Async SQL (asyncpg)| Postgres
-    AppServer <-->|Container Management| DockerSocket
+    AppServer <-->|Signed validation jobs| Executor
+    Executor <-->|Container Management| DockerSocket
     DockerSocket --- ValidatorImage
 
     AppServer -->|HTTPS (TLS 1.3)| GeminiOut

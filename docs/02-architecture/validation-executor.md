@@ -8,7 +8,7 @@ injected through `ValidationService(sandbox_runner=...)`. `GitMutationService` a
 
 | `SANDBOX_EXECUTOR_URL` | Behaviour |
 | :--- | :--- |
-| unset (default) | Unchanged: the local `DockerSandboxRunner` runs in the calling process. |
+| unset (default) | Development only: the local `DockerSandboxRunner` runs in the calling process. Production refuses to start (Phase 1.14b). |
 | `unix:///abs/path.sock` | Remote only. No Docker subprocess runs in the caller, and there is no fallback to local Docker. |
 
 Both runners stay behind the remediation hold. The caller runs `require_snapshot_bound` and then
@@ -142,8 +142,10 @@ must be `unix:///...`, and the keys must be at least 32 characters and different
 
 ## Transition risks (open after 1.14a)
 
-- **The API keeps Docker access while the URL is unset.** That is today's default. Removing the
-  API's `docker` group membership is Phase 1.14b.
+- **Outside production, the URL may be unset** and validation then uses local Docker in the
+  calling process, for development. In production (Phase 1.14b) the URL is required,
+  `DockerSandboxRunner` refuses to build or run outside the executor, and only `akesis-exec` is in
+  the `docker` group.
 - **In remote mode, the API process holds both executor keys**, because approval resumption still
   runs in the API. A compromised API can submit allowlisted validation jobs, which still refuse
   while the hold is active, and can read results. It cannot choose an image, arguments, mounts or
@@ -161,13 +163,18 @@ must be `unix:///...`, and the keys must be at least 32 characters and different
 - **Same host:** a container escape still reaches a host that holds the application secrets, until
   the executor runs on its own credential-free host (Phase 1.14d). HTTPS transport is not
   implemented; only `unix://` is accepted.
-- **SO_PEERCRED: verification incomplete.** A caller running as a genuinely different OS user was
-  not tested; this host gives no root access with which to create one. The tests prove the
-  mechanism with the real kernel credential: a real uvicorn server on a Unix socket serves the
-  test's own UID when it is allowlisted, and closes the connection when the allowlist leaves it out.
-  Before production, the deny path must also be verified with a real second UID (for example
-  `sudo -u nobody curl --unix-socket ...` against the executor), along with group access to the
-  0660 socket under the systemd unit.
+- **SO_PEERCRED: deny path verified with a different kernel UID; group path not verified.**
+  Phase 1.14b tests a genuinely different UID without root. A client in an unprivileged user
+  namespace runs as a subordinate host UID (100001 here, from `/etc/subuid`) against the real
+  executor process. The 0660 socket refuses it with `EACCES`. With the file mode opened in the test
+  only, SO_PEERCRED closes its connection and logs `executor_peer_refused` with that UID, while the
+  allowlisted UID is served. Not verifiable on this host without root:
+  - a real second *system* user who is a member of the socket's group (the positive group-access
+    path)
+  - the systemd units running, including `SupplementaryGroups`; `systemd-analyze verify` only
+    checks their syntax
+
+  Run the verification commands in `docs/deployment/README.md` on the target host.
 - **No client-side peer check:** the client does not check the executor socket's peer UID.
   Authenticity rests on the response key, so a process that squats on the socket path cannot
   produce a valid result without that key.

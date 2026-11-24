@@ -19,7 +19,7 @@ Runtime: Python 3.12+ / Docker Engine / PostgreSQL 16
 
 ### 1.2 Required Software
 1. **Python 3.12+** and **`uv`** package manager.
-2. **Docker Engine** (>= 24.0) with Docker daemon access enabled for the application user.
+2. **Docker Engine** (>= 24.0). Only the dedicated validation executor user (`akesis-exec`) is in the `docker` group. The API and worker user (`akesis`) never is (Phase 1.14b).
 3. **PostgreSQL 16** (either local, containerized, or managed RDS/Cloud SQL).
 4. **Git** (>= 2.40) installed on system PATH.
 5. **Reverse Proxy / TLS Terminator:** Nginx, Caddy, Traefik, or AWS ALB.
@@ -148,13 +148,15 @@ Create a systemd unit file at `/etc/systemd/system/akesis.service`:
 ```ini
 [Unit]
 Description=Akesis CI/CD Remediation Service
-After=network.target postgresql.service docker.service
-Requires=docker.service
+After=network.target postgresql.service akesis-executor.service
+Wants=akesis-executor.service
 
 [Service]
 Type=simple
 User=akesis
 Group=akesis
+# Socket access to the validation executor only (0660, group akesis-exec). Never the docker group.
+SupplementaryGroups=akesis-exec
 WorkingDirectory=/opt/akesis
 EnvironmentFile=/opt/akesis/.env
 ExecStart=/opt/akesis/.venv/bin/uvicorn src.apps.api.main:app --host 127.0.0.1 --port 8000 --workers 2 --access-log
@@ -176,9 +178,22 @@ sudo systemctl status akesis
 
 ---
 
-### Step 4b (optional, Phase 1.14a): Validation Executor
+### Step 4b (required in production): Validation Executor
 
-Remote validation is off by default (`SANDBOX_EXECUTOR_URL` unset keeps local Docker validation). To run the executor on the same host, create a dedicated user that is the only one in the `docker` group and runs as UID 1000 (the container user), plus a working directory that contains no `.env`. Then create `/etc/systemd/system/akesis-executor.service`:
+Production refuses to start without `SANDBOX_EXECUTOR_URL` (Phase 1.14b). In production, `DockerSandboxRunner` cannot be constructed or run anywhere except inside the executor, so the API never runs Docker. Outside production, leaving `SANDBOX_EXECUTOR_URL` unset keeps local Docker validation for development.
+
+Create a dedicated executor user. It is the only member of the `docker` group, and it runs as UID 1000, the container user. Give it a working directory that contains no `.env`. Then remove Docker access from the application user:
+
+```bash
+sudo useradd --system --uid 1000 --user-group --home-dir /opt/akesis-exec --shell /usr/sbin/nologin akesis-exec
+sudo usermod -aG docker akesis-exec
+sudo gpasswd -d akesis docker   # the API and worker user must not be in the docker group
+sudo mkdir -p /opt/akesis-exec /etc/akesis-exec && sudo chown akesis-exec: /opt/akesis-exec
+```
+
+If UID 1000 is already taken on the host, the container user must change with it. That is not supported yet, so use a host where UID 1000 is free for the executor.
+
+Then create `/etc/systemd/system/akesis-executor.service`:
 
 ```ini
 [Unit]
@@ -206,15 +221,28 @@ Restart=always
 RestartSec=5s
 ```
 
+Do not set `ENVIRONMENT` for the executor: it takes no application configuration, and the guard refuses to start if `ENVIRONMENT=production` is set.
+
 `executor.env` sets:
 - `AKESIS_EXECUTOR_SOCKET_PATH=/run/akesis-exec/exec.sock`
 - `AKESIS_EXECUTOR_WORK_DIR=/var/lib/akesis-exec/work`
 - `AKESIS_EXECUTOR_ALLOWED_UIDS` to the caller's UID
 - the two keys (`AKESIS_EXECUTOR_REQUEST_KEY` and `AKESIS_EXECUTOR_RESPONSE_KEY`), each at least 32 random characters and different from each other
 
-The caller sets `SANDBOX_EXECUTOR_URL=unix:///run/akesis-exec/exec.sock` and the same two keys (`SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY`). The caller must be in the `akesis-exec` group to reach the 0660 socket.
+The API's `.env` sets `SANDBOX_EXECUTOR_URL=unix:///run/akesis-exec/exec.sock` and the same two keys (`SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY`). The API reaches the 0660 socket through `SupplementaryGroups=akesis-exec` in its unit, and `AKESIS_EXECUTOR_ALLOWED_UIDS` must name the `akesis` UID (`id -u akesis`). Approval resumption still runs in the API, so the API is the caller in this transitional stage. Moving it to the worker is Phase 1.14c, which is not implemented yet.
 
-The executor refuses to start if its working directory has a `.env` or its environment holds any application credential. While the remediation hold is active it answers every job with a signed `rejected/held`. This phase does not change the API's own Docker access; that is Phase 1.14b.
+The executor refuses to start if its working directory has a `.env` or its environment holds any application credential. While the remediation hold is active it answers every job with a signed `rejected/held`.
+
+Verify the isolation after `systemctl start akesis-executor akesis`:
+
+```bash
+id -nG akesis                       # must NOT include docker; must include akesis-exec
+id -nG akesis-exec                  # includes docker
+stat -c '%a %U:%G' /run/akesis-exec/exec.sock        # 660 akesis-exec:akesis-exec
+sudo -u akesis curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz   # {"status":"ok"}
+sudo -u nobody curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz   # Permission denied
+sudo -u akesis docker ps            # must fail: permission denied on /var/run/docker.sock
+```
 
 ### Step 4a: Configure the Retry Worker (systemd)
 

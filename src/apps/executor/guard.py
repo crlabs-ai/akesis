@@ -35,6 +35,10 @@ def refuse_unsafe_environment(cwd: Path, environ: Mapping[str, str]) -> None:
         raise UnsafeExecutorEnvironment(
             "A .env file exists in the executor working directory; refusing to start"
         )
+    if environ.get("ENVIRONMENT", environ.get("environment", "")).lower() in ("production", "prod"):
+        # The executor takes no application environment; production Settings would also demand
+        # every application credential at import.
+        raise UnsafeExecutorEnvironment("ENVIRONMENT must not be set for the executor")
     found = sorted(name for name in environ if name.upper() in FORBIDDEN_ENVIRONMENT)
     if found:
         raise UnsafeExecutorEnvironment(

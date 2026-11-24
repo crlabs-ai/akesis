@@ -30,6 +30,7 @@ from uvicorn.protocols.http.h11_impl import H11Protocol
 from src.packages.sdk.github_git_source import FileEntry
 from src.packages.sdk.sandbox_runner import (
     COMMAND_INVOCATION_MAP,
+    EXECUTOR_LABEL,
     DockerSandboxRunner,
     DockerUnavailableError,
     PatchApplicationError,
@@ -57,7 +58,7 @@ from src.packages.shared.source_snapshot import SnapshotRejected, _remove_tree, 
 
 logger = get_logger("akesis.executor")
 
-EXECUTOR_LABEL = "akesis.executor=1"
+__all__ = ["EXECUTOR_LABEL", "ExecutorConfig", "create_app", "startup_cleanup"]
 # Shared settings fields that must keep their defaults in the executor (defence in depth after the
 # pre-import guard in guard.py).
 _CREDENTIAL_SETTINGS = (
@@ -234,7 +235,7 @@ def create_app(
         memory_limit=config.memory_limit,
         cpu_limit=config.cpu_limit,
         max_output_chars=config.max_output_chars,
-        container_labels=(EXECUTOR_LABEL,),
+        executor=True,
     )
     work_dir = Path(config.work_dir)
     limits = JobLimits()
