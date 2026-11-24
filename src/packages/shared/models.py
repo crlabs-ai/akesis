@@ -114,6 +114,13 @@ class WorkflowRunProvenance(BaseModel):
     event_type: Literal["workflow_run"] = "workflow_run"
 
 
+class LogEvidence(BaseModel):
+    """Whether diagnosis has workflow-log evidence. Read from the pipeline row, never persisted."""
+
+    status: Literal["retrieved", "unavailable"]
+    reason_code: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+
+
 class FailureContext(BaseModel):
     """Complete structured failure context ready for downstream diagnostic ingestion."""
 
@@ -136,6 +143,9 @@ class FailureContext(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp of context creation",
     )
+    # Set only by load_diagnosis_context. Excluded from serialization so it never enters
+    # failure_context_json (the log worker's compare-and-swap value).
+    log_evidence: LogEvidence | None = Field(default=None, exclude=True)
 
 
 class CodeEvidence(BaseModel):

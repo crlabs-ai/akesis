@@ -216,7 +216,8 @@ first in every gated entry point; nothing schedules diagnosis automatically.
   in PostgreSQL. A caller's stale or forged signal never reaches Gemini.
 * `log_status` `pending` or `fetching` raises `LogEvidencePending`, a refusal with no side effects.
   The wait is bounded because the log worker always ends in `extracted` or `unavailable`. With
-  `unavailable` logs, diagnosis gets the empty signal, as it did before Phase 1.10.
+  `unavailable` logs, diagnosis gets the empty signal and, since Phase 1.12, an explicit
+  availability status (see below).
 * The worker writes a context only if the stored one is unchanged since it read it
   (`expected_context_json`). Otherwise the write is refused, the lease expires and the attempt is
   retried against the current row.
@@ -230,23 +231,57 @@ reason. `_process_failure_unchecked` returns an existing pipeline for the incide
 lifting the hold alone would never diagnose an admitted incident. The admission-to-orchestrator
 handoff must be designed together with condition 6.
 
-### Known limitations and follow-ups (deferred)
+### Known limitations
 
-* **L1, refused-write telemetry.** `_finish_logs` ignores the result of `log_jobs.complete`. When
-  the conditional write is refused, the worker still logs `workflow_logs_recorded` with the
-  intended status and counts `logs_extracted`. No data is lost: the row stays `fetching`, the lease
-  expires and the attempt is retried. The log line and counter are wrong, though. Follow-up: return
-  the result and record `logs_superseded`.
-* **L2, unavailable logs in the prompt.** For `unavailable` logs, Gemini receives an empty signal
-  with no statement that retrieval failed or why (`log_failure_code`). Human approval and sandbox
-  validation still stand behind every proposal. Follow-up: state the log status and code inside
-  the verified-metadata section.
-* **L4, hard cancellation.** `CancelledError` bypasses the worker's exception handlers, so a
-  cancelled retrieval records nothing. The claim stays `fetching` under its lease (600 seconds by
-  default), diagnosis keeps refusing, and the claim is reclaimed only after the lease, as a new
-  attempt that counts against the budget. This is the designed crash recovery and is now tested;
-  it is not prompt.
+L1, L2 and L4 from the Phase 1.11 review are resolved in Phase 1.12. Remaining:
+
 * A disabled log stage (`log_retrieval` unset) leaves incidents `pending`, so diagnosis is refused
   rather than run on missing evidence.
 
 Tests: `tests/integration/test_diagnosis_evidence.py`.
+
+## Implementation Status (Phase 1.12)
+
+Workflow-worker reliability. The hold, approval and mutation architecture are unchanged.
+
+* **Refused writes are reported as refused (L1).** `log_jobs.complete` returns `recorded`,
+  `lease_lost` (the row is no longer this attempt's claim: reclaimed, exhausted or finished) or
+  `context_changed` (still this attempt's claim, but the stored context changed since it was read).
+  The compare-and-swap and `(status, attempt)` guards are unchanged, and a refusal writes nothing.
+  The worker counts `logs_extracted`, `logs_retry`, `logs_unavailable` or `logs_rejected` only for
+  a recorded write. A refusal counts `logs_lease_lost` or `logs_context_changed` and logs
+  `workflow_logs_write_refused` with the reason. A `context_changed` claim is left `fetching` and
+  retried after its lease as a new attempt against the current context.
+* **Missing logs are stated, not implied (L2).** `load_diagnosis_context` attaches
+  `FailureContext.log_evidence` from the pipeline row: `retrieved` for `extracted`, otherwise
+  `unavailable` with the stored `log_failure_code` (for example `log_retrieval_exhausted`), reduced
+  to `unknown` unless it matches `[a-z0-9_]{1,64}`. The field is excluded from serialization, so it
+  never enters `failure_context_json`. The diagnosis prompt states the status before any
+  log-derived text. For `unavailable` it gives the reason code, says this is not the same as a run
+  with no identifiable failure, and omits the log block, because the empty signal would read as
+  logs that held no failure. For `retrieved`, the fenced `untrusted_ci_log` block follows as
+  before, and the prompt says that a block naming no error means the logs held no identifiable
+  failure. `pending` and `fetching` still raise `LogEvidencePending`.
+* **Hard cancellation keeps lease recovery (L4, reviewed).** A cancelled or killed retrieval
+  writes nothing and stays `fetching` until its lease (600 seconds by default) expires; the reclaim
+  is a new, counted attempt. Immediate release was considered and rejected:
+  * SIGTERM never hard-cancels a retrieval. The worker checks its stop flag between claims and
+    releases only claims it has not started. A hard cancel comes from SIGKILL, a crash or an
+    external task cancellation, and SIGKILL and crashes cannot run release code, so the lease must
+    exist anyway.
+  * Releasing in the cancelled task would need database I/O during cancellation, shielded from
+    the cancel that started it. That can stall shutdown past `TimeoutStopSec` when the database is
+    the reason for the cancel.
+  * A retrieval may already have reached GitHub, so the attempt must still count, and an early
+    release would only bring the next attempt forward.
+  The live lease is what prevents a second GitHub retrieval while the first may still be running.
+  Diagnosis waits at most one lease per lost attempt, and attempts stay bounded by
+  `LOG_RETRIEVAL_MAX_ATTEMPTS`.
+
+Tests (PostgreSQL): cancellation keeps the claim and blocks a second worker until the lease
+expires, then recovers as attempt 2; repeated cancellation exhausts the budget; concurrent workers
+retrieve a row once; a row locked by another transaction is skipped; a late result after lease
+expiry is refused as `lease_lost` and not counted; a concurrent context change is refused as
+`context_changed`; unavailable and exhausted logs reach the prompt with their reason code
+(`tests/integration/test_workflow_log_worker.py`, `tests/integration/test_diagnosis_evidence.py`,
+`tests/unit/test_prompt_builder.py`).

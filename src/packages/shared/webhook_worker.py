@@ -278,10 +278,11 @@ class RetryWorker:
                 token = await verify_context_provenance(context, session=session)
             except (ProvenanceRejected, ValueError) as error:
                 code = error.code if isinstance(error, ProvenanceRejected) else "malformed"
-                await self._finish_logs(
-                    pipeline_id, attempt, LogOutcome("unavailable", f"provenance_{code}"), None
+                outcome = LogOutcome("unavailable", f"provenance_{code}")
+                result = await self._finish_logs(pipeline_id, attempt, outcome, None)
+                self._count(
+                    summary, "logs_rejected" if result == log_jobs.RECORDED else f"logs_{result}"
                 )
-                self._count(summary, "logs_rejected")
                 return
         try:
             async with asyncio.timeout(config.deadline_seconds):
@@ -305,8 +306,9 @@ class RetryWorker:
                 error_type=type(error).__name__,
             )
             return
-        await self._finish_logs(pipeline_id, attempt, outcome, context, raw_context)
-        self._count(summary, f"logs_{outcome.status}")
+        result = await self._finish_logs(pipeline_id, attempt, outcome, context, raw_context)
+        # A refused write is counted by its reason, never as the outcome it failed to record.
+        self._count(summary, f"logs_{outcome.status if result == log_jobs.RECORDED else result}")
 
     async def _finish_logs(
         self,
@@ -315,7 +317,8 @@ class RetryWorker:
         outcome: LogOutcome,
         context: FailureContext | None,
         raw_context: str | None = None,
-    ) -> None:
+    ) -> str:
+        """Persist the outcome. Returns log_jobs.RECORDED, LEASE_LOST or CONTEXT_CHANGED."""
         failure_context_json = None
         next_attempt_at = None
         status = log_jobs.UNAVAILABLE
@@ -340,7 +343,7 @@ class RetryWorker:
             ).next_retry_at
         async with self._sessions() as session:
             async with session.begin():
-                await log_jobs.complete(
+                result = await log_jobs.complete(
                     session,
                     pipeline_id,
                     attempt,
@@ -350,9 +353,21 @@ class RetryWorker:
                     next_attempt_at=next_attempt_at,
                     expected_context_json=raw_context,
                 )
-        logger.info(
-            "workflow_logs_recorded", pipeline_id=pipeline_id, status=status, code=outcome.code
-        )
+        if result == log_jobs.RECORDED:
+            logger.info(
+                "workflow_logs_recorded", pipeline_id=pipeline_id, status=status, code=outcome.code
+            )
+        else:
+            # Nothing was written. LEASE_LOST: another worker owns or finished the row.
+            # CONTEXT_CHANGED: this claim is retried after its lease against the current context.
+            logger.warning(
+                "workflow_logs_write_refused",
+                pipeline_id=pipeline_id,
+                attempt=attempt,
+                reason=result,
+                status=status,
+            )
+        return result
 
     async def _release_unstarted(self, claims: list[tuple[str, int]], summary: TickSummary) -> None:
         for delivery_id, attempt in claims:

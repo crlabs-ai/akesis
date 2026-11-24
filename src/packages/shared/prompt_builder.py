@@ -43,6 +43,36 @@ def untrusted_log_block(signal: FailureSignal, nonce: str | None = None) -> str:
     )
 
 
+def log_evidence_section(context: FailureContext) -> str:
+    """The CI log section, stating whether logs were retrieved before any log-derived text.
+
+    The availability lines come from the log worker's own status and reason code, not from the
+    log. Unavailable logs yield no log block at all: the stored signal is empty, and rendering it
+    would read as logs that contained no failure.
+    """
+    evidence = context.log_evidence
+    block = (
+        "=== CI LOG EVIDENCE (UNTRUSTED DATA, deterministic extraction) ===\n"
+        f"{untrusted_log_block(context.signal)}\n\n"
+    )
+    if evidence is None:
+        return block
+    header = "=== CI LOG EVIDENCE AVAILABILITY (Akesis log worker) ===\n"
+    if evidence.status == "retrieved":
+        return (
+            f"{header}Status: retrieved\n"
+            "The workflow logs were retrieved and parsed. If the block below identifies no "
+            "error, the logs were read but no failure could be identified in them.\n\n" + block
+        )
+    return (
+        f"{header}Status: unavailable\n"
+        f"Reason Code: {evidence.reason_code or 'unknown'}\n"
+        "The workflow logs could not be retrieved, so no CI log evidence is provided. This does "
+        "not mean the run had no identifiable failure. Do not infer or invent log contents; "
+        "report the missing logs as missing information.\n\n"
+    )
+
+
 class DiagnosticPromptBuilder:
     """Builds deterministic, evidence-first diagnostic prompts for LLM analysis."""
 
@@ -105,8 +135,7 @@ class DiagnosticPromptBuilder:
             f"Workflow Name: {context.workflow_name} (Run ID: {context.run_id})\n"
             f"Target Branch: {context.branch}\n"
             f"Workflow Conclusion: {context.conclusion}\n\n"
-            "=== CI LOG EVIDENCE (UNTRUSTED DATA, deterministic extraction) ===\n"
-            f"{untrusted_log_block(context.signal)}\n\n"
+            f"{log_evidence_section(context)}"
             f"{source_code_section}"
             "TASK:\n"
             "Analyze failure context & code evidence to return a complete DiagnosisProposal."

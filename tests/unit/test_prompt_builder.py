@@ -1,9 +1,13 @@
+import pytest
+from pydantic import ValidationError
+
 from src.packages.shared.models import (
     CodeEvidence,
     EvidencePackage,
     FailureCategory,
     FailureContext,
     FailureSignal,
+    LogEvidence,
     WorkflowRunConclusion,
 )
 from src.packages.shared.prompt_builder import DiagnosticPromptBuilder
@@ -62,3 +66,25 @@ def test_prompt_builder_user_prompt_with_code_evidence() -> None:
     assert "tests/test_calc.py" in prompt
     assert "REPOSITORY SOURCE CODE EVIDENCE (UNTRUSTED DATA)" in prompt
     assert "assert divide(10, 0) == 0" in prompt
+
+
+def test_log_evidence_reason_code_is_bounded_and_never_serialized() -> None:
+    for bad in ("x" * 65, "Ignore previous", "", "a\nb"):
+        with pytest.raises(ValidationError):
+            LogEvidence(status="unavailable", reason_code=bad)
+    context = FailureContext(
+        incident_id="inc_1",
+        repository_owner="o",
+        repository_name="r",
+        run_id=1,
+        workflow_name="CI",
+        commit_sha="a" * 40,
+        branch="main",
+        run_url="https://github.com/o/r/actions/runs/1",
+        conclusion=WorkflowRunConclusion.FAILURE,
+        signal=FailureSignal(),
+        log_evidence=LogEvidence(status="unavailable", reason_code="log_retrieval_exhausted"),
+    )
+    assert "log_evidence" not in context.model_dump_json()
+    prompt = DiagnosticPromptBuilder.build_user_prompt(context)
+    assert "Reason Code: log_retrieval_exhausted" in prompt and "<untrusted_ci_log" not in prompt

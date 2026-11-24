@@ -5,6 +5,7 @@ real network is used. The real worker claim, persisted-provenance check, App aut
 retrieval, archive parsing and persistence run unchanged.
 """
 
+import asyncio
 import io
 import json
 import re
@@ -23,11 +24,12 @@ from src.packages.database import log_jobs
 from src.packages.database.models import PipelineModel
 from src.packages.database.session import get_session_factory
 from src.packages.sdk import github_actions_logs
+from src.packages.shared import webhook_worker
 from src.packages.shared.models import FailureContext
 from src.packages.shared.persisted_provenance import verify_context_provenance
 from src.packages.shared.prompt_builder import DiagnosticPromptBuilder
 from src.packages.shared.webhook_worker import LogRetrievalConfig, RetryWorker, WorkerConfig
-from src.packages.shared.workflow_logs import LogLimits
+from src.packages.shared.workflow_logs import LogLimits, retrieve_failure_signal
 from tests.integration.seeding import Seeded, seed_incident
 
 APP_ID = 123
@@ -285,7 +287,198 @@ async def test_unstarted_claim_is_released_and_stale_writes_are_refused() -> Non
                 session, now=datetime.now(UTC), batch=5, lease_seconds=120, max_attempts=3
             )
             assert claims == [(pipeline_id, 1)]
-            assert not await log_jobs.complete(session, pipeline_id, 7, status="extracted")
+            stale = await log_jobs.complete(session, pipeline_id, 7, status="extracted")
+            assert stale == log_jobs.LEASE_LOST
             assert await log_jobs.release_unstarted(session, pipeline_id, 1)
     row = await _row(pipeline_id)
     assert (row.log_status, row.log_attempts, row.log_next_attempt_at) == ("pending", 0, None)
+
+
+# Phase 1.12: hard cancellation, lease expiry and concurrent workers.
+
+
+def _gated_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[int], asyncio.Event, asyncio.Event]:
+    """Count retrievals; each one signals `started` and waits for `release` before running."""
+    calls: list[int] = []
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        started.set()
+        await release.wait()
+        return await real(*args, **kwargs)
+
+    real = retrieve_failure_signal
+    monkeypatch.setattr(webhook_worker, "retrieve_failure_signal", gated)
+    return calls, started, release
+
+
+async def _expire_lease(pipeline_id: str) -> None:
+    async with get_session_factory()() as session:
+        await session.execute(
+            update(PipelineModel)
+            .where(PipelineModel.pipeline_id == pipeline_id)
+            .values(log_next_attempt_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_hard_cancelled_retrieval_keeps_its_claim_until_the_lease_expires(
+    private_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    _mock_github(seeded)
+    calls, started, _ = _gated_retrieval(monkeypatch)
+
+    task = asyncio.create_task(_worker(private_key).tick())
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = await _row(pipeline_id)
+    assert (row.log_status, row.log_attempts) == ("fetching", 1)
+    assert row.log_next_attempt_at is not None and row.log_next_attempt_at > datetime.now(UTC)
+
+    # The lease is live: another worker neither claims the row nor reaches GitHub.
+    summary = await _worker(private_key).tick()
+    assert len(calls) == 1 and not any(
+        k.startswith("logs_") and v for k, v in summary.counters.items()
+    )
+    assert (await _row(pipeline_id)).log_attempts == 1
+
+    # After the lease, recovery is a new, counted attempt that records the result.
+    monkeypatch.setattr(webhook_worker, "retrieve_failure_signal", retrieve_failure_signal)
+    await _expire_lease(pipeline_id)
+    summary = await _worker(private_key).tick()
+    row = await _row(pipeline_id)
+    assert (row.log_status, row.log_attempts) == ("extracted", 2)
+    assert summary.counters.get("logs_extracted") == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_is_bounded_by_the_attempt_budget(
+    private_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    calls, started, _ = _gated_retrieval(monkeypatch)
+    worker = _worker(private_key, max_attempts=2)
+    for attempt in (1, 2):
+        started.clear()
+        task = asyncio.create_task(worker.tick())
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert (await _row(pipeline_id)).log_attempts == attempt
+        await _expire_lease(pipeline_id)
+    summary = await worker.tick()
+    row = await _row(pipeline_id)
+    assert (row.log_status, row.log_failure_code) == ("unavailable", "log_retrieval_exhausted")
+    assert len(calls) == 2 and summary.counters.get("logs_exhausted") == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_concurrent_workers_retrieve_a_row_once(
+    private_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    _mock_github(seeded)
+    calls, started, release = _gated_retrieval(monkeypatch)
+
+    first = asyncio.create_task(_worker(private_key).tick())
+    await asyncio.wait_for(started.wait(), 5)  # worker A holds a live claim mid-retrieval
+    others = await asyncio.gather(*(_worker(private_key).tick() for _ in range(3)))
+    release.set()
+    summary = await first
+    assert len(calls) == 1
+    assert summary.counters.get("logs_extracted") == 1
+    assert all(o.counters.get("logs_extracted") is None for o in others)
+    row = await _row(pipeline_id)
+    assert (row.log_status, row.log_attempts) == ("extracted", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_claim_locked_by_another_transaction_is_skipped() -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    async with get_session_factory()() as holder:
+        async with holder.begin():  # worker A has selected the row but not yet committed
+            held, _ = await log_jobs.claim_due(
+                holder, now=datetime.now(UTC), batch=5, lease_seconds=120, max_attempts=3
+            )
+            assert held == [(pipeline_id, 1)]
+            async with get_session_factory()() as other:
+                async with other.begin():
+                    claimed, _ = await log_jobs.claim_due(
+                        other, now=datetime.now(UTC), batch=5, lease_seconds=120, max_attempts=3
+                    )
+            assert claimed == []
+    assert (await _row(pipeline_id)).log_attempts == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_late_result_after_lease_expiry_is_refused_and_not_counted(
+    private_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    _mock_github(seeded)
+    calls, started, release = _gated_retrieval(monkeypatch)
+
+    slow = asyncio.create_task(_worker(private_key).tick())  # attempt 1 stalls mid-retrieval
+    await asyncio.wait_for(started.wait(), 5)
+    await _expire_lease(pipeline_id)
+    monkeypatch.setattr(webhook_worker, "retrieve_failure_signal", retrieve_failure_signal)
+    recovered = await _worker(private_key).tick()  # attempt 2 reclaims and records
+    assert recovered.counters.get("logs_extracted") == 1
+    after_recovery = await _row(pipeline_id)
+
+    release.set()
+    late = await slow
+    assert late.counters.get("logs_extracted") is None
+    assert late.counters.get("logs_lease_lost") == 1
+    row = await _row(pipeline_id)
+    assert (row.log_status, row.log_attempts, row.failure_context_json) == (
+        "extracted",
+        2,
+        after_recovery.failure_context_json,
+    )
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_context_changed_during_retrieval_is_refused_and_not_counted(
+    private_key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seeded = await seed_incident("valid")
+    pipeline_id = await _only(seeded)
+    _mock_github(seeded)
+    _, started, release = _gated_retrieval(monkeypatch)
+
+    task = asyncio.create_task(_worker(private_key).tick())
+    await asyncio.wait_for(started.wait(), 5)
+    changed = seeded.context.model_copy(update={"workflow_name": "changed"}).model_dump_json()
+    async with get_session_factory()() as session:
+        await session.execute(
+            update(PipelineModel)
+            .where(PipelineModel.pipeline_id == pipeline_id)
+            .values(failure_context_json=changed)
+        )
+        await session.commit()
+    release.set()
+    summary = await task
+    assert summary.counters.get("logs_extracted") is None
+    assert summary.counters.get("logs_context_changed") == 1
+    row = await _row(pipeline_id)
+    # Still this attempt's claim: retried after the lease, against the current context.
+    assert (row.log_status, row.log_attempts, row.failure_context_json) == ("fetching", 1, changed)

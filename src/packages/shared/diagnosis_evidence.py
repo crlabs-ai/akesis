@@ -5,15 +5,19 @@ verification compares provenance only, so a stale (empty) or forged signal would
 ``load_diagnosis_context`` returns the persisted context after checking that it is the same incident
 and re-verifying provenance against PostgreSQL. Pending or in-flight log retrieval is a typed,
 retry-safe refusal; it is bounded because the log worker always ends in ``extracted`` or
-``unavailable`` (attempts are capped). ``unavailable`` keeps the empty signal, as before.
+``unavailable`` (attempts are capped). ``unavailable`` keeps the empty signal and sets
+``log_evidence`` (Phase 1.12), so the prompt says that logs are missing and why, instead of
+presenting an empty signal as if the logs held no failure.
 """
+
+import re
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.packages.database import log_jobs
 from src.packages.database.models import PipelineModel
-from src.packages.shared.models import FailureContext
+from src.packages.shared.models import FailureContext, LogEvidence
 from src.packages.shared.persisted_provenance import ProvenanceRejected, verify_context_provenance
 
 
@@ -49,4 +53,12 @@ async def load_diagnosis_context(
     ):
         raise ProvenanceRejected("Persisted evidence does not match this incident", code="binding")
     await verify_context_provenance(stored, session=session)
-    return stored
+    if pipeline.log_status == log_jobs.EXTRACTED:
+        evidence = LogEvidence(status="retrieved")
+    else:
+        code = pipeline.log_failure_code or "unknown"
+        evidence = LogEvidence(
+            status="unavailable",
+            reason_code=code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "unknown",
+        )
+    return stored.model_copy(update={"log_evidence": evidence})

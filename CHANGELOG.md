@@ -8,12 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed (Phase 1.12: workflow worker reliability)
+* **Refused writes are no longer reported as recorded (L1).** `log_jobs.complete` returns `recorded`, `lease_lost` or `context_changed`. Outcome counters (`logs_extracted`, `logs_retry`, `logs_unavailable`, `logs_rejected`) and `workflow_logs_recorded` now appear only for a stored result. A refusal counts `logs_lease_lost` or `logs_context_changed` and logs `workflow_logs_write_refused` with the reason. Guards and retry behaviour are unchanged.
+* **Gemini is told when logs are unavailable (L2).** Diagnosis receives `log_evidence` (`retrieved`, or `unavailable` with a bounded reason code such as `log_retrieval_exhausted`), read from the pipeline row and never persisted. With unavailable logs the prompt states the reason, says this is not a run without an identifiable failure, and omits the empty log block. No log evidence is invented, and `pending`/`fetching` still block diagnosis.
+* **Hard cancellation reviewed (L4).** Lease-expiry recovery is kept: SIGTERM never hard-cancels a retrieval, SIGKILL and crashes cannot release a claim, and the live lease prevents a duplicate GitHub retrieval. PostgreSQL tests now cover cancellation, lease expiry, recovery, attempt exhaustion, concurrent workers and late results. See ADR-0010, Phase 1.12.
+
 ### Changed (Phase 1.11: diagnosis uses only final persisted log evidence)
 * **Persisted evidence is authoritative.** `load_diagnosis_context` (`diagnosis_evidence.py`) returns the stored `FailureContext` for the incident after checking incident, commit, repository, run and provenance bindings and re-verifying provenance in PostgreSQL. `process_failure` uses it after the hold, so a caller's stale or forged signal never reaches Gemini. `unavailable` logs keep the empty signal.
 * **No diagnosis while logs are in flight.** `pending` and `fetching` raise `LogEvidencePending` (no side effect, retry later). The wait is bounded: the log worker always ends in `extracted` or `unavailable`.
 * **No lost updates.** The worker writes a context only if the stored one is still the one it read (`expected_context_json`); otherwise the lease expires and the attempt is retried.
 * The remediation hold is unchanged. Nothing schedules diagnosis automatically.
-* **Known limitations (deferred).** A refused conditional write is still logged and counted as recorded (L1). Gemini is not told when logs were unavailable (L2). A hard-cancelled retrieval recovers only after its lease, as a new attempt (L4, now tested). Admission's `FAILED` pipeline rows block the orchestrator handoff, which belongs to condition 6. See ADR-0010, Phase 1.11.
+* **Known limitations.** L1, L2 and L4 are resolved in Phase 1.12. Admission's `FAILED` pipeline rows block the orchestrator handoff, which belongs to condition 6. See ADR-0010, Phase 1.11.
 
 ### Security (redaction hardening, follows the Phase 1.11 review)
 * **Quadratic key=value redaction removed.** The `PASSWORD|SECRET|TOKEN|...` key=value regex backtracked quadratically on hostile input (repeated `PASSWORD_`: 0.91s at 20k characters, 3.7s at 40k, 15.1s at 80k; hours at the 2M parse limit). It is replaced by a possessive key regex plus a forward-only scanner with the same matches (checked against the former regex as an oracle); 2M characters now take about 0.2s. The JWT pattern had the same flaw on repeated `eyJ-` (1.8s at 80k) and is now a segment scanner.

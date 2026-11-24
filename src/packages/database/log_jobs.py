@@ -8,12 +8,14 @@ newer outcome.
 
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.packages.database.models import PipelineModel
 
 PENDING, FETCHING, EXTRACTED, UNAVAILABLE = "pending", "fetching", "extracted", "unavailable"
+# Results of `complete`.
+RECORDED, LEASE_LOST, CONTEXT_CHANGED = "recorded", "lease_lost", "context_changed"
 
 
 async def claim_due(
@@ -73,12 +75,14 @@ async def complete(
     failure_context_json: str | None = None,
     next_attempt_at: datetime | None = None,
     expected_context_json: str | None = None,
-) -> bool:
-    """Record one claimed attempt's outcome. False if the claim was superseded.
+) -> str:
+    """Record one claimed attempt's outcome: RECORDED, LEASE_LOST or CONTEXT_CHANGED.
 
-    A new context is written only if the stored context is still the one the worker read, so a
-    concurrent change to the incident is never overwritten; the lease then expires and the
-    attempt is retried against the current row.
+    LEASE_LOST: the row is no longer this attempt's claim (reclaimed after the lease, exhausted, or
+    finished), so nothing is written. CONTEXT_CHANGED: the claim is still this attempt's, but the
+    stored context is no longer the one the worker read, so a concurrent change to the incident is
+    never overwritten; the claim is left as it is, its lease expires and the row is retried as a
+    new attempt against the current context.
     """
     values: dict[str, object] = {
         "log_status": status,
@@ -87,15 +91,22 @@ async def complete(
     }
     if failure_context_json is not None:
         values["failure_context_json"] = failure_context_json
-    guards = [
+    claim = [
         PipelineModel.pipeline_id == pipeline_id,
         PipelineModel.log_status == FETCHING,
         PipelineModel.log_attempts == attempt,
     ]
+    guards = list(claim)
     if failure_context_json is not None:
         guards.append(PipelineModel.failure_context_json == expected_context_json)
     result = await session.execute(update(PipelineModel).where(*guards).values(**values))
-    return bool(getattr(result, "rowcount", 0))
+    if getattr(result, "rowcount", 0):
+        return RECORDED
+    # Refused. Only the reason is read here; the row is not changed. If the claim is still this
+    # attempt's, the context guard refused the write. A reclaim between the two statements
+    # reports LEASE_LOST, which is then also true.
+    still_claimed = await session.scalar(select(func.count()).where(*claim))
+    return CONTEXT_CHANGED if still_claimed else LEASE_LOST
 
 
 async def release_unstarted(session: AsyncSession, pipeline_id: str, attempt: int) -> bool:
