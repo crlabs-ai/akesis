@@ -41,6 +41,8 @@ jobs:
       # Docker sandbox and executor tests must run here: a missing daemon or validator image
       # fails the run instead of skipping them (tests/conftest.py).
       AKESIS_REQUIRE_DOCKER_TESTS: "1"
+      # A real, temporary second OS account (created below) for the executor SO_PEERCRED test.
+      AKESIS_TEST_SECOND_USER: akesis-ci-peer
 
     steps:
       - name: Checkout repository
@@ -75,8 +77,22 @@ jobs:
       - name: Build the validator image
         run: docker build -f docker/Dockerfile.validator -t akesis-validator:v1 docker
 
+      # The executor must refuse a caller with a different kernel UID. GitHub's runners block
+      # unprivileged user namespaces, so a real second account is used instead, via passwordless
+      # sudo. It has no home, no login shell and no groups shared with the runner.
+      - name: Create a temporary second OS account for the executor UID test
+        run: |
+          sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin akesis-ci-peer
+          echo "runner: $(id)"
+          sudo -n -u akesis-ci-peer -- /usr/bin/python3 -c "import os; print('second account UID', os.getuid())"
+
       - name: Run unit and integration tests with coverage
         run: uv run pytest -v -rs --cov=src --cov-report=term-missing tests/
 
       - name: Run vertical-slice benchmark suite
         run: uv run pytest -v tests/benchmark/test_vertical_slice_benchmarks.py
+
+      - name: Remove the temporary second OS account
+        if: always()
+        run: |
+          if id akesis-ci-peer >/dev/null 2>&1; then sudo userdel akesis-ci-peer; fi

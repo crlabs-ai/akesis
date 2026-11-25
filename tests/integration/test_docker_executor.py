@@ -7,6 +7,7 @@ Unix socket proves the entrypoint, the credential guard, SO_PEERCRED and the sig
 
 import asyncio
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -522,15 +523,27 @@ def _subordinate_uid() -> int | None:
     return int(line.split(":")[1]) + 1 if probe.returncode == 0 else None
 
 
-def _client(sock: Path, *, as_other_uid: bool) -> str:
-    prefix = ["unshare", "--user", "--map-auto", "--setuid", "1", "--setgid", "1"]
-    command = [
-        *(prefix if as_other_uid else []),
-        "/usr/bin/python3",
-        "-c",
-        _SUBUID_CLIENT,
-        str(sock),
-    ]
+# CI creates a real, temporary OS account and names it here; the probe client then runs as that
+# account through passwordless sudo (GitHub-hosted runners have it). Locally, without one, an
+# unprivileged user namespace provides a subordinate host UID instead.
+_SECOND_USER_ENV = "AKESIS_TEST_SECOND_USER"
+_USERNS = ["unshare", "--user", "--map-auto", "--setuid", "1", "--setgid", "1"]
+
+
+def _other_uid_launcher() -> tuple[list[str], int, str] | None:
+    """(command prefix, host UID the executor will see, description), or None if unavailable."""
+    user = os.environ.get(_SECOND_USER_ENV)
+    if user:
+        # A named account that does not exist is a CI misconfiguration: KeyError fails the test.
+        return ["sudo", "-n", "-u", user, "--"], pwd.getpwnam(user).pw_uid, f"OS account {user}"
+    subordinate = _subordinate_uid()
+    if subordinate is None:
+        return None
+    return _USERNS, subordinate, "user-namespace subordinate UID"
+
+
+def _client(sock: Path, prefix: list[str] | None = None) -> str:
+    command = [*(prefix or []), "/usr/bin/python3", "-c", _SUBUID_CLIENT, str(sock)]
     return subprocess.run(command, capture_output=True, text=True, timeout=30, check=False).stdout
 
 
@@ -538,9 +551,18 @@ def _client(sock: Path, *, as_other_uid: bool) -> str:
 async def test_a_different_kernel_uid_is_refused_by_permissions_and_by_so_peercred(
     tmp_path: Path,
 ) -> None:
-    other_uid = _subordinate_uid()
-    if other_uid is None:
-        pytest.skip("host provides no subordinate UID range or unprivileged user namespaces")
+    launcher = _other_uid_launcher()
+    if launcher is None:
+        reason = (
+            f"no second kernel UID: set {_SECOND_USER_ENV} to a real OS account usable through "
+            "passwordless sudo, or provide a subordinate UID range and unprivileged user "
+            "namespaces"
+        )
+        if os.environ.get("AKESIS_REQUIRE_DOCKER_TESTS") == "1":
+            pytest.fail(f"required security test cannot run: {reason}")  # CI: never a skip
+        pytest.skip(reason)
+    other, other_uid, how = launcher
+    assert other_uid not in (0, os.getuid()), how  # genuinely another, non-root, kernel UID
     # The other UID must be able to traverse to the socket, so it lives in a fresh 0755 directory
     # under /tmp rather than in the 0700 pytest tree. The executor requires it to be owned by us
     # and not writable by anyone else.
@@ -553,22 +575,26 @@ async def test_a_different_kernel_uid_is_refused_by_permissions_and_by_so_peercr
         process = _start(env, cwd)
         try:
             deadline = time.monotonic() + 30
-            while "RESPONSE" not in _client(sock, as_other_uid=False):
+            while "RESPONSE" not in _client(sock):
                 assert process.poll() is None, process.communicate()[1]
                 assert time.monotonic() < deadline
                 await asyncio.sleep(0.2)
 
             # Layer 1, production mode 0660: the other UID cannot even connect.
             assert stat.S_IMODE(os.lstat(sock).st_mode) == 0o660
-            assert _client(sock, as_other_uid=True).split() == ["CONNECT_DENIED", "13"]
+            assert _client(sock, other).split() == ["CONNECT_DENIED", "13"], how
 
-            # Layer 2: with the file permission opened (test only), SO_PEERCRED still refuses it.
+            # Layer 2: with the file permission opened (test only), the connection is accepted at
+            # the socket level and reaches SO_PEERCRED, which closes it before reading anything.
             os.chmod(sock, 0o666)
-            assert _client(sock, as_other_uid=True).strip() == "CLOSED"
-            assert _client(sock, as_other_uid=False).startswith("RESPONSE HTTP/1.1 200")
+            assert _client(sock, other).strip() == "CLOSED", how
+            # The authorized caller is still served.
+            assert _client(sock).startswith("RESPONSE HTTP/1.1 200")
         finally:
             process.terminate()
             out, _ = process.communicate(timeout=10)
-        assert "executor_peer_refused" in out and str(other_uid) in out
+        # The executor itself saw exactly that kernel UID and refused it, once, and nothing else.
+        refused = re.findall(r"executor_peer_refused\s+peer_uid=(-?\d+)", out)
+        assert refused == [str(other_uid)], (how, out)
     finally:
         shutil.rmtree(base, ignore_errors=True)
