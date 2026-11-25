@@ -166,8 +166,160 @@ async def test_docker_failure_still_removes_the_workspace(snapshot_root: Path) -
         result = await runner._run_validation_unchecked(
             snapshot, "", ValidationCommand.PYTHON_SYNTAX
         )
-        assert result.exit_code != 0
+        assert result.exit_code == 125  # a failed create reports what `docker run` did
+        assert "akesis-does-not-exist" in result.stderr
         assert not list(snapshot_root.glob(f"{snapshot.snapshot_id}/work/*"))
+        assert _sandbox_containers() == []
+
+
+# Container-creation race: a timeout or cancellation while Docker is still creating the container.
+# The daemon finishes an in-flight create even when its client is killed, so a cleanup that ran
+# before the create landed used to leave a `Created` container behind (3/3 at 0.05 s).
+
+
+def _sandbox_containers() -> list[str]:
+    """Every sandbox container in any state, `Created` included."""
+    out = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "name=akesis-val-",
+            "--format",
+            "{{.Names}} {{.Status}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    return out.splitlines()
+
+
+async def _still_none_after_settling() -> list[str]:
+    """Look again after a pause, long enough for a late create to have landed."""
+    await asyncio.sleep(3)
+    return _sandbox_containers()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout", [0.01, 0.05, 0.1, 0.3])
+async def test_a_timeout_during_creation_leaves_no_container(
+    snapshot_root: Path, timeout: float
+) -> None:
+    assert _sandbox_containers() == []
+    async with _service()._open_unchecked(_token()) as snapshot:
+        workspace = create_workspace(snapshot)
+        try:
+            for _ in range(3):
+                with pytest.raises(SandboxTimeoutError):
+                    await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                        workspace, ["sleep", "30"], timeout=timeout
+                    )
+                assert _sandbox_containers() == []  # settled before the error was raised
+            assert await _still_none_after_settling() == []
+        finally:
+            discard_workspace(workspace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay", [0.0, 0.02, 0.05, 0.2])
+async def test_a_cancellation_during_creation_leaves_no_container(
+    snapshot_root: Path, delay: float
+) -> None:
+    assert _sandbox_containers() == []
+    async with _service()._open_unchecked(_token()) as snapshot:
+        workspace = create_workspace(snapshot)
+        try:
+            for _ in range(3):
+                task = asyncio.create_task(
+                    DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                        workspace, ["sleep", "30"], timeout=60
+                    )
+                )
+                await asyncio.sleep(delay)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert _sandbox_containers() == []
+            assert await _still_none_after_settling() == []
+        finally:
+            discard_workspace(workspace)
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancellation_cannot_cut_cleanup_short(snapshot_root: Path) -> None:
+    async with _service()._open_unchecked(_token()) as snapshot:
+        workspace = create_workspace(snapshot)
+        try:
+            for delay in (0.02, 0.05, 2.0):
+                task = asyncio.create_task(
+                    DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                        workspace, ["sleep", "30"], timeout=60
+                    )
+                )
+                await asyncio.sleep(delay)
+                task.cancel()
+                await asyncio.sleep(0.01)  # cleanup has begun
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert _sandbox_containers() == []
+            assert await _still_none_after_settling() == []
+        finally:
+            discard_workspace(workspace)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_run_keeps_exit_code_and_streams_and_leaves_no_container(
+    snapshot_root: Path,
+) -> None:
+    result = await _run(snapshot_root, "echo out; echo err >&2; exit 3")
+    assert (result.exit_code, result.stdout, result.stderr, result.timed_out) == (
+        3,
+        "out\n",
+        "err\n",
+        False,
+    )
+    for _ in range(50):  # --rm removes an exited container asynchronously
+        if _sandbox_containers() == []:
+            break
+        await asyncio.sleep(0.1)
+    assert _sandbox_containers() == []
+
+
+@pytest.mark.asyncio
+async def test_one_jobs_cleanup_never_removes_another_jobs_container(snapshot_root: Path) -> None:
+    async with _service()._open_unchecked(_token()) as snapshot:
+        survivor_ws, victim_ws = create_workspace(snapshot), create_workspace(snapshot)
+        try:
+            survivor = asyncio.create_task(
+                DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                    survivor_ws, ["sh", "-c", "sleep 6; echo survived"], timeout=60
+                )
+            )
+            await asyncio.sleep(2)  # the survivor's container is running
+            assert len(_sandbox_containers()) == 1
+            for timeout in (0.01, 0.05, 0.3):
+                with pytest.raises(SandboxTimeoutError):
+                    await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                        victim_ws, ["sleep", "30"], timeout=timeout
+                    )
+            cancelled = asyncio.create_task(
+                DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                    victim_ws, ["sleep", "30"], timeout=60
+                )
+            )
+            await asyncio.sleep(0.05)
+            cancelled.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled
+            assert len(_sandbox_containers()) == 1  # only the survivor, still there
+            result = await survivor
+            assert result.exit_code == 0 and result.stdout == "survived\n", result.stderr
+        finally:
+            discard_workspace(survivor_ws)
+            discard_workspace(victim_ws)
 
 
 # Phase 1.13: read-only root filesystem and the bounded /tmp tmpfs.
@@ -267,8 +419,14 @@ async def test_pid_limit_caps_process_creation(snapshot_root: Path) -> None:
 async def test_unexpected_error_after_start_removes_the_container(
     snapshot_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    real_communicate = asyncio.subprocess.Process.communicate
+    calls: list[int] = []
+
     async def failing_communicate(self: Any, *args: Any) -> Any:
-        await asyncio.sleep(3)  # the container is running by now
+        calls.append(1)
+        if len(calls) == 1:  # `docker create` completes normally
+            return await real_communicate(self, *args)
+        await asyncio.sleep(3)  # `docker start`: the container is running by now
         raise RuntimeError("client failure")
 
     monkeypatch.setattr(asyncio.subprocess.Process, "communicate", failing_communicate)

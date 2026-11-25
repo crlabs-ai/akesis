@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from src.packages.sdk import sandbox_runner
 from src.packages.sdk.sandbox_runner import (
     DockerSandboxRunner,
     PatchApplicationError,
@@ -178,3 +179,141 @@ def test_truncate_output() -> None:
     truncated = runner._truncate_output(long_text)
     assert len(truncated) <= 100
     assert "[... output truncated ...]" in truncated
+
+
+# --- container cleanup (no Docker: subprocess is faked) --------------------------------------
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.errors: list[tuple[str, dict[str, Any]]] = []
+
+    def error(self, event: str, **kw: Any) -> None:
+        self.errors.append((event, kw))
+
+    def info(self, *a: Any, **kw: Any) -> None: ...
+
+    def warning(self, *a: Any, **kw: Any) -> None: ...
+
+
+def _fake_docker(monkeypatch: pytest.MonkeyPatch, inspect: Any) -> list[list[str]]:
+    """Fake `subprocess.run` for rm/inspect. `inspect(attempt)` returns (returncode, stderr)."""
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_: Any) -> Any:
+        calls.append(list(argv))
+        if argv[:2] == ["docker", "rm"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        code, err = inspect(sum(1 for c in calls if c[1] == "container"))
+        return SimpleNamespace(returncode=code, stdout="", stderr=err)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    return calls
+
+
+def test_cleanup_is_confirmed_only_by_docker_reporting_no_such_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake_docker(monkeypatch, lambda n: (0, "") if n == 1 else (1, "No such object: x"))
+    assert sandbox_runner._remove_container("akesis-val-0123456789abcdef") is True
+    # Exactly this container, by its exact reference, every time: never a filter or a prune.
+    assert {c[-1] for c in calls} == {"akesis-val-0123456789abcdef"}
+    assert [c[:3] for c in calls] == [
+        ["docker", "rm", "-f"],
+        ["docker", "container", "inspect"],
+    ] * 2
+
+
+@pytest.mark.parametrize(
+    "inspect",
+    [
+        lambda n: (0, ""),  # the container is still there
+        lambda n: (1, "Cannot connect to the Docker daemon"),  # not proof of absence
+    ],
+)
+def test_cleanup_failure_is_bounded_logged_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch, inspect: Any
+) -> None:
+    log = _Log()
+    monkeypatch.setattr(sandbox_runner, "logger", log)
+    calls = _fake_docker(monkeypatch, inspect)
+    assert sandbox_runner._remove_container("abc123") is False
+    assert len(calls) == 2 * sandbox_runner._REMOVE_ATTEMPTS
+    assert log.errors == [("sandbox_container_cleanup_failed", {"container": "abc123"})]
+
+
+def test_cleanup_survives_a_missing_docker_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    def run(*_: Any, **__: Any) -> Any:
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    monkeypatch.setattr(sandbox_runner, "logger", _Log())
+    assert sandbox_runner._remove_container("abc123") is False
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_after_create_removes_the_created_id_even_if_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    container_id = "f" * 64
+    removed: list[str] = []
+
+    class _Proc:
+        def __init__(self, argv: tuple[str, ...]) -> None:
+            self.argv, self.killed = argv, False
+            self.returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            if self.argv[1] == "create":
+                self.returncode = 0
+                return container_id.encode() + b"\n", b""
+            await asyncio.sleep(60)  # `docker start --attach` never finishes
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+
+        async def wait(self) -> int:
+            return -9
+
+    procs: list[_Proc] = []
+
+    async def fake_exec(*argv: str, **_: object) -> _Proc:
+        procs.append(_Proc(argv))
+        return procs[-1]
+
+    def failing_remove(ref: str) -> bool:
+        removed.append(ref)
+        return False  # cleanup could not be confirmed
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(sandbox_runner, "_remove_container", failing_remove)
+    with pytest.raises(sandbox_runner.SandboxTimeoutError):
+        await DockerSandboxRunner()._execute_container(tmp_path, ["pytest", "-v"], timeout=0.2)
+    assert [p.argv[1] for p in procs] == ["create", "start"]
+    assert procs[1].argv[-1] == container_id and procs[1].killed  # client stopped first
+    assert removed == [container_id]  # the exact ID `docker create` returned, nothing else
+
+
+@pytest.mark.asyncio
+async def test_a_failed_create_reports_exit_125_like_docker_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Proc:
+        returncode = 1
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"Error response from daemon: No such image"
+
+    async def fake_exec(*argv: str, **_: object) -> _Proc:
+        assert argv[1] == "create"  # nothing is started after a failed create
+        return _Proc()
+
+    removed: list[str] = []
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(sandbox_runner, "_remove_container", lambda ref: removed.append(ref))
+    result = await DockerSandboxRunner()._execute_container(tmp_path, ["pytest", "-v"], 30)
+    assert result.exit_code == 125 and "No such image" in result.stderr
+    assert len(removed) == 1 and removed[0].startswith("akesis-val-")  # its own name only

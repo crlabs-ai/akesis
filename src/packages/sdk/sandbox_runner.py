@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 import subprocess
 import time
@@ -45,12 +46,58 @@ COMMAND_INVOCATION_MAP: dict[ValidationCommand, list[str]] = {
 }
 
 
-def _force_remove_container(name: str) -> None:
-    """Best-effort removal of one named container. Never raises into the caller."""
+# An interrupted `docker create` is allowed to finish for at most this long before its client is
+# killed (only a hung daemon takes this long).
+CREATE_SETTLE_SECONDS = 30.0
+_REMOVE_ATTEMPTS = 3
+
+
+def _remove_container(ref: str) -> bool:
+    """Force-remove one container by exact ID or unique name, and confirm Docker no longer has it.
+
+    `docker rm -f` exits 0 for a container that does not exist, so it cannot confirm anything on
+    its own; `docker container inspect` reporting "No such" is the confirmation. Bounded and
+    best-effort: returns False and logs after the last attempt, and never raises into the caller.
+    """
+    for attempt in range(_REMOVE_ATTEMPTS):
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", ref], capture_output=True, timeout=30, check=False
+            )
+            probe = subprocess.run(
+                ["docker", "container", "inspect", "--format", "{{.Id}}", ref],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            if probe.returncode != 0 and "no such" in probe.stderr.lower():
+                return True
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if attempt + 1 < _REMOVE_ATTEMPTS:
+            time.sleep(0.5)
+    logger.error("sandbox_container_cleanup_failed", container=ref)
+    return False
+
+
+async def _spawn_and_communicate(argv: list[str], spawned: list[Any]) -> tuple[Any, bytes, bytes]:
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    spawned.append(proc)
+    out, err = await proc.communicate()
+    return proc.returncode, out, err
+
+
+async def _run_to_completion(cleanup: Any) -> None:
+    """Cleanup finishes even if the caller is cancelled again while it runs."""
+    task = asyncio.ensure_future(cleanup)
     try:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError):
-        logger.warning("sandbox_container_cleanup_failed", container=name)
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 class SandboxError(Exception):
@@ -262,15 +309,24 @@ class DockerSandboxRunner:
         cmd_args: list[str],
         timeout: float,
     ) -> ValidationExecutionResult:
-        """Runs an isolated container. Timeout, cancellation or any error force-removes it."""
+        """Runs an isolated container. Timeout, cancellation or any error force-removes it.
+
+        Create and start are separate so that cleanup always knows whether the container exists.
+        The daemon finishes an in-flight create even when its client is killed, so killing a
+        `docker run` client mid-create could leave a `Created` container that cleanup had already
+        looked for and not found. A create is therefore never cut short: on timeout or
+        cancellation it is allowed to finish (bounded), and then the container is removed by its
+        unique name. After the create, every action targets the exact container ID it returned.
+        """
         if not self.executor and _local_docker_forbidden():
             raise SandboxError("Local Docker validation is disabled in production")
         start_time = time.perf_counter()
+        deadline = time.monotonic() + timeout  # covers create and run, as `docker run` did
         container = f"akesis-val-{uuid.uuid4().hex[:16]}"
 
         docker_cmd = [
             "docker",
-            "run",
+            "create",
             "--rm",
             "--name",
             container,
@@ -299,20 +355,54 @@ class DockerSandboxRunner:
         ] + cmd_args
 
         logger.info("validation_container_invoked", cmd=cmd_args, timeout=timeout)
+        timed_out = SandboxTimeoutError(f"Sandbox execution timed out after {timeout}s")
 
-        proc = await asyncio.create_subprocess_exec(
-            *docker_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        spawned: list[Any] = []
+        creating = asyncio.ensure_future(_spawn_and_communicate(docker_cmd, spawned))
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            created, created_out, created_err = await asyncio.wait_for(
+                asyncio.shield(creating), timeout=timeout
+            )
+        except BaseException as error:
+            await _run_to_completion(self._settle_create(creating, spawned, container))
+            if isinstance(error, TimeoutError):
+                raise timed_out from None
+            raise
+        if created != 0:
+            # Like `docker run`, a daemon-side failure (for example a missing image) is exit 125.
+            await _run_to_completion(asyncio.to_thread(_remove_container, container))
+            return ValidationExecutionResult(
+                exit_code=125,
+                stdout="",
+                stderr=self._truncate_output(created_err.decode("utf-8", errors="replace")),
+                duration_ms=round((time.perf_counter() - start_time) * 1000.0, 2),
+                timed_out=False,
+            )
+
+        ref = created_out.decode("utf-8", errors="replace").strip() or container
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:  # the create used the whole budget: never start it
+            await _run_to_completion(asyncio.to_thread(_remove_container, ref))
+            raise timed_out
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker",
+                "start",
+                "--attach",
+                ref,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(), timeout=remaining
+            )
         except TimeoutError:
-            await self._stop_container(proc, container)
-            raise SandboxTimeoutError(f"Sandbox execution timed out after {timeout}s") from None
+            await _run_to_completion(self._stop_container(proc, ref))
+            raise timed_out from None
         except BaseException:
             # Cancellation or any other failure: never leave the container running.
-            await self._stop_container(proc, container)
+            await _run_to_completion(self._stop_container(proc, ref))
             raise
 
         duration_ms = (time.perf_counter() - start_time) * 1000.0
@@ -324,17 +414,32 @@ class DockerSandboxRunner:
             timed_out=False,
         )
 
-    async def _stop_container(self, proc: Any, container: str) -> None:
-        """Kill the client, remove the named container, and reap the client process."""
+    async def _settle_create(self, creating: Any, spawned: list[Any], container: str) -> None:
+        """Let an interrupted create finish (bounded), then remove what it made, by name."""
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        await asyncio.to_thread(_force_remove_container, container)
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except (TimeoutError, ProcessLookupError):
-            pass
+            await asyncio.wait_for(creating, timeout=CREATE_SETTLE_SECONDS)
+        except Exception:
+            # The create client failed or hung. Wait for its process to exit rather than kill
+            # it, since a killed client is exactly what leaves a late container behind.
+            for proc in spawned:
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=CREATE_SETTLE_SECONDS)
+                except (TimeoutError, ProcessLookupError):
+                    # A hung daemon: the one case this bound cannot settle. The executor's
+                    # startup sweep removes labelled leftovers; the name is logged for the rest.
+                    with contextlib.suppress(ProcessLookupError):
+                        proc.kill()
+                    logger.error("sandbox_container_create_unsettled", container=container)
+        await asyncio.to_thread(_remove_container, container)
+
+    async def _stop_container(self, proc: Any, ref: str) -> None:
+        """Kill and reap the client first, so it sends nothing more, then remove the container."""
+        if proc is not None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError, ProcessLookupError):
+                await asyncio.wait_for(proc.wait(), timeout=10)
+        await asyncio.to_thread(_remove_container, ref)
 
     def _truncate_output(self, text: str) -> str:
         """Truncates voluminous stdout/stderr output defensively."""
