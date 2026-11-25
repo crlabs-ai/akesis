@@ -2,7 +2,7 @@
 
 The validation executor (`python -m src.apps.executor`) is a separate process. When remote mode is
 enabled it is the only component that constructs `DockerSandboxRunner` and runs the `docker` CLI.
-Callers use `RemoteSandboxRunner`, which implements the existing `SandboxRunnerProtocol` and is
+The remediation worker (Phase 1.14c) is the only caller. It uses `RemoteSandboxRunner`, which implements the existing `SandboxRunnerProtocol` and is
 injected through `ValidationService(sandbox_runner=...)`. `GitMutationService` and
 `RemediationOrchestrator` pick it up through the same default.
 
@@ -146,11 +146,11 @@ must be `unix:///...`, and the keys must be at least 32 characters and different
   calling process, for development. In production (Phase 1.14b) the URL is required,
   `DockerSandboxRunner` refuses to build or run outside the executor, and only `akesis-exec` is in
   the `docker` group.
-- **In remote mode, the API process holds both executor keys**, because approval resumption still
-  runs in the API. A compromised API can submit allowlisted validation jobs, which still refuse
-  while the hold is active, and can read results. It cannot choose an image, arguments, mounts or
-  resources. Moving remediation execution into the worker (Phase 1.14c) removes the keys from the
-  API.
+- **The remediation worker is the only caller (Phase 1.14c).** It holds both executor keys and is
+  the only member of the socket group, and its UID is the executor's allowlist. A compromised worker
+  can submit allowlisted validation jobs, which are refused while the hold is active, and can read
+  results. It still cannot choose an image, arguments, mounts or resources. The API holds no
+  executor configuration; production refuses to start it with any.
 - **The executor trusts the caller's provenance attestation.** It verifies content integrity, but
   it has no database or GitHub access with which to prove that this commit belongs to this
   incident.

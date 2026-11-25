@@ -28,7 +28,12 @@ Runtime: Python 3.12+ / Docker Engine / PostgreSQL 16
 
 ## 2. Secrets & Environment Configuration
 
-Create the production `.env` file on the deployment host. Ensure permissions are restricted (`chmod 600 .env`).
+Each service has its **own** `.env` in its own owner-only working directory (Phase 1.14c):
+- the API: `/etc/akesis/api/.env`, owned by `akesis`
+- the worker: `/etc/akesis/worker/.env`, owned by `akesis-worker`
+- the executor has none
+
+Each directory is 0700 and each file 0600. The settings loader reads `.env` from the working directory, so separate directories are what keep each service's credentials out of the other's process. Use the table in Step 4a to decide which variables go in which file. The example below lists every variable.
 
 ```ini
 # Core Environment
@@ -43,7 +48,7 @@ GITHUB_WEBHOOK_SECRET=your_generated_hmac_secret_32_chars_min
 GITHUB_API_URL=https://api.github.com
 # GitHub App identity: required for every GitHub call (verification, snapshots, branch and PR creation)
 GITHUB_APP_ID=123456
-# Multi-line PEM: place this in /opt/akesis/.env as a double-quoted value, not in the systemd
+# Multi-line PEM: place this in each service's .env as a double-quoted value, not in the systemd
 # EnvironmentFile (systemd cannot carry multi-line values). The settings loader reads .env from the
 # working directory. The settings loader is covered by tests (quoted multi-line and escaped forms).
 # Confirm the same on the deployed host during the live smoke test.
@@ -148,17 +153,16 @@ Create a systemd unit file at `/etc/systemd/system/akesis.service`:
 ```ini
 [Unit]
 Description=Akesis CI/CD Remediation Service
-After=network.target postgresql.service akesis-executor.service
-Wants=akesis-executor.service
+After=network.target postgresql.service
 
 [Service]
 Type=simple
+# The public-facing API: no Docker, no executor socket, no executor keys (Phase 1.14c).
 User=akesis
 Group=akesis
-# Socket access to the validation executor only (0660, group akesis-exec). Never the docker group.
-SupplementaryGroups=akesis-exec
-WorkingDirectory=/opt/akesis
-EnvironmentFile=/opt/akesis/.env
+# Its own .env (API credentials only) lives here; the code is imported from /opt/akesis.
+WorkingDirectory=/etc/akesis/api
+Environment=PYTHONPATH=/opt/akesis
 ExecStart=/opt/akesis/.venv/bin/uvicorn src.apps.api.main:app --host 127.0.0.1 --port 8000 --workers 2 --access-log
 Restart=always
 RestartSec=5s
@@ -187,7 +191,9 @@ Create a dedicated executor user. It is the only member of the `docker` group, a
 ```bash
 sudo useradd --system --uid 1000 --user-group --home-dir /opt/akesis-exec --shell /usr/sbin/nologin akesis-exec
 sudo usermod -aG docker akesis-exec
-sudo gpasswd -d akesis docker   # the API and worker user must not be in the docker group
+sudo gpasswd -d akesis docker   # the API user must not be in the docker group
+sudo useradd --system --user-group --home-dir /opt/akesis --shell /usr/sbin/nologin akesis-worker
+sudo usermod -aG akesis-exec akesis-worker   # the worker reaches the executor socket; the API does not
 sudo mkdir -p /opt/akesis-exec /etc/akesis-exec && sudo chown akesis-exec: /opt/akesis-exec
 ```
 
@@ -229,37 +235,62 @@ Do not set `ENVIRONMENT` for the executor: it takes no application configuration
 - `AKESIS_EXECUTOR_ALLOWED_UIDS` to the caller's UID
 - the two keys (`AKESIS_EXECUTOR_REQUEST_KEY` and `AKESIS_EXECUTOR_RESPONSE_KEY`), each at least 32 random characters and different from each other
 
-The API's `.env` sets `SANDBOX_EXECUTOR_URL=unix:///run/akesis-exec/exec.sock` and the same two keys (`SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY`). The API reaches the 0660 socket through `SupplementaryGroups=akesis-exec` in its unit, and `AKESIS_EXECUTOR_ALLOWED_UIDS` must name the `akesis` UID (`id -u akesis`). Approval resumption still runs in the API, so the API is the caller in this transitional stage. Moving it to the worker is Phase 1.14c, which is not implemented yet.
+The worker's `.env` (`/etc/akesis/worker/.env`) sets `SANDBOX_EXECUTOR_URL=unix:///run/akesis-exec/exec.sock` and the same two keys (`SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY`). The worker reaches the 0660 socket through `SupplementaryGroups=akesis-exec` in its unit, and `AKESIS_EXECUTOR_ALLOWED_UIDS` must name the `akesis-worker` UID (`id -u akesis-worker`). Since Phase 1.14c the remediation worker is the executor's only caller. The API holds no executor configuration, and production refuses to start the API if any `SANDBOX_EXECUTOR_*` value is set.
 
 The executor refuses to start if its working directory has a `.env` or its environment holds any application credential. While the remediation hold is active it answers every job with a signed `rejected/held`.
 
-Verify the isolation after `systemctl start akesis-executor akesis`:
+Verify the isolation after `systemctl start akesis-executor akesis-worker akesis`:
 
 ```bash
-id -nG akesis                       # must NOT include docker; must include akesis-exec
-id -nG akesis-exec                  # includes docker
+id -nG akesis                       # API: neither docker nor akesis-exec
+id -nG akesis-worker                # worker: akesis-exec, not docker
+id -nG akesis-exec                  # executor: docker
 stat -c '%a %U:%G' /run/akesis-exec/exec.sock        # 660 akesis-exec:akesis-exec
-sudo -u akesis curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz   # {"status":"ok"}
-sudo -u nobody curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz   # Permission denied
+sudo -u akesis-worker curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz  # {"status":"ok"}
+sudo -u akesis curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz         # Permission denied
+sudo -u nobody curl -s --unix-socket /run/akesis-exec/exec.sock http://e/healthz         # Permission denied
 sudo -u akesis docker ps            # must fail: permission denied on /var/run/docker.sock
+sudo -u akesis-worker docker ps     # must fail as well
+sudo grep -c SANDBOX_EXECUTOR /etc/akesis/api/.env   # 0
+sudo ls -ld /etc/akesis/api /etc/akesis/worker        # drwx------ akesis / akesis-worker
 ```
 
 ### Step 4a: Configure the Retry Worker (systemd)
 
-The retry worker executes scheduled webhook verification retries. It is a separate process from the API and shares the same `.env` file and PostgreSQL database. Either process can be restarted independently. Create `/etc/systemd/system/akesis-worker.service`:
+The worker runs scheduled webhook verification retries, workflow-log retrieval and, since Phase 1.14c, Slack-approved remediation. It is a separate process from the API, with its own Unix user (`akesis-worker`) and its own environment file. Both services share the PostgreSQL database. Either can be restarted independently.
+
+**Credentials per service (Phase 1.14c).** Each service has its own `.env` in its own working directory. Do not leave a `.env` in `/opt/akesis`.
+
+| Variable | `/etc/akesis/api/.env` (owner `akesis`, 0600) | `/etc/akesis/worker/.env` (owner `akesis-worker`, 0600) |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | yes | yes |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | yes (webhook provenance verification) | yes (retries, logs, snapshots, mutation) |
+| `GITHUB_WEBHOOK_SECRET`, `SLACK_SIGNING_SECRET`, `READ_API_TOKEN` | yes | **never** (startup refuses) |
+| `SLACK_WORKSPACE_ID`, `SLACK_CHANNEL_ID`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS` | yes | no (not secrets; unused) |
+| `SLACK_APPROVER_USER_IDS` | yes (decision authorization) | yes (re-authorized at execution) |
+| `SANDBOX_EXECUTOR_URL`, `SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY` | **never** (startup refuses) | yes |
+| `SERVICE_ROLE` | `api` (default) | `worker` (set in the unit) |
+| `GEMINI_API_KEY`, `SLACK_WEBHOOK_URL` | no | not yet: used only by diagnosis and card posting, which nothing schedules until the condition-6 handoff |
+
+Create `/etc/systemd/system/akesis-worker.service`:
 
 ```ini
 [Unit]
-Description=Akesis webhook retry worker
-After=network.target postgresql.service
+Description=Akesis worker (webhook retries, workflow logs, approved remediation)
+After=network.target postgresql.service akesis-executor.service
 Requires=postgresql.service
+Wants=akesis-executor.service
 
 [Service]
 Type=simple
-User=akesis
-Group=akesis
-WorkingDirectory=/opt/akesis
-EnvironmentFile=/opt/akesis/.env
+User=akesis-worker
+Group=akesis-worker
+# The executor socket (0660, group akesis-exec). Never the docker group.
+SupplementaryGroups=akesis-exec
+# Its own .env (worker credentials only) lives here; the code is imported from /opt/akesis.
+WorkingDirectory=/etc/akesis/worker
+Environment=PYTHONPATH=/opt/akesis
+Environment=SERVICE_ROLE=worker
 ExecStart=/opt/akesis/.venv/bin/python -m src.apps.worker
 # Heartbeat lives in a service-owned runtime directory (default /run/akesis), never /tmp.
 RuntimeDirectory=akesis
@@ -267,14 +298,15 @@ RuntimeDirectoryMode=0750
 Restart=always
 RestartSec=5s
 # Watchdog: the worker pings systemd only when a delivery or a pass completes. A frozen or blocked
-# worker stops pinging and is restarted. Keep WatchdogSec above the verification deadline (240s).
+# worker stops pinging and is restarted. Keep WatchdogSec above the remediation deadline (480s).
 Type=simple
 NotifyAccess=main
 WatchdogSec=600s
-# A stop waits for the deliveries already claimed in the current batch (up to 20, each bounded by
-# GitHub request timeouts), so allow a generous window before SIGKILL.
+# A stop finishes only the work item in flight and releases every unstarted claim. The longest item
+# is one approved remediation, bounded by REMEDIATION_DEADLINE_SECONDS (480s), so allow more than
+# that before SIGKILL. A remediation killed mid-mutation is never retried automatically.
 KillSignal=SIGTERM
-TimeoutStopSec=300s
+TimeoutStopSec=540s
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -293,7 +325,7 @@ sudo systemctl start akesis-worker
 /opt/akesis/.venv/bin/python -m src.apps.worker.healthcheck
 ```
 
-On SIGTERM the worker finishes only the delivery it is verifying, which is bounded by the 240-second deadline, and releases every claim it has not started. `TimeoutStopSec=300s` therefore covers the worst case. Validated in user scope: a SIGKILL restarts the worker, a frozen worker (SIGSTOP) is restarted by the watchdog within WatchdogSec, pings advance during normal operation, a clean stop exits 0 and systemd removes the runtime directory (so the probe then reports no heartbeat), and a frozen worker is reported stale. Not validated here: the `akesis` system account, `/run` ownership, `ProtectSystem`, and `ProtectHome`. One interaction to know about: `PrivateTmp=yes` hides `/tmp` from the service, so `WorkingDirectory` must not be under `/tmp`. A worker killed mid-verification leaves that one row `verifying`; it is reclaimed after 10 minutes and counts as an attempt. Claims it had not started are not left behind on a clean stop. The worker requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`. Without them it claims nothing, so due deliveries wait visibly and no attempts are consumed.
+On SIGTERM the worker finishes only the item in flight and releases every claim it has not started. The longest item is one approved remediation, bounded by the 480-second remediation deadline; a delivery verification is bounded by 240 seconds. `TimeoutStopSec=540s` therefore covers the worst case. Validated in user scope: a SIGKILL restarts the worker, a frozen worker (SIGSTOP) is restarted by the watchdog within WatchdogSec, pings advance during normal operation, a clean stop exits 0 and systemd removes the runtime directory (so the probe then reports no heartbeat), and a frozen worker is reported stale. Not validated here: the `akesis` system account, `/run` ownership, `ProtectSystem`, and `ProtectHome`. One interaction to know about: `PrivateTmp=yes` hides `/tmp` from the service, so `WorkingDirectory` must not be under `/tmp`. A worker killed mid-verification leaves that one row `verifying`; it is reclaimed after 10 minutes and counts as an attempt. Claims it had not started are not left behind on a clean stop. The worker requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`. Without them it claims nothing, so due deliveries wait visibly and no attempts are consumed.
 
 ---
 
@@ -346,7 +378,7 @@ sudo systemctl reload nginx
 1. Navigate to your GitHub repository $\rightarrow$ **Settings** $\rightarrow$ **Webhooks** $\rightarrow$ **Add webhook**.
 2. **Payload URL:** `https://akesis.yourdomain.com/v1/webhooks/github`
 3. **Content type:** `application/json`
-4. **Secret:** The exact value of `GITHUB_WEBHOOK_SECRET` in `.env`.
+4. **Secret:** The exact value of `GITHUB_WEBHOOK_SECRET` in the API's `.env`.
 5. **Events:** Select *"Let me select individual events"* $\rightarrow$ Check **Workflow runs**.
 6. Click **Add webhook**.
 

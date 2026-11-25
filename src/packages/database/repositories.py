@@ -237,6 +237,13 @@ class ApprovalRepository:
                 reason=reason,
                 decided_at=now,
                 updated_at=now,
+                # Phase 1.14c: an approval queues exactly one remediation job, atomically with
+                # the decision. A repeated delivery does not match this update, so it queues none.
+                **(
+                    {"execution_status": "pending", "execution_attempts": 0}
+                    if target_status == ApprovalStatus.APPROVED
+                    else {}
+                ),
             )
             .returning(ApprovalModel)
         )

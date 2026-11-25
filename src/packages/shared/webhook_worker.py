@@ -40,7 +40,7 @@ import httpx
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from src.packages.database import log_jobs
+from src.packages.database import approval_jobs, log_jobs
 from src.packages.database.models import PipelineModel, WebhookEventModel
 from src.packages.database.webhook_events import WebhookEventRepository
 from src.packages.sdk.github_app_auth import GitHubAppAuth
@@ -92,6 +92,20 @@ class LogRetrievalConfig:
 
 
 @dataclass(frozen=True)
+class ApprovalExecutionConfig:
+    """Phase 1.14c: Slack-approved remediation runs here, never in the API process."""
+
+    max_attempts: int
+    deadline_seconds: float
+    lease_seconds: int
+
+    def __post_init__(self) -> None:
+        # A live remediation must never outlive its claim, or a second worker could reclaim it.
+        if self.lease_seconds <= self.deadline_seconds:
+            raise ValueError("Remediation lease must exceed the remediation deadline")
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     poll_seconds: float
     batch_size: int
@@ -107,6 +121,8 @@ class WorkerConfig:
     github_app_private_key: str = field(repr=False)
     # None disables the workflow-log stage.
     log_retrieval: LogRetrievalConfig | None = None
+    # None disables the approval-execution stage.
+    approval_execution: ApprovalExecutionConfig | None = None
 
 
 @dataclass
@@ -176,11 +192,15 @@ class RetryWorker:
         *,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         random_value: Callable[[], float] = random.random,
+        orchestrator: Any = None,
     ) -> None:
         self._sessions = session_factory
         self._config = config
         self._now = now
         self._random = random_value
+        # Built on first use. Tests inject a double; production always uses the gated
+        # RemediationOrchestrator.resume_approval, whose first statement is the hold.
+        self._orchestrator = orchestrator
 
     @property
     def app_configured(self) -> bool:
@@ -229,6 +249,7 @@ class RetryWorker:
             if progress is not None:
                 progress()
         await self._log_stage(stop, progress, summary)
+        await self._approval_stage(stop, progress, summary)
         return summary
 
     def _count(self, summary: TickSummary, name: str) -> None:
@@ -368,6 +389,146 @@ class RetryWorker:
                 status=status,
             )
         return result
+
+    async def _approval_stage(
+        self,
+        stop: asyncio.Event | None,
+        progress: Callable[[], None] | None,
+        summary: TickSummary,
+    ) -> None:
+        config = self._config.approval_execution
+        if config is None:
+            return
+        # One claim at a time, taken immediately before its execution. A batch would share one
+        # lease across sequential remediations, so a later claim could expire before it started
+        # and a second worker could reclaim and run the same approval concurrently.
+        for _ in range(self._config.batch_size):
+            if stop is not None and stop.is_set():
+                return  # nothing is claimed ahead of execution, so nothing needs releasing
+            async with self._sessions() as session:
+                async with session.begin():
+                    claims, exhausted = await approval_jobs.claim_due(
+                        session,
+                        now=self._now(),
+                        batch=1,
+                        lease_seconds=config.lease_seconds,
+                        max_attempts=config.max_attempts,
+                    )
+            if exhausted:
+                summary.counters["remediation_exhausted"] = (
+                    summary.counters.get("remediation_exhausted", 0) + exhausted
+                )
+            if not claims:
+                if not exhausted:
+                    return
+                continue
+            approval_id, attempt = claims[0]
+            await self._execute_approval(approval_id, attempt, config, summary)
+            if progress is not None:
+                progress()
+
+    async def _execute_approval(
+        self, approval_id: str, attempt: int, config: ApprovalExecutionConfig, summary: TickSummary
+    ) -> None:
+        """One claimed attempt. Authorization is re-derived from PostgreSQL by resume_approval.
+
+        The claim carries only the approval ID: the orchestrator re-reads the approval, re-verifies
+        persisted provenance and every binding, and the hold is its first statement. A held attempt
+        is parked with its attempt refunded. A pipeline left `mutating` by an earlier attempt is
+        never retried automatically, so a PR cannot be created twice.
+        """
+        from src.packages.shared.models import PipelineStatus
+        from src.packages.shared.provenance import UnverifiedProvenanceError
+        from src.packages.shared.remediation_orchestrator import (
+            OrchestrationError,
+            RemediationOrchestrator,
+        )
+
+        if self._orchestrator is None:
+            self._orchestrator = RemediationOrchestrator()
+        retry_code: str | None = None
+        status = approval_jobs.FAILED
+        code: str | None = "remediation_failed"
+        try:
+            async with asyncio.timeout(config.deadline_seconds):
+                record = await self._orchestrator.resume_approval(approval_id)
+        except UnverifiedProvenanceError:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await approval_jobs.hold(session, approval_id, attempt)
+            self._record_remediation(summary, approval_id, attempt, "held", result)
+            return
+        except ProvenanceRejected as error:
+            code = f"provenance_{error.code}"
+        except OrchestrationError:
+            code = "binding_mismatch"
+        except TimeoutError:
+            retry_code = "remediation_deadline_exceeded"
+        except Exception as error:
+            # Never log str(error): it can carry API responses. Retried within the budget.
+            logger.error(
+                "remediation_attempt_error",
+                approval_id=approval_id,
+                error_type=type(error).__name__,
+            )
+            retry_code = "remediation_error"
+        else:
+            if record.status == PipelineStatus.COMPLETED:
+                status, code = approval_jobs.COMPLETED, None
+            elif record.status == PipelineStatus.FAILED:
+                retry_code = "mutation_failed"  # the mutation record makes a retry idempotent
+            elif record.status == PipelineStatus.MUTATING:
+                code = "mutation_state_unknown"  # an earlier attempt was cut off mid-mutation
+            else:
+                code = f"pipeline_{record.status.value}"[:64]
+        next_attempt_at = None
+        if retry_code is not None:
+            status, code = approval_jobs.PENDING, retry_code
+            next_attempt_at = classify_retry(
+                {},
+                attempt,
+                now=self._now(),
+                base_delay=self._config.base_delay_seconds,
+                max_delay=self._config.max_delay_seconds,
+                provider_ceiling=self._config.provider_ceiling_seconds,
+                random_value=self._random,
+            ).next_retry_at
+        async with self._sessions() as session:
+            async with session.begin():
+                result = await approval_jobs.complete(
+                    session,
+                    approval_id,
+                    attempt,
+                    status=status,
+                    code=code,
+                    next_attempt_at=next_attempt_at,
+                )
+        outcome = "retry" if retry_code is not None else status
+        self._record_remediation(summary, approval_id, attempt, outcome, result, code)
+
+    def _record_remediation(
+        self,
+        summary: TickSummary,
+        approval_id: str,
+        attempt: int,
+        outcome: str,
+        result: str,
+        code: str | None = approval_jobs.HOLD_CODE,
+    ) -> None:
+        if result != approval_jobs.RECORDED:
+            self._count(summary, "remediation_lease_lost")
+            logger.warning(
+                "remediation_write_refused", approval_id=approval_id, attempt=attempt, reason=result
+            )
+            return
+        self._count(summary, f"remediation_{outcome}")
+        logger.info(
+            "remediation_recorded",
+            approval_id=approval_id,
+            attempt=attempt,
+            outcome=outcome,
+            code=code,
+        )
 
     async def _release_unstarted(self, claims: list[tuple[str, int]], summary: TickSummary) -> None:
         for delivery_id, attempt in claims:

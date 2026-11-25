@@ -216,8 +216,9 @@ def test_production_config_rejects_missing_or_placeholder_secrets() -> None:
     assert "DATABASE_URL contains default/development credentials" in err_str
     assert "GITHUB_WEBHOOK_SECRET is missing or using an insecure test placeholder" in err_str
     assert "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production" in err_str
-    assert "GEMINI_API_KEY is required in production" in err_str
-    assert "SLACK_WEBHOOK_URL is missing or using an insecure placeholder" in err_str
+    # Phase 1.14c: not required by either service yet (no runtime caller), placeholders still fail.
+    assert "GEMINI_API_KEY is an insecure placeholder" in err_str
+    assert "SLACK_WEBHOOK_URL is an insecure placeholder" in err_str
     assert "SLACK_SIGNING_SECRET is missing or using an insecure placeholder" in err_str
 
 
@@ -280,9 +281,6 @@ def test_production_config_valid() -> None:
         slack_approver_user_ids=["U_TEST"],
         slack_workspace_id="T_TEST",
         slack_channel_id="C_TEST",
-        sandbox_executor_url="unix:///run/akesis-exec/exec.sock",
-        sandbox_executor_request_key="q" * 40,
-        sandbox_executor_response_key="r" * 40,
     )
     assert prod_settings.environment == "production"
     assert prod_settings.read_api_token == "prod_read_token_distinct_987654"
@@ -304,9 +302,6 @@ def _valid_production(**overrides: object) -> dict[str, object]:
         "slack_approver_user_ids": ["U_TEST"],
         "slack_workspace_id": "T_TEST",
         "slack_channel_id": "C_TEST",
-        "sandbox_executor_url": "unix:///run/akesis-exec/exec.sock",
-        "sandbox_executor_request_key": "q" * 40,
-        "sandbox_executor_response_key": "r" * 40,
     }
     values.update(overrides)
     return values

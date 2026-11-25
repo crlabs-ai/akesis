@@ -564,11 +564,14 @@ async def test_shutdown_during_sleep_returns_promptly(
     assert states[-1] == "stopped"
 
 
-def test_worker_module_has_no_path_to_remediation() -> None:
-    # Structural guard: the worker must reach downstream only through the shared admission path.
+def test_worker_module_reaches_remediation_only_through_the_gated_resume() -> None:
+    # Structural guard. Phase 1.14c moved approved remediation into the worker on purpose. It may
+    # reach the orchestrator only through the gated resume_approval (the hold is its first
+    # statement): never process_failure, and never an unchecked body.
     source = Path(webhook_worker.__file__).read_text(encoding="utf-8")
-    for forbidden in ("remediation_orchestrator", "RemediationOrchestrator", "process_failure"):
-        assert forbidden not in source
+    for forbidden in ("process_failure", "_unchecked(", "require_verified_provenance"):
+        assert forbidden not in source, forbidden
+    assert source.count(".resume_approval(") == 1
 
 
 @pytest.mark.asyncio

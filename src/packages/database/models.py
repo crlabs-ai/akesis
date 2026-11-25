@@ -143,7 +143,22 @@ class ApprovalModel(Base):
         doc="Timestamp of last record update",
     )
 
-    __table_args__ = (Index("ix_approvals_status_expires", "status", "expires_at"),)
+    # Remediation execution (Phase 1.14c): pending -> running -> completed | failed | held.
+    # Set to pending only by the same update that records an approval. While running,
+    # execution_next_attempt_at is the claim lease; otherwise it is the next retry time.
+    execution_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    execution_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    execution_next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    execution_failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("ix_approvals_status_expires", "status", "expires_at"),
+        Index("ix_approvals_execution_due", "execution_status", "execution_next_attempt_at"),
+    )
 
 
 class MutationModel(Base):

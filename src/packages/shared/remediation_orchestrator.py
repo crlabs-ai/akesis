@@ -13,6 +13,7 @@ from src.packages.database.repositories import (
 )
 from src.packages.database.session import get_session_factory
 from src.packages.shared.approval_service import ApprovalService, approval_id_for
+from src.packages.shared.config import settings
 from src.packages.shared.context_resolver import CodebaseContextResolver
 from src.packages.shared.diagnosis_evidence import load_diagnosis_context
 from src.packages.shared.diagnostic_service import DiagnosticService
@@ -436,6 +437,13 @@ class RemediationOrchestrator:
                 raise OrchestrationError(
                     f"Approval record status must be 'approved' (got {approval.status.value})."
                 )
+            # Phase 1.14c: the decision is re-authorized at execution time, not trusted from the
+            # job. The recorded approver must still be on the configured approver allowlist.
+            if (
+                not approval.decided_by
+                or approval.decided_by not in settings.slack_approver_user_ids
+            ):
+                raise OrchestrationError("Approval was not decided by an authorized approver")
 
             # 3. Retrieve and deserialize authoritative persisted context, proposal, and validation
             if not pipeline.failure_context_json:

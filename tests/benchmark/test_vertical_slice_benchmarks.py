@@ -262,6 +262,16 @@ class BenchmarkMutationService:
             return await repo.create_mutation(record)
 
 
+@pytest.fixture(autouse=True)
+def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 1.14c: resume re-authorizes the recorded approver against the allowlist."""
+    monkeypatch.setattr(
+        settings,
+        "slack_approver_user_ids",
+        ["reviewer_a", "reviewer_b", "reviewer_c", "alice", "lead_dev"],
+    )
+
+
 @pytest.fixture
 async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = create_async_engine(settings.database_url, poolclass=NullPool, echo=False)

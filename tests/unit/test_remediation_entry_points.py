@@ -74,9 +74,10 @@ def _call_sites(name: str) -> list[str]:
 def test_entry_point_census_has_no_unexpected_call_site() -> None:
     """Public remediation entry points are called only where the census says they may be."""
     assert _call_sites("process_failure") == []
+    # Phase 1.14c: only the remediation worker resumes approvals; the API never does.
+    worker = "src/packages/shared/webhook_worker.py"
     assert _call_sites("resume_approval") == [
-        "src/apps/api/routes.py:"
-        + _line_of("src/apps/api/routes.py", "await orchestrator.resume_approval(approval_id)")
+        f"{worker}:" + _line_of(worker, "await self._orchestrator.resume_approval(approval_id)")
     ]
     # The unchecked bodies are reached only from their gated public methods.
     assert len(_call_sites("_process_failure_unchecked")) == 1
@@ -94,11 +95,9 @@ def _line_of(relative: str, needle: str) -> str:
 def test_webhook_route_never_schedules_remediation() -> None:
     lines = (REPO / "src/apps/api/routes.py").read_text(encoding="utf-8").splitlines()
     assert not any("process_failure" in line for line in lines)
-    scheduled = [
-        lines[index + 1].strip() for index, line in enumerate(lines) if "add_task(" in line
-    ]
-    # The only background task is approval resumption, which only a human approval can trigger.
-    assert scheduled == ["_safe_resume_approval,"], scheduled
+    # Phase 1.14c: the API schedules no background work and never reaches the orchestrator.
+    assert not any("add_task(" in line for line in lines)
+    assert not any("resume_approval" in line or "RemediationOrchestrator" in line for line in lines)
 
 
 def test_no_environment_switch_can_reach_the_remediation_or_provenance_modules() -> None:

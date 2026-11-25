@@ -331,3 +331,47 @@ Docker daemon access is removed from the API.
   opened in the test, by the SO_PEERCRED allowlist. Still not verifiable here without root: a real
   second system user in the socket's group, the systemd units themselves, and
   `SupplementaryGroups`.
+
+## Implementation Status (Phase 1.14c)
+
+Approved remediation executes only in the remediation worker. The hold is unchanged and still
+raises first.
+
+* **The API records and queues, nothing more.** The Slack route verifies the signature and the
+  approver, workspace and channel, then records the decision. The same conditional update that
+  records an approval sets `approvals.execution_status = pending`, so a repeated delivery (a
+  duplicate) queues nothing. The API no longer imports the orchestrator or any sandbox runner,
+  schedules no background task, and in production refuses to start with any `SANDBOX_EXECUTOR_*`
+  value (`SERVICE_ROLE=api`).
+* **Durable worker stage** (`approval_jobs`, mirroring `log_jobs`):
+  - claims one job at a time, immediately before running it, with `FOR UPDATE SKIP LOCKED` and a
+    lease in `execution_next_attempt_at` (a shared batch lease could lapse before a queued job
+    started, letting a second worker run the same approval concurrently)
+  - every write is guarded by status and attempt, so a lost lease writes nothing
+  - bounded attempts (`REMEDIATION_MAX_ATTEMPTS`) with backoff, and lease recovery
+  - shutdown claims nothing further, so no attempt is spent on work that never started
+  - the claim carries only the approval ID; nothing in a job payload is treated as authorization
+* **Each attempt calls the gated `resume_approval`.** The hold comes first. Then persisted
+  provenance is re-verified, every approval, incident, repository, commit and proposal binding is
+  checked, and, new in this phase, the recorded approver must still be on
+  `SLACK_APPROVER_USER_IDS`.
+* **Hold behaviour.** `UnverifiedProvenanceError` parks the job as `held`. The approval is kept,
+  the attempt is refunded, the job is not claimed again, and no snapshot, Docker or GitHub call
+  happens; this is tested with every subprocess and HTTP request patched to fail. Recovery for the
+  condition-6 rollout is deliberate: `python -m src.apps.worker.requeue_held`.
+* **After the hold, mutation policy is unchanged.** A `FAILED` pipeline is retried, and the mutation
+  record makes the retry idempotent. A pipeline left `MUTATING` is terminal
+  (`mutation_state_unknown`) and is never re-run automatically. Binding and provenance failures are
+  terminal.
+* **Identities and credentials.**
+  - the API (`akesis`): no Docker, no executor socket, no executor keys
+  - the worker (`akesis-worker`): the executor socket group and the executor keys
+  - the executor (`akesis-exec`): Docker
+  - each service has its own `.env` in its own owner-only working directory, and production
+    checks credentials per `SERVICE_ROLE`
+  - `GEMINI_API_KEY` and `SLACK_WEBHOOK_URL` have no runtime caller until the condition-6 handoff,
+    so neither role requires them; placeholder values are still rejected
+
+Tests: `tests/integration/test_approval_execution.py`, `tests/unit/test_api_docker_isolation.py`,
+`tests/unit/test_remediation_entry_points.py` (census: the worker is the only `resume_approval`
+call site).

@@ -34,6 +34,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app(app_settings: Settings | None = None) -> FastAPI:
     """Factory creating the configured FastAPI application."""
     active_settings = app_settings or settings
+    if (
+        active_settings.environment.lower() in ("production", "prod")
+        and active_settings.service_role != "api"
+    ):
+        # Phase 1.14c: worker-role settings may hold validation-executor keys; the API never may.
+        raise RuntimeError("The API requires SERVICE_ROLE=api in production")
 
     app = FastAPI(
         title="Akesis API Gateway",

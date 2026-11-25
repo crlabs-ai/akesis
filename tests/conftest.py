@@ -33,6 +33,7 @@ _DATABASE_TEST_FILES = frozenset(
     {
         "tests/benchmark/test_vertical_slice_benchmarks.py",
         "tests/integration/test_approval_flow.py",
+        "tests/integration/test_approval_execution.py",
         "tests/integration/test_database_repository.py",
         "tests/integration/test_historical_recovery.py",
         "tests/integration/test_provenance_matrix.py",

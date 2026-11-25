@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     )
 
     environment: str = Field(default="development", description="Runtime environment")
+    # Phase 1.14c: which service loads these settings. Production checks the credentials each
+    # service actually needs; the API may not hold validation-executor keys at all.
+    service_role: Literal["api", "worker"] = Field(default="api")
     log_level: str = Field(default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR")
 
     # API Security & Authentication
@@ -224,6 +227,11 @@ class Settings(BaseSettings):
     sandbox_executor_request_key: str = Field(default="", repr=False)
     sandbox_executor_response_key: str = Field(default="", repr=False)
     sandbox_executor_timeout_seconds: float = Field(default=120.0, gt=0, le=900)
+    # Phase 1.14c: approval execution in the remediation worker. The lease must exceed the
+    # deadline, so a live remediation is never reclaimed.
+    remediation_max_attempts: int = Field(default=3, ge=1, le=20)
+    remediation_deadline_seconds: float = Field(default=480.0, gt=0, le=3000)
+    remediation_lease_seconds: int = Field(default=900, ge=60, le=3600)
 
     # Human-in-the-Loop & Slack Integration Settings
     slack_webhook_url: str = Field(
@@ -287,12 +295,25 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_configuration(self) -> "Settings":
-        """Enforces strict fail-fast validation for production deployments."""
+        """Fail-fast production checks, per service role (Phase 1.14c credential inventory).
+
+        - Both: DATABASE_URL and the GitHub App. The API verifies webhook provenance with it; the
+          worker uses it for verification retries, log retrieval, snapshots and mutation.
+        - API: the webhook secret, the Slack signing secret and approver policy, CORS, trusted
+          hosts and the read token. It must not hold validation-executor configuration.
+        - Worker: the validation executor (it is the executor's only caller) and the approver
+          allowlist (each approval is re-authorized at execution time). It must not hold the
+          webhook secret, the Slack signing secret or the read token.
+        - GEMINI_API_KEY and SLACK_WEBHOOK_URL are used only by diagnosis and approval-card
+          posting (`process_failure`), which has no caller until the condition-6 handoff. They
+          are not required by either role; when set, placeholders are still rejected.
+        """
         is_prod = self.environment.lower() in ("production", "prod")
         if not is_prod:
             return self
 
         errors: list[str] = []
+        api = self.service_role == "api"
 
         # Database validation
         if not self.database_url:
@@ -302,7 +323,55 @@ class Settings(BaseSettings):
                 "DATABASE_URL contains default/development credentials or localhost address."
             )
 
-        # GitHub Secrets validation
+        if self.github_app_id <= 0 or not self.github_app_private_key.strip():
+            errors.append("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production.")
+
+        if self.gemini_api_key == "your_gemini_api_key_here":
+            errors.append("GEMINI_API_KEY is an insecure placeholder.")
+        insecure_slack_webhooks = {
+            "https://hooks.slack.com/services/...",
+            "your_slack_webhook_url_here",
+            "placeholder",
+        }
+        if self.slack_webhook_url in insecure_slack_webhooks:
+            errors.append("SLACK_WEBHOOK_URL is an insecure placeholder.")
+
+        if not self.slack_approver_user_ids or any(
+            not user.strip() for user in self.slack_approver_user_ids
+        ):
+            errors.append("SLACK_APPROVER_USER_IDS is required in production.")
+
+        if api:
+            errors.extend(self._api_production_errors())
+        else:
+            if not self.sandbox_executor_url:
+                # Phase 1.14b/c: validation runs only in the executor, reached only by the worker.
+                errors.append(
+                    "SANDBOX_EXECUTOR_URL is required in production for the worker: validation "
+                    "must run in the validation executor, never through local Docker."
+                )
+            # The worker verifies no inbound webhook or Slack request and serves no read API, so
+            # it must not hold those secrets (set = non-empty and not the field default).
+            api_only = [
+                name.upper()
+                for name in ("github_webhook_secret", "slack_signing_secret", "read_api_token")
+                if getattr(self, name) not in ("", type(self).model_fields[name].default)
+            ]
+            if api_only:
+                errors.append(
+                    "API-only credentials must not be set for the worker: " + ", ".join(api_only)
+                )
+
+        if errors:
+            raise ValueError(
+                "Production configuration validation failed with "
+                f"{len(errors)} error(s):\n- " + "\n- ".join(errors)
+            )
+
+        return self
+
+    def _api_production_errors(self) -> list[str]:
+        errors: list[str] = []
         insecure_webhook_secrets = {
             "test_webhook_secret",
             "your_github_webhook_secret_here",
@@ -312,23 +381,6 @@ class Settings(BaseSettings):
         if not self.github_webhook_secret or self.github_webhook_secret in insecure_webhook_secrets:
             errors.append("GITHUB_WEBHOOK_SECRET is missing or using an insecure test placeholder.")
 
-        # Every GitHub call (verification, snapshots, branch and PR creation) uses the App.
-        if self.github_app_id <= 0 or not self.github_app_private_key.strip():
-            errors.append("GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production.")
-
-        # Gemini API Key validation
-        if not self.gemini_api_key or self.gemini_api_key == "your_gemini_api_key_here":
-            errors.append("GEMINI_API_KEY is required in production.")
-
-        # Slack Integration validation
-        insecure_slack_webhooks = {
-            "https://hooks.slack.com/services/...",
-            "your_slack_webhook_url_here",
-            "placeholder",
-        }
-        if not self.slack_webhook_url or self.slack_webhook_url in insecure_slack_webhooks:
-            errors.append("SLACK_WEBHOOK_URL is missing or using an insecure placeholder.")
-
         insecure_slack_secrets = {
             "test_slack_signing_secret",
             "your_slack_signing_secret_here",
@@ -336,17 +388,22 @@ class Settings(BaseSettings):
         }
         if not self.slack_signing_secret or self.slack_signing_secret in insecure_slack_secrets:
             errors.append("SLACK_SIGNING_SECRET is missing or using an insecure placeholder.")
-
-        if not self.slack_approver_user_ids or any(
-            not user.strip() for user in self.slack_approver_user_ids
-        ):
-            errors.append("SLACK_APPROVER_USER_IDS is required in production.")
         if not self.slack_workspace_id.strip():
             errors.append("SLACK_WORKSPACE_ID is required in production.")
         if not self.slack_channel_id.strip():
             errors.append("SLACK_CHANNEL_ID is required in production.")
 
-        # CORS validation
+        # Phase 1.14c: the API never calls the executor, so it must not even hold its keys.
+        if (
+            self.sandbox_executor_url
+            or self.sandbox_executor_request_key
+            or self.sandbox_executor_response_key
+        ):
+            errors.append(
+                "SANDBOX_EXECUTOR_* must not be set for the API: only the remediation worker "
+                "calls the validation executor."
+            )
+
         if not self.cors_allowed_origins:
             errors.append(
                 "CORS_ALLOWED_ORIGINS must be configured with explicit origins in production."
@@ -354,21 +411,11 @@ class Settings(BaseSettings):
         elif any(origin == "*" or "*" in origin for origin in self.cors_allowed_origins):
             errors.append("CORS_ALLOWED_ORIGINS must not contain wildcard '*' in production.")
 
-        # Trusted Hosts validation
         if not self.trusted_hosts:
             errors.append("TRUSTED_HOSTS must be explicitly configured in production.")
         elif any(host == "*" or "*" in host for host in self.trusted_hosts):
             errors.append("TRUSTED_HOSTS must not contain wildcard '*' in production.")
 
-        # Phase 1.14b: the API and worker never run Docker in production; validation goes only to
-        # the separate validation executor over its Unix socket.
-        if not self.sandbox_executor_url:
-            errors.append(
-                "SANDBOX_EXECUTOR_URL is required in production: validation must run in the "
-                "validation executor, never through local Docker."
-            )
-
-        # Read API Token distinctness check
         if not self.read_api_token.strip():
             errors.append("READ_API_TOKEN is required in production.")
         else:
@@ -382,14 +429,7 @@ class Settings(BaseSettings):
                 errors.append(
                     "READ_API_TOKEN must be distinct from GitHub, Gemini, and Slack credentials."
                 )
-
-        if errors:
-            raise ValueError(
-                "Production configuration validation failed with "
-                f"{len(errors)} error(s):\n- " + "\n- ".join(errors)
-            )
-
-        return self
+        return errors
 
 
 # Singleton settings instance

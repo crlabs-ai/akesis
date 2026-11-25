@@ -12,6 +12,7 @@ from src.packages.database.session import get_session_factory
 from src.packages.shared.config import settings
 from src.packages.shared.logging import configure_logging, get_logger
 from src.packages.shared.webhook_worker import (
+    ApprovalExecutionConfig,
     HeartbeatFile,
     LogRetrievalConfig,
     RetryWorker,
@@ -41,10 +42,23 @@ def build_config() -> WorkerConfig:
             lease_seconds=settings.log_retrieval_lease_seconds,
             limits=LogLimits.from_settings(),
         ),
+        # Phase 1.14c: Slack-approved remediation runs here, behind the remediation hold.
+        approval_execution=ApprovalExecutionConfig(
+            max_attempts=settings.remediation_max_attempts,
+            deadline_seconds=settings.remediation_deadline_seconds,
+            lease_seconds=settings.remediation_lease_seconds,
+        ),
     )
 
 
+def require_worker_role() -> None:
+    """In production the worker must load worker-role settings (executor caller, no API keys)."""
+    if settings.environment.lower() in ("production", "prod") and settings.service_role != "worker":
+        raise SystemExit("akesis-worker: SERVICE_ROLE=worker is required in production")
+
+
 async def run() -> None:
+    require_worker_role()
     configure_logging(settings.log_level)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

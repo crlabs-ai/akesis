@@ -387,6 +387,12 @@ class MockMutationService:
         return await self.mut_repo.create_mutation(record)
 
 
+@pytest.fixture(autouse=True)
+def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 1.14c: resume re-authorizes the recorded approver against this allowlist."""
+    monkeypatch.setattr(settings, "slack_approver_user_ids", ["alice", "bob"])
+
+
 @pytest.fixture
 def sample_context() -> FailureContext:
     return FailureContext(
@@ -703,6 +709,39 @@ async def test_orchestrator_resume_fails_if_proposal_json_missing(
 
     with pytest.raises(OrchestrationError, match="fix proposal missing"):
         await orch._resume_approval_unchecked(approval_id=approval_id)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_resume_refuses_an_approver_no_longer_authorized(
+    sample_context: FailureContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    appr_repo, mut_repo, pipe_repo = MockApprovalRepo(), MockMutationRepo(), MockPipelineRepo()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol, PipelineRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    mutations = MockMutationService(mut_repo)
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=MockContextResolver(),
+        fix_service=MockFixService(),
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=mutations,
+    )
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
+    approval_id = pipe_rec.approval_id
+    assert approval_id is not None
+    await appr_repo.record_decision(approval_id, ApprovalStatus.APPROVED, reviewer="alice")
+    monkeypatch.setattr(settings, "slack_approver_user_ids", ["bob"])  # alice was removed
+
+    with pytest.raises(OrchestrationError, match="authorized approver"):
+        await orch._resume_approval_unchecked(approval_id=approval_id)
+    assert mut_repo.records == {}  # nothing was mutated
 
 
 # 9. Stale commit SHA prevents mutation.

@@ -43,9 +43,6 @@ from src.packages.shared.models import (
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
-from src.packages.shared.remediation_orchestrator import (
-    RemediationOrchestrator,
-)
 from src.packages.shared.security import verify_read_token
 from src.packages.shared.webhook_admission import admit_verified_delivery
 from src.packages.shared.webhook_retry import RetrySchedule, classify_retry
@@ -57,15 +54,8 @@ from src.packages.shared.workflow_provenance import (
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
-orchestrator = RemediationOrchestrator()
-
-
-async def _safe_resume_approval(approval_id: str) -> None:
-    """Executes approval resumption in background, catching all exceptions."""
-    try:
-        await orchestrator.resume_approval(approval_id)
-    except Exception as err:
-        logger.error("background_resume_approval_error", error=str(err), approval_id=approval_id)
+# Phase 1.14c: the API never executes remediation. Recording an approval queues exactly one
+# durable job (approvals.execution_status), which only the remediation worker runs.
 
 
 def verify_github_signature(
@@ -458,11 +448,10 @@ async def handle_github_webhook(
 )
 async def handle_slack_interaction(
     request: Request,
-    background_tasks: BackgroundTasks,
     x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),
     x_slack_request_timestamp: str | None = Header(default=None, alias="X-Slack-Request-Timestamp"),
 ) -> dict[str, Any]:
-    """Receives and verifies Slack button interactions, resuming orchestration on approval."""
+    """Verifies and records a Slack decision. Remediation runs later, in the worker only."""
     raw_body = await request.body()
 
     is_valid = verify_slack_signature(
@@ -530,20 +519,14 @@ async def handle_slack_interaction(
     decision = decisions[action_id]
 
     try:
-        # 1. Authoritative decision recorded in PostgreSQL
+        # Authoritative decision recorded in PostgreSQL. An approval queues its remediation job in
+        # the same conditional update; a repeated delivery is a duplicate and queues nothing.
         record, is_duplicate = await approval_service.record_decision(
             approval_id=approval_id,
             decision=decision,
             decided_by=user_id,
             response_url=response_url,
         )
-
-        # 2. Resume pipeline in background task if approved
-        if not is_duplicate and record.status.value == "approved":
-            background_tasks.add_task(
-                _safe_resume_approval,
-                approval_id=record.approval_id,
-            )
 
         return {
             "status": "ok",

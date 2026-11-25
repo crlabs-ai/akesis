@@ -120,6 +120,23 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
 
 ---
 
+### Runbook 3b: Approved Remediation Jobs (Phase 1.14c)
+Recording a Slack approval queues one job on the approval row (`approvals.execution_status`). Only the worker runs it. The API never executes remediation.
+
+| `execution_status` | Meaning | Action |
+| :--- | :--- | :--- |
+| `pending` | Queued, or scheduled for a retry (`execution_next_attempt_at`). | None. |
+| `running` | Claimed; `execution_next_attempt_at` is the lease. A crashed worker's claim is reclaimed after it, as a counted attempt. | Do not edit by hand. |
+| `held` | The remediation hold refused the job. The decision and the attempt budget are kept, and the job is not claimed again on its own. | Expected while the hold is active. |
+| `completed` | The remediation finished. | None. |
+| `failed` | Terminal. `execution_failure_code` gives the reason: `binding_mismatch` or `provenance_*` (approval, provenance, approver or proposal no longer match), `mutation_state_unknown` (an earlier attempt was cut off mid-mutation; never retried automatically, so no PR is duplicated), or `remediation_retries_exhausted`. | Investigate. For `mutation_state_unknown`, check the remediation branch and PR on GitHub before doing anything. |
+
+**Condition-6 rollout (deliberate recovery):** once the hold is formally superseded, move held jobs back to the queue with `sudo -u akesis-worker sh -c 'cd /etc/akesis/worker && PYTHONPATH=/opt/akesis /opt/akesis/.venv/bin/python -m src.apps.worker.requeue_held --all'`, or name approval IDs instead of `--all`. Only approved, held rows are touched. While the hold is still active, a requeued job is simply held again, without consuming an attempt.
+
+Every run emits one `remediation_requeue` JSON event (kept by journald) with the invoking OS UID and user name as the kernel reports them, the host and PID, a UTC timestamp, what was requested, the exact approval IDs requeued, their count and the resulting state (`pending`). **Authorization limitation:** there is no operator authentication yet. Anyone who can run the tool with the worker's database credentials can requeue, and the recorded identity is the OS account that ran it (`identity_verified: false`), not the person behind a shared or `sudo`-assumed account. Restrict who can become `akesis-worker`, and keep the event with the change record. The hold, not this tool, is what prevents execution.
+
+**Logs:** `remediation_recorded` (outcome and code), `remediation_write_refused` (lease lost; another attempt owns the row), `remediation_attempt_error` (exception type only), `remediation_requeue` (operator requeue audit).
+
 ### Runbook 3a: Validation Executor (remote mode)
 * **Symptom:** validation shows `infrastructure_error` with "Validation executor ..." in `stderr`.
 * **Logs:**
