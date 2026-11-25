@@ -112,7 +112,7 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
   5. Test container execution manually with the enforced sandbox flags:
      ```bash
      docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
-       --user 1000:1000 --pids-limit 256 --memory 512m --cpus=1.0 \
+       --user "$(id -u):$(id -g)" --pids-limit 256 --memory 512m --cpus=1.0 \
        --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=64m,mode=1777 \
        akesis-validator:v1 pytest --version
      ```

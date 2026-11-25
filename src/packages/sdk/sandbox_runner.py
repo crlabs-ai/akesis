@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import stat
 import subprocess
 import time
 import uuid
@@ -31,6 +32,25 @@ SANDBOX_TMPFS = "/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777"
 # Containers started by the validation executor carry this label; its startup sweep removes only
 # these. The local runner does not label its containers.
 EXECUTOR_LABEL = "akesis.executor=1"
+
+
+def _workspace_owner(workspace_dir: Path) -> tuple[int, int]:
+    """The numeric UID and GID the container runs as: the owner of the private workspace.
+
+    The workspace is created owner-only (0700) by this process, so the container can use it only
+    as that same owner. Read from the filesystem, never from a request or job. A fixed container
+    user (formerly 1000:1000) worked only when the host process also happened to be UID 1000.
+    Root, a workspace this process does not own, and anything that is not a real directory are
+    refused, so the container is never root and never borrows another account's files.
+    """
+    info = os.lstat(workspace_dir)
+    if os.geteuid() == 0 or info.st_uid == 0 or info.st_gid == 0:
+        raise SandboxError("Refusing to run a validation container as root")
+    if not stat.S_ISDIR(info.st_mode):
+        raise SandboxError("Validation workspace is not a directory")
+    if info.st_uid != os.geteuid():
+        raise SandboxError("Validation workspace is not owned by the sandbox process")
+    return info.st_uid, info.st_gid
 
 
 def _local_docker_forbidden() -> bool:
@@ -320,6 +340,7 @@ class DockerSandboxRunner:
         """
         if not self.executor and _local_docker_forbidden():
             raise SandboxError("Local Docker validation is disabled in production")
+        uid, gid = _workspace_owner(workspace_dir)  # before any subprocess
         start_time = time.perf_counter()
         deadline = time.monotonic() + timeout  # covers create and run, as `docker run` did
         container = f"akesis-val-{uuid.uuid4().hex[:16]}"
@@ -341,7 +362,7 @@ class DockerSandboxRunner:
             "--tmpfs",
             SANDBOX_TMPFS,
             "--user",
-            "1000:1000",
+            f"{uid}:{gid}",
             "--pids-limit",
             "256",
             "--memory",

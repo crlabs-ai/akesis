@@ -47,7 +47,7 @@ This document specifies the integration protocols, authentication methods, and p
   * `--network none` (Network access disabled by default)
   * `--cap-drop ALL` (Drop all Linux capabilities)
   * `--security-opt no-new-privileges` (Prevent privilege escalation)
-  * `--user 1000:1000` (Run as unprivileged `akesis` user)
+  * `--user <uid>:<gid>` (the non-root owner of the private workspace; root is refused)
   * `--memory 512m` (512 MB memory ceiling)
   * `--cpus 1.0` (1.0 CPU quota)
   * `-v /tmp/akesis/sandbox/...:/workspace:rw` (Ephemeral workspace mount)

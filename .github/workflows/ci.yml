@@ -38,6 +38,9 @@ jobs:
       AKESIS_DISPOSABLE_TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis_test
       GITHUB_WEBHOOK_SECRET: test_webhook_secret
       SLACK_SIGNING_SECRET: test_slack_signing_secret
+      # Docker sandbox and executor tests must run here: a missing daemon or validator image
+      # fails the run instead of skipping them (tests/conftest.py).
+      AKESIS_REQUIRE_DOCKER_TESTS: "1"
 
     steps:
       - name: Checkout repository
@@ -69,8 +72,11 @@ jobs:
       - name: Run MyPy static type analysis
         run: uv run mypy src
 
+      - name: Build the validator image
+        run: docker build -f docker/Dockerfile.validator -t akesis-validator:v1 docker
+
       - name: Run unit and integration tests with coverage
-        run: uv run pytest -v --cov=src --cov-report=term-missing tests/
+        run: uv run pytest -v -rs --cov=src --cov-report=term-missing tests/
 
       - name: Run vertical-slice benchmark suite
         run: uv run pytest -v tests/benchmark/test_vertical_slice_benchmarks.py

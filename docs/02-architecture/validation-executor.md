@@ -154,8 +154,10 @@ must be `unix:///...`, and the keys must be at least 32 characters and different
 - **The executor trusts the caller's provenance attestation.** It verifies content integrity, but
   it has no database or GitHub access with which to prove that this commit belongs to this
   incident.
-- **The executor must run as UID 1000** (or share it with the container): the container runs as
-  `1000:1000` against an owner-only (0700) workspace. This is unchanged from the local runner.
+- **The container runs as the workspace owner.** The executor creates each workspace owner-only
+  (0700), so the container runs as that numeric UID:GID, read from the workspace itself, never from
+  the request. Root is refused. The executor may run as any non-root system user; it no longer
+  needs UID 1000.
 - **Replay protection is in memory.** It is safe across restarts because of the process-start rule.
   A job signed just before a restart is refused (`stale`) and the caller records
   `INFRASTRUCTURE_ERROR`.

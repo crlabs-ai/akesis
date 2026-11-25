@@ -4,6 +4,8 @@ Docker is never started here. The container invocation is captured and inspected
 """
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -160,7 +162,7 @@ async def test_docker_mounts_only_the_writable_workspace(
     assert tmpfs == ["/tmp:rw,exec,nosuid,nodev,size=64m,mode=1777"]
     for flag, value in (
         ("--security-opt", "no-new-privileges"),
-        ("--user", "1000:1000"),
+        ("--user", f"{os.getuid()}:{os.getgid()}"),  # the workspace owner, never fixed
         ("--pids-limit", "256"),
         ("--memory", "512m"),
     ):
@@ -317,3 +319,65 @@ async def test_a_failed_create_reports_exit_125_like_docker_run(
     result = await DockerSandboxRunner()._execute_container(tmp_path, ["pytest", "-v"], 30)
     assert result.exit_code == 125 and "No such image" in result.stderr
     assert len(removed) == 1 and removed[0].startswith("akesis-val-")  # its own name only
+
+
+# --- container user: the workspace owner, never root (no Docker needed) ----------------------
+
+
+def test_the_container_user_is_the_workspace_owner(tmp_path: Path) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir(mode=0o700)
+    assert sandbox_runner._workspace_owner(workspace) == (os.getuid(), os.getgid())
+
+
+def _fake_owner(monkeypatch: pytest.MonkeyPatch, *, euid: int, uid: int, gid: int) -> None:
+    monkeypatch.setattr("os.geteuid", lambda: euid)
+    monkeypatch.setattr(
+        "os.lstat", lambda _: SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=uid, st_gid=gid)
+    )
+
+
+@pytest.mark.parametrize(
+    "euid, uid, gid",
+    [
+        (0, 0, 0),  # the sandbox process itself is root
+        (0, 1000, 1000),  # root process, even with a non-root workspace
+        (1000, 0, 1000),  # a root-owned workspace
+        (1000, 1000, 0),  # the root group
+    ],
+)
+def test_root_is_refused(monkeypatch: pytest.MonkeyPatch, euid: int, uid: int, gid: int) -> None:
+    _fake_owner(monkeypatch, euid=euid, uid=uid, gid=gid)
+    with pytest.raises(sandbox_runner.SandboxError, match="as root"):
+        sandbox_runner._workspace_owner(Path("/w"))
+
+
+def test_a_workspace_owned_by_another_account_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_owner(monkeypatch, euid=1001, uid=1000, gid=1000)
+    with pytest.raises(sandbox_runner.SandboxError, match="not owned"):
+        sandbox_runner._workspace_owner(Path("/w"))
+
+
+def test_a_symlinked_workspace_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(sandbox_runner.SandboxError, match="not a directory"):
+        sandbox_runner._workspace_owner(tmp_path / "link")
+
+
+@pytest.mark.asyncio
+async def test_root_is_refused_before_any_docker_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spawned: list[Any] = []
+
+    async def record(*argv: str, **_: object) -> Any:
+        spawned.append(argv)
+        raise AssertionError("no Docker subprocess may start")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", record)
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    with pytest.raises(sandbox_runner.SandboxError, match="as root"):
+        await DockerSandboxRunner()._execute_container(tmp_path, ["pytest", "-v"], timeout=30)
+    assert spawned == []

@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Fixed (sandbox container user portability)
+* **The container runs as the workspace owner.** The validation container ran as a fixed `1000:1000` against a workspace the host process creates owner-only (0700), so it could read and write the workspace only when that process was also UID 1000. On any other account, GitHub's runner (UID 1001) included, the container could not even read the code. It now runs as the numeric UID:GID that owns the workspace, read from the filesystem with `lstat`, never from a request or job. Root (UID or GID 0), a workspace this process does not own, and a non-directory are refused before any Docker call. The workspace stays 0700, and every other restriction is unchanged.
+* **The executor no longer needs UID 1000.** The deployment guide no longer pins `akesis-exec` to UID 1000, which often collides with the host's first human account.
+* **CI runs every Docker test.** CI now builds `akesis-validator:v1`, prints skip reasons, and sets `AKESIS_REQUIRE_DOCKER_TESTS=1`, which fails the run if any Docker test would be skipped for a missing daemon or image. Before, 17 executor and validator-image tests were skipped in CI.
+
 ### Fixed (sandbox container-creation cleanup race)
 * **No orphaned `Created` containers.** A timeout or cancellation while Docker was still creating a validation container killed the `docker run` client and ran `docker rm -f` straight away. The daemon finishes an in-flight create even after its client dies, so the removal could find nothing and a container was then left in `Created` indefinitely (`--rm` only acts on exit). Reproduced 3/3 at a 0.05 s timeout.
 * **Create and start are now separate.** `docker create` (same options: read-only root, no network, `cap-drop ALL`, `no-new-privileges`, non-root user, CPU, memory and PID limits, executor label) is never cut short: on timeout or cancellation it is allowed to finish, bounded at 30 s, and the container is then removed by its unique name. After the create, everything targets the exact container ID it returned. A failed create still reports exit 125, as `docker run` did.

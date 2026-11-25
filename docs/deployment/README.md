@@ -189,7 +189,7 @@ Production refuses to start without `SANDBOX_EXECUTOR_URL` (Phase 1.14b). In pro
 Create a dedicated executor user. It is the only member of the `docker` group, and it runs as UID 1000, the container user. Give it a working directory that contains no `.env`. Then remove Docker access from the application user:
 
 ```bash
-sudo useradd --system --uid 1000 --user-group --home-dir /opt/akesis-exec --shell /usr/sbin/nologin akesis-exec
+sudo useradd --system --user-group --home-dir /opt/akesis-exec --shell /usr/sbin/nologin akesis-exec
 sudo usermod -aG docker akesis-exec
 sudo gpasswd -d akesis docker   # the API user must not be in the docker group
 sudo useradd --system --user-group --home-dir /opt/akesis --shell /usr/sbin/nologin akesis-worker

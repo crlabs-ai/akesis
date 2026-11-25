@@ -59,8 +59,29 @@ else:
     os.environ["DATABASE_URL"] = _DISABLED_DATABASE_URL
 
 
+_REQUIRE_DOCKER_ENV = "AKESIS_REQUIRE_DOCKER_TESTS"
+
+
+def _refuse_skipped_docker_tests(items: list[pytest.Item]) -> None:
+    """With AKESIS_REQUIRE_DOCKER_TESTS=1 (CI), a Docker test that would be skipped because the
+    daemon or the validator image is missing fails the session instead of passing silently."""
+    skipped = [
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("docker")
+        and any(marker.args and marker.args[0] for marker in item.iter_markers("skipif"))
+    ]
+    if skipped:
+        raise pytest.UsageError(
+            f"{_REQUIRE_DOCKER_ENV}=1 but {len(skipped)} Docker test(s) would be skipped "
+            f"(daemon or akesis-validator:v1 missing), for example {skipped[0]}"
+        )
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """Skip database-backed tests when no disposable test database is configured."""
+    if os.environ.get(_REQUIRE_DOCKER_ENV) == "1":
+        _refuse_skipped_docker_tests(items)
     if _disposable_url:
         return
     skip = pytest.mark.skip(reason=f"requires {_DISPOSABLE_ENV} (disposable akesis_test database)")

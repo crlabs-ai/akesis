@@ -5,7 +5,10 @@ when the daemon is unavailable.
 """
 
 import asyncio
+import contextlib
+import os
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -194,6 +197,35 @@ def _sandbox_containers() -> list[str]:
         check=False,
     ).stdout
     return out.splitlines()
+
+
+# The container runs as the workspace owner. A test cannot change its own UID without root, so
+# another host UID is simulated: a throwaway root container chowns the workspace to that UID (what a
+# process running as that account would have created), and os.geteuid reports it. Docker, the
+# mount and the permission checks are all real. 1001 is GitHub's runner; 4242 is any other UID.
+HOST_UIDS = [1000, 1001, 4242]
+
+
+def _chown(path: Path, uid: int, gid: int) -> None:
+    subprocess.run(
+        ["docker", "run", "--rm", "--network", "none", "-v", f"{path}:/w", IMAGE]
+        + ["chown", "-R", f"{uid}:{gid}", "/w"],
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+
+
+@contextlib.contextmanager
+def _host_uid(workspace: Path, uid: int, monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    real = os.geteuid
+    _chown(workspace, uid, uid)
+    monkeypatch.setattr(os, "geteuid", lambda: uid)
+    try:
+        yield
+    finally:
+        monkeypatch.setattr(os, "geteuid", real)
+        _chown(workspace, os.getuid(), os.getgid())  # so the test can inspect and discard it
 
 
 async def _still_none_after_settling() -> list[str]:
@@ -515,8 +547,9 @@ PROJECT = {
     "-t akesis-validator:v1 docker",
 )
 @pytest.mark.parametrize("command", list(ValidationCommand))
+@pytest.mark.parametrize("uid", HOST_UIDS)
 async def test_validator_image_runs_every_command_read_only(
-    snapshot_root: Path, command: ValidationCommand
+    snapshot_root: Path, command: ValidationCommand, uid: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = FakeGitHub(
         repo_id=1001,
@@ -528,12 +561,116 @@ async def test_validator_image_runs_every_command_read_only(
     async with service._open_unchecked(_token()) as snapshot:
         workspace = create_workspace(snapshot)
         try:
-            result = await DockerSandboxRunner(
-                image_name=settings.sandbox_image
-            )._execute_container(workspace, COMMAND_INVOCATION_MAP[command], timeout=180)
+            with _host_uid(workspace, uid, monkeypatch):  # any non-root host account
+                result = await DockerSandboxRunner(
+                    image_name=settings.sandbox_image
+                )._execute_container(workspace, COMMAND_INVOCATION_MAP[command], timeout=180)
             assert result.exit_code == 0, result.stdout + result.stderr
             assert not list(workspace.glob("pytest-of-*"))  # temp files stayed on the tmpfs
             if command is ValidationCommand.PYTEST:
                 assert "4 passed" in result.stdout
         finally:
             discard_workspace(workspace)
+
+
+# --- the container user is the workspace owner, for any non-root host account --------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uid", HOST_UIDS)
+async def test_the_container_runs_as_the_workspace_owner_and_can_read_and_write(
+    snapshot_root: Path, uid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = (
+        "id -u; id -g; test -r main.py && echo read-ok; "
+        "echo data > made && echo write-ok; stat -c %u:%a made; stat -c %u:%a ."
+    )
+    async with _service()._open_unchecked(_token()) as snapshot:
+        workspace = create_workspace(snapshot)
+        try:
+            with _host_uid(workspace, uid, monkeypatch):
+                result = await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                    workspace, ["sh", "-c", script], timeout=120
+                )
+            assert result.exit_code == 0, result.stderr
+            assert result.stdout.split() == [
+                str(uid),
+                str(uid),
+                "read-ok",
+                "write-ok",
+                f"{uid}:644",  # what the job writes belongs to the workspace owner
+                f"{uid}:700",  # and the workspace stays owner-only
+            ]
+        finally:
+            discard_workspace(workspace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uid", HOST_UIDS)
+async def test_timeout_and_cancellation_clean_up_for_any_owner(
+    snapshot_root: Path, uid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _sandbox_containers() == []
+    async with _service()._open_unchecked(_token()) as snapshot:
+        workspace = create_workspace(snapshot)
+        try:
+            with _host_uid(workspace, uid, monkeypatch):
+                for timeout in (0.05, 2.0):  # during creation, and while running
+                    with pytest.raises(SandboxTimeoutError):
+                        await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                            workspace, ["sleep", "30"], timeout=timeout
+                        )
+                    assert _sandbox_containers() == []
+                for delay in (0.05, 2.0):
+                    task = asyncio.create_task(
+                        DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                            workspace, ["sleep", "30"], timeout=60
+                        )
+                    )
+                    await asyncio.sleep(delay)
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    assert _sandbox_containers() == []
+            assert await _still_none_after_settling() == []
+        finally:
+            discard_workspace(workspace)
+
+
+@pytest.mark.asyncio
+async def test_jobs_owned_by_different_accounts_cannot_reach_each_other(
+    snapshot_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = os.geteuid
+    async with _service()._open_unchecked(_token()) as snapshot:
+        first, second = create_workspace(snapshot), create_workspace(snapshot)
+        try:
+            _chown(first, 1001, 1001)
+            _chown(second, 4242, 4242)
+            monkeypatch.setattr(os, "geteuid", lambda: 1001)
+            wrote = await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                first, ["sh", "-c", "echo secret > secret && echo wrote"], timeout=120
+            )
+            assert wrote.exit_code == 0 and wrote.stdout == "wrote\n", wrote.stderr
+            monkeypatch.setattr(os, "geteuid", lambda: 4242)
+            other = await DockerSandboxRunner(image_name=IMAGE)._execute_container(
+                second,
+                ["sh", "-c", "id -u; ls -A /workspace | grep -c secret || true"],
+                timeout=120,
+            )
+            assert other.stdout.split() == ["4242", "0"]  # its own workspace only
+            # Even if the other job's workspace were mounted, owner-only permissions refuse it.
+            refused = subprocess.run(
+                ["docker", "run", "--rm", "--network", "none", "--user", "4242:4242"]
+                + ["-v", f"{first}:/workspace:ro", IMAGE, "cat", "/workspace/secret"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            assert refused.returncode != 0 and "Permission denied" in refused.stderr
+        finally:
+            monkeypatch.setattr(os, "geteuid", real)
+            for workspace in (first, second):
+                _chown(workspace, os.getuid(), os.getgid())
+                discard_workspace(workspace)
