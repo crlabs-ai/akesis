@@ -45,7 +45,8 @@ ENVIRONMENT=development
 LOG_LEVEL=INFO
 DATABASE_URL=postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis
 GITHUB_WEBHOOK_SECRET=test_webhook_secret
-GITHUB_TOKEN=your_github_token_here
+GITHUB_APP_ID=0
+GITHUB_APP_PRIVATE_KEY=
 GEMINI_API_KEY=your_gemini_api_key_here
 SLACK_SIGNING_SECRET=test_slack_signing_secret
 ```
@@ -95,7 +96,7 @@ Always run these verification commands before submitting a pull request:
 # 1. Run unit test suite (deterministic, offline, no Docker/DB required)
 uv run pytest tests/unit
 
-# 2. Run full test suite (including database and integration tests)
+# 2. Run full test suite; database-backed tests need the disposable database (section 3a)
 uv run pytest tests/
 
 # 3. Run test coverage analysis
@@ -110,6 +111,41 @@ uv run ruff format --check .
 # 6. Run strict Mypy type checking
 uv run mypy src
 ```
+
+---
+
+## 3a. Database-Backed Tests (Disposable Database Only)
+
+Database and benchmark tests run only against an explicit, disposable PostgreSQL database.
+They never use the `DATABASE_URL` in your `.env`, which points at the development database.
+
+* `tests/conftest.py` refuses to start if `AKESIS_DISPOSABLE_TEST_DATABASE_URL` is set to anything
+  other than a loopback `akesis_test` database.
+* If the variable is unset, database-backed tests are **skipped** and nothing can reach a database.
+* Synthetic credentials only. GitHub and Slack calls are stubbed in tests.
+* Docker-dependent tests carry the `docker` marker and skip when the daemon is unavailable.
+  Select them with `uv run pytest -m docker`.
+
+Bash setup with a throwaway container on loopback port 55432 (it does not touch the development
+container on port 5436):
+
+```bash
+docker run -d --rm --name akesis-test-pg \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgrespassword \
+  -e POSTGRES_DB=akesis_test \
+  -p 127.0.0.1:55432:5432 postgres:16-alpine
+
+until docker exec akesis-test-pg pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+
+export AKESIS_DISPOSABLE_TEST_DATABASE_URL="postgresql+asyncpg://postgres:postgrespassword@127.0.0.1:55432/akesis_test"
+DATABASE_URL="$AKESIS_DISPOSABLE_TEST_DATABASE_URL" uv run alembic upgrade head
+uv run pytest tests/
+
+# Teardown (the container is removed automatically on stop because of --rm)
+docker stop akesis-test-pg
+```
+
+In CI the same database is provided by the `services:` block in `.github/workflows/ci.yml`.
 
 ---
 

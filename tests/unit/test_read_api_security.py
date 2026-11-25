@@ -92,6 +92,17 @@ def test_health_endpoints_remain_accessible_independently(
     assert ready.json()["status"] == "ready"
 
 
+def test_production_missing_token_fails_closed() -> None:
+    """Even an incorrectly mutated settings object must not expose incident detail."""
+    custom_settings = Settings(environment="test", read_api_token="")
+    custom_settings.environment = "production"
+    app = create_app(app_settings=custom_settings)
+    client = TestClient(app)
+    assert client.get("/v1/incidents/inc_sensitive").status_code == 401
+    assert client.get("/v1/pipelines").status_code == 401
+    assert client.get("/health/liveness").status_code == 200
+
+
 def test_cors_allowed_origins() -> None:
     """8. Allowed CORS origins receive Access-Control-Allow-Origin."""
     custom_settings = Settings(
@@ -194,7 +205,6 @@ def test_production_config_rejects_missing_or_placeholder_secrets() -> None:
             environment="production",
             database_url="postgresql+asyncpg://postgres:postgrespassword@localhost:5436/akesis",
             github_webhook_secret="test_webhook_secret",
-            github_token="your_github_token_here",
             gemini_api_key="your_gemini_api_key_here",
             slack_webhook_url="https://hooks.slack.com/services/...",
             slack_signing_secret="test_slack_signing_secret",
@@ -205,9 +215,10 @@ def test_production_config_rejects_missing_or_placeholder_secrets() -> None:
     err_str = str(exc_info.value)
     assert "DATABASE_URL contains default/development credentials" in err_str
     assert "GITHUB_WEBHOOK_SECRET is missing or using an insecure test placeholder" in err_str
-    assert "GITHUB_TOKEN is required in production" in err_str
-    assert "GEMINI_API_KEY is required in production" in err_str
-    assert "SLACK_WEBHOOK_URL is missing or using an insecure placeholder" in err_str
+    assert "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production" in err_str
+    # Phase 1.14c: not required by either service yet (no runtime caller), placeholders still fail.
+    assert "GEMINI_API_KEY is an insecure placeholder" in err_str
+    assert "SLACK_WEBHOOK_URL is an insecure placeholder" in err_str
     assert "SLACK_SIGNING_SECRET is missing or using an insecure placeholder" in err_str
 
 
@@ -218,7 +229,8 @@ def test_production_config_rejects_wildcard_cors_and_hosts() -> None:
             environment="production",
             database_url="postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
             github_webhook_secret="prod_sec_abc1234567890",
-            github_token="ghp_prodtoken1234567890",
+            github_app_id=12345,
+            github_app_private_key="synthetic-app-key-material",
             gemini_api_key="AIzaSyProdKey1234567890",
             slack_webhook_url="https://hooks.slack.com/services/T01/B02/realprodsecret",
             slack_signing_secret="prod_slack_sec_1234567890",
@@ -238,7 +250,8 @@ def test_production_config_rejects_read_token_secret_reuse() -> None:
             environment="production",
             database_url="postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
             github_webhook_secret="shared_secret_1234567890",
-            github_token="ghp_prodtoken1234567890",
+            github_app_id=12345,
+            github_app_private_key="synthetic-app-key-material",
             gemini_api_key="AIzaSyProdKey1234567890",
             slack_webhook_url="https://hooks.slack.com/services/T01/B02/realprodsecret",
             slack_signing_secret="prod_slack_sec_1234567890",
@@ -257,13 +270,62 @@ def test_production_config_valid() -> None:
         environment="production",
         database_url="postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
         github_webhook_secret="prod_sec_abc1234567890",
-        github_token="ghp_prodtoken1234567890",
+        github_app_id=12345,
+        github_app_private_key="synthetic-app-key-material",
         gemini_api_key="AIzaSyProdKey1234567890",
         slack_webhook_url="https://hooks.slack.com/services/T01/B02/realprodsecret",
         slack_signing_secret="prod_slack_sec_1234567890",
         cors_allowed_origins=["https://dashboard.akesis.dev"],
         trusted_hosts=["api.akesis.dev"],
         read_api_token="prod_read_token_distinct_987654",
+        slack_approver_user_ids=["U_TEST"],
+        slack_workspace_id="T_TEST",
+        slack_channel_id="C_TEST",
     )
     assert prod_settings.environment == "production"
     assert prod_settings.read_api_token == "prod_read_token_distinct_987654"
+
+
+def _valid_production(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "environment": "production",
+        "database_url": "postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
+        "github_webhook_secret": "prod_sec_abc1234567890",
+        "github_app_id": 12345,
+        "github_app_private_key": "synthetic-app-key-material",
+        "gemini_api_key": "AIzaSyProdKey1234567890",
+        "slack_webhook_url": "https://hooks.slack.com/services/T01/B02/realprodsecret",
+        "slack_signing_secret": "prod_slack_sec_1234567890",
+        "cors_allowed_origins": ["https://dashboard.akesis.dev"],
+        "trusted_hosts": ["api.akesis.dev"],
+        "read_api_token": "prod_read_token_distinct_987654",
+        "slack_approver_user_ids": ["U_TEST"],
+        "slack_workspace_id": "T_TEST",
+        "slack_channel_id": "C_TEST",
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"github_app_id": 0}, {"github_app_private_key": ""}, {"github_app_private_key": "  "}],
+)
+def test_production_config_requires_github_app_credentials(overrides: dict[str, object]) -> None:
+    """Phase 1.8: every GitHub call uses the App, so production needs its ID and private key."""
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**_valid_production(**overrides))  # type: ignore[arg-type]
+    assert "GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY are required in production" in str(
+        exc_info.value
+    )
+
+
+def test_production_config_rejects_read_token_equal_to_app_key() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(**_valid_production(read_api_token="synthetic-app-key-material"))  # type: ignore[arg-type]
+    assert "READ_API_TOKEN must be distinct" in str(exc_info.value)
+
+
+def test_personal_access_token_setting_no_longer_exists() -> None:
+    """An old GITHUB_TOKEN in the environment is ignored; nothing can read it."""
+    assert "github_token" not in Settings.model_fields

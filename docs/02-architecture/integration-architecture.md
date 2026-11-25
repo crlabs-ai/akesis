@@ -9,7 +9,7 @@ This document specifies the integration protocols, authentication methods, and p
 * **Protocol:** HTTPS / REST API v3 & Webhooks.
 * **Authentication:**
   * **Inbound (Webhook):** HMAC-SHA256 signature verification over request body using `GITHUB_WEBHOOK_SECRET` passed in header `X-Hub-Signature-256`.
-  * **Outbound (REST API):** GitHub Personal Access Token or GitHub App Installation Token via `Bearer` token in `Authorization` header (`GITHUB_TOKEN`).
+  * **Outbound (REST API):** Short-lived GitHub App installation tokens (`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`), sent only as a `Bearer` token in the `Authorization` header. No personal access token is used.
 * **Endpoints Used:**
   * `GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs` (Fetch raw workflow run console logs)
   * `GET /repos/{owner}/{repo}/commits/{commit_sha}` (Retrieve commit metadata)
@@ -41,13 +41,13 @@ This document specifies the integration protocols, authentication methods, and p
 
 ## 4. Container Runtime (Docker Engine)
 
-* **Protocol:** Unix Socket (`/var/run/docker.sock`) via asynchronous process execution.
+* **Protocol:** Unix Socket (`/var/run/docker.sock`) via asynchronous process execution, used only by the validation executor process (Phase 1.14a/b). The API reaches the executor, never Docker; see `docs/02-architecture/validation-executor.md`.
 * **Image:** Dedicated validator environment `akesis-validator:v1` built from `docker/Dockerfile.validator` based on `python:3.12-slim`.
 * **Containment Flags:**
   * `--network none` (Network access disabled by default)
   * `--cap-drop ALL` (Drop all Linux capabilities)
   * `--security-opt no-new-privileges` (Prevent privilege escalation)
-  * `--user 1000:1000` (Run as unprivileged `akesis` user)
+  * `--user <uid>:<gid>` (the non-root owner of the private workspace; root is refused)
   * `--memory 512m` (512 MB memory ceiling)
   * `--cpus 1.0` (1.0 CPU quota)
   * `-v /tmp/akesis/sandbox/...:/workspace:rw` (Ephemeral workspace mount)

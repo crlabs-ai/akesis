@@ -144,3 +144,25 @@ export interface PipelineSummary {
   created_at: string
   updated_at: string
 }
+
+/** Operator-visible webhook delivery states returned by GET /v1/webhook-deliveries. */
+export type OperatorDeliveryStatus = 'retryable_error' | 'exhausted' | 'provider_hold'
+
+/** One delivery. The backend response model is an allow-list; these are the only fields. */
+export interface WebhookDelivery {
+  delivery_id: string
+  status: OperatorDeliveryStatus | string
+  failure_code: string | null
+  attempt_count: number
+  max_attempts: number
+  next_retry_at: string | null
+  last_error_code: string | null
+  received_at: string
+  updated_at: string
+  event_type: string
+}
+
+export interface WebhookDeliveryPage {
+  items: WebhookDelivery[]
+  next_cursor: string | null
+}

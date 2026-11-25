@@ -1,7 +1,8 @@
 # ADR-0003: Deterministic Codebase Context Retrieval & Exact Commit Alignment
 
 ## Status
-Accepted
+Accepted. The checkout mechanism (`GitRepositoryCheckoutManager`) is superseded by ADR-0011:
+since Phase 1.8, context is read from a verified snapshot and the checkout manager is removed.
 
 ## Date
 2026-08-30

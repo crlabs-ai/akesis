@@ -68,6 +68,8 @@ class FailureSignal(BaseModel):
         default_factory=list,
         description="Parsed stack trace frames if available",
     )
+    job_name: str | None = Field(default=None, description="Workflow job the evidence came from")
+    step_name: str | None = Field(default=None, description="Workflow step the evidence came from")
 
 
 class WorkflowRunEvent(BaseModel):
@@ -89,10 +91,41 @@ class WorkflowRunEvent(BaseModel):
     sender: str | None = Field(default=None, description="Username of trigger initiator")
 
 
+class RepositoryIdentity(BaseModel):
+    """Canonical GitHub repository identity."""
+
+    id: int = Field(gt=0, strict=True)
+    full_name: str = Field(min_length=3)
+
+
+class WorkflowRunProvenance(BaseModel):
+    """Independently verified workflow-run provenance; historical contexts may lack it."""
+
+    delivery_id: str = Field(pattern=r"^[A-Za-z0-9-]{1,128}$")
+    event_repository: RepositoryIdentity
+    source_repository: RepositoryIdentity
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    head_branch: str = Field(min_length=1)
+    run_id: int = Field(gt=0, strict=True)
+    run_attempt: int = Field(gt=0, strict=True)
+    installation_id: int = Field(gt=0, strict=True)
+    verified_at: datetime
+    verification_status: Literal["verified"] = "verified"
+    event_type: Literal["workflow_run"] = "workflow_run"
+
+
+class LogEvidence(BaseModel):
+    """Whether diagnosis has workflow-log evidence. Read from the pipeline row, never persisted."""
+
+    status: Literal["retrieved", "unavailable"]
+    reason_code: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+
+
 class FailureContext(BaseModel):
     """Complete structured failure context ready for downstream diagnostic ingestion."""
 
     incident_id: str = Field(..., description="Unique Akesis incident identifier")
+    provenance: WorkflowRunProvenance | None = None
     repository_owner: str = Field(..., description="Repository owner")
     repository_name: str = Field(..., description="Repository name")
     run_id: int = Field(..., description="Workflow run ID")
@@ -110,6 +143,9 @@ class FailureContext(BaseModel):
         default_factory=lambda: datetime.now(UTC),
         description="Timestamp of context creation",
     )
+    # Set only by load_diagnosis_context. Excluded from serialization so it never enters
+    # failure_context_json (the log worker's compare-and-swap value).
+    log_evidence: LogEvidence | None = Field(default=None, exclude=True)
 
 
 class CodeEvidence(BaseModel):

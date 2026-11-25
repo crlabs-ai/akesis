@@ -1,0 +1,786 @@
+"""Durable retry worker for webhook verification (ADR-0010).
+
+The worker executes scheduled verification attempts that the webhook route only schedules. It
+runs as a separate process and keeps all state in PostgreSQL, so a crash or restart loses no
+work that was not already claimed.
+
+Guarantees:
+- Due deliveries are selected with FOR UPDATE SKIP LOCKED and then claimed with the same atomic
+  transition the route uses, so concurrent workers never verify the same attempt twice.
+- Attempt budgets, provider delays and stale-write guards are enforced by the repository and
+  the shared admission path, not re-implemented here.
+- Verification input is rebuilt only from identity fields persisted after HMAC verification of
+  the original delivery. No raw payload, signature, header, token or key is stored or read.
+- Downstream admission is the same code the route runs. It never invokes remediation, so the
+  temporary remediation hold applies to worker-driven deliveries too.
+- A crash after claiming leaves the row ``verifying``. After the stale window it is reclaimed,
+  and that reclaim counts as an attempt because verification may already have started.
+- Database outages back off exponentially and keep the process alive. Shutdown finishes the
+  deliveries already claimed and then stops without claiming more.
+
+Workflow-log stage (Phase 1.10, optional): after verification work, the worker claims admitted
+pipelines whose logs are still pending, re-verifies each persisted context against PostgreSQL
+(no network), and only then retrieves and parses that run attempt's logs. A rejected provenance
+check makes no GitHub request. The stage never invokes remediation.
+"""
+
+import asyncio
+import contextlib
+import json
+import os
+import random
+import tempfile
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import httpx
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from src.packages.database import approval_jobs, log_jobs
+from src.packages.database.models import PipelineModel, WebhookEventModel
+from src.packages.database.webhook_events import WebhookEventRepository
+from src.packages.sdk.github_app_auth import GitHubAppAuth
+from src.packages.shared.logging import get_logger
+from src.packages.shared.models import FailureContext, WorkflowRunConclusion
+from src.packages.shared.persisted_provenance import ProvenanceRejected, verify_context_provenance
+from src.packages.shared.systemd_notify import notify
+from src.packages.shared.webhook_admission import admit_verified_delivery
+from src.packages.shared.webhook_retry import classify_retry
+from src.packages.shared.workflow_logs import LogLimits, LogOutcome, retrieve_failure_signal
+from src.packages.shared.workflow_provenance import (
+    ProvenanceVerificationError,
+    TransientProvenanceError,
+    WorkflowRunProvenanceVerifier,
+)
+
+logger = get_logger(__name__)
+
+STATE_OK = "ok"
+STATE_DATABASE_UNAVAILABLE = "database_unavailable"
+STATE_ERROR = "error"
+STATE_STOPPED = "stopped"
+STATE_NOT_CONFIGURED = "github_app_not_configured"
+
+_IDENTITY_FIELDS = (
+    "installation_id",
+    "event_repository_id",
+    "event_repository_name",
+    "run_id",
+    "run_attempt",
+    "source_repository_id",
+    "source_repository_name",
+    "source_sha",
+    "source_branch",
+)
+
+
+@dataclass(frozen=True)
+class LogRetrievalConfig:
+    max_attempts: int
+    deadline_seconds: float
+    lease_seconds: int
+    limits: LogLimits
+
+    def __post_init__(self) -> None:
+        # A live retrieval must never outlive its claim, or a second worker could reclaim it.
+        if self.lease_seconds <= self.deadline_seconds:
+            raise ValueError("Log retrieval lease must exceed the retrieval deadline")
+
+
+@dataclass(frozen=True)
+class ApprovalExecutionConfig:
+    """Phase 1.14c: Slack-approved remediation runs here, never in the API process."""
+
+    max_attempts: int
+    deadline_seconds: float
+    lease_seconds: int
+
+    def __post_init__(self) -> None:
+        # A live remediation must never outlive its claim, or a second worker could reclaim it.
+        if self.lease_seconds <= self.deadline_seconds:
+            raise ValueError("Remediation lease must exceed the remediation deadline")
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    poll_seconds: float
+    batch_size: int
+    max_attempts: int
+    base_delay_seconds: int
+    max_delay_seconds: int
+    provider_ceiling_seconds: int
+    db_backoff_max_seconds: float
+    verification_deadline_seconds: float
+    github_api_url: str
+    github_app_id: int
+    # Secret: never logged, never included in an error message or a heartbeat.
+    github_app_private_key: str = field(repr=False)
+    # None disables the workflow-log stage.
+    log_retrieval: LogRetrievalConfig | None = None
+    # None disables the approval-execution stage.
+    approval_execution: ApprovalExecutionConfig | None = None
+
+
+@dataclass
+class TickSummary:
+    examined: int = 0
+    claimed: int = 0
+    verified: int = 0
+    retried: int = 0
+    held: int = 0
+    rejected: int = 0
+    exhausted: int = 0
+    superseded: int = 0
+    crashed: int = 0
+    released: int = 0
+    release_failed: int = 0
+    app_not_configured: bool = False
+    counters: dict[str, int] = field(default_factory=dict)
+
+
+def build_verification_payload(row: WebhookEventModel) -> dict[str, Any] | None:
+    """Rebuild the verifier's input from persisted, HMAC-authenticated identity fields.
+
+    Returns None when any identity field is missing. Such a delivery cannot be verified and is
+    rejected rather than guessed at.
+    """
+    if any(getattr(row, name) is None for name in _IDENTITY_FIELDS):
+        return None
+    full_name = str(row.event_repository_name)
+    owner, _, name = full_name.partition("/")
+    return {
+        "action": row.action or "completed",
+        "installation": {"id": row.installation_id},
+        "repository": {
+            "id": row.event_repository_id,
+            "full_name": full_name,
+            "name": name,
+            "owner": {"login": owner},
+        },
+        "workflow_run": {
+            "id": row.run_id,
+            "run_attempt": row.run_attempt,
+            "head_sha": row.source_sha,
+            "head_branch": row.source_branch,
+            "head_repository": {
+                "id": row.source_repository_id,
+                "full_name": row.source_repository_name,
+            },
+            "name": row.workflow_name or "Unnamed Workflow",
+            "html_url": row.run_url or "",
+            "conclusion": row.conclusion or "unknown",
+        },
+    }
+
+
+def _conclusion(value: str | None) -> WorkflowRunConclusion:
+    try:
+        return WorkflowRunConclusion(value or "unknown")
+    except ValueError:
+        return WorkflowRunConclusion.UNKNOWN
+
+
+class RetryWorker:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        config: WorkerConfig,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        random_value: Callable[[], float] = random.random,
+        orchestrator: Any = None,
+    ) -> None:
+        self._sessions = session_factory
+        self._config = config
+        self._now = now
+        self._random = random_value
+        # Built on first use. Tests inject a double; production always uses the gated
+        # RemediationOrchestrator.resume_approval, whose first statement is the hold.
+        self._orchestrator = orchestrator
+
+    @property
+    def app_configured(self) -> bool:
+        return bool(self._config.github_app_id and self._config.github_app_private_key)
+
+    async def tick(
+        self,
+        stop: asyncio.Event | None = None,
+        progress: Callable[[], None] | None = None,
+    ) -> TickSummary:
+        """Run one pass: select due deliveries, claim or exhaust them, then process claims."""
+        summary = TickSummary()
+        if not self.app_configured:
+            # Nothing is claimed, so no attempt is consumed and nothing is lost. Due rows stay
+            # visible to operators until the credentials are configured.
+            summary.app_not_configured = True
+            return summary
+        if stop is not None and stop.is_set():
+            return summary
+
+        max_attempts = self._config.max_attempts
+        work: list[tuple[str, int]] = []
+        async with self._sessions() as session:
+            async with session.begin():
+                repo = WebhookEventRepository(session)
+                rows = await repo.select_due(self._config.batch_size)
+                summary.examined = len(rows)
+                for row in rows:
+                    # Capture the attempt number before claiming: the claim's bulk UPDATE
+                    # synchronises this ORM object, so reading it afterwards double-counts.
+                    next_attempt = row.attempt_count + 1
+                    if row.attempt_count >= max_attempts:
+                        if await repo.exhaust(row.delivery_id, max_attempts):
+                            summary.exhausted += 1
+                    elif await repo.claim(row.delivery_id, max_attempts):
+                        summary.claimed += 1
+                        work.append((row.delivery_id, next_attempt))
+
+        for index, (delivery_id, attempt) in enumerate(work):
+            if stop is not None and stop.is_set():
+                # Shutdown requested: never start another delivery. Release every claim that
+                # has not started, so it returns to the schedule instead of waiting out the window.
+                await self._release_unstarted(work[index:], summary)
+                break
+            await self._process(delivery_id, attempt, summary)
+            if progress is not None:
+                progress()
+        await self._log_stage(stop, progress, summary)
+        await self._approval_stage(stop, progress, summary)
+        return summary
+
+    def _count(self, summary: TickSummary, name: str) -> None:
+        summary.counters[name] = summary.counters.get(name, 0) + 1
+
+    async def _log_stage(
+        self,
+        stop: asyncio.Event | None,
+        progress: Callable[[], None] | None,
+        summary: TickSummary,
+    ) -> None:
+        config = self._config.log_retrieval
+        if config is None or (stop is not None and stop.is_set()):
+            return
+        async with self._sessions() as session:
+            async with session.begin():
+                claims, exhausted = await log_jobs.claim_due(
+                    session,
+                    now=self._now(),
+                    batch=self._config.batch_size,
+                    lease_seconds=config.lease_seconds,
+                    max_attempts=config.max_attempts,
+                )
+        summary.counters["logs_exhausted"] = summary.counters.get("logs_exhausted", 0) + exhausted
+        for index, (pipeline_id, attempt) in enumerate(claims):
+            if stop is not None and stop.is_set():
+                for unstarted, unstarted_attempt in claims[index:]:
+                    async with self._sessions() as session:
+                        async with session.begin():
+                            await log_jobs.release_unstarted(session, unstarted, unstarted_attempt)
+                break
+            await self._retrieve_logs(pipeline_id, attempt, config, summary)
+            if progress is not None:
+                progress()
+
+    async def _retrieve_logs(
+        self, pipeline_id: str, attempt: int, config: LogRetrievalConfig, summary: TickSummary
+    ) -> None:
+        async with self._sessions() as session:
+            pipeline = await session.get(PipelineModel, pipeline_id)
+            raw_context = pipeline.failure_context_json if pipeline else None
+            try:
+                if not raw_context:
+                    raise ProvenanceRejected("No persisted context", code="historical")
+                context = FailureContext.model_validate_json(raw_context)
+                # Database-only re-verification: an unverified incident never reaches the network.
+                token = await verify_context_provenance(context, session=session)
+            except (ProvenanceRejected, ValueError) as error:
+                code = error.code if isinstance(error, ProvenanceRejected) else "malformed"
+                outcome = LogOutcome("unavailable", f"provenance_{code}")
+                result = await self._finish_logs(pipeline_id, attempt, outcome, None)
+                self._count(
+                    summary, "logs_rejected" if result == log_jobs.RECORDED else f"logs_{result}"
+                )
+                return
+        try:
+            async with asyncio.timeout(config.deadline_seconds):
+                async with httpx.AsyncClient(
+                    base_url=self._config.github_api_url, timeout=30.0
+                ) as api:
+                    auth = GitHubAppAuth(
+                        self._config.github_app_id, self._config.github_app_private_key, client=api
+                    )
+                    outcome = await retrieve_failure_signal(
+                        context, token, auth=auth, api=api, limits=config.limits
+                    )
+        except TimeoutError:
+            outcome = LogOutcome("retry", "log_deadline_exceeded")
+        except Exception as error:
+            # Crash-equivalent: the lease expires and the claim is retried as a new attempt.
+            self._count(summary, "logs_crashed")
+            logger.error(
+                "workflow_logs_interrupted",
+                pipeline_id=pipeline_id,
+                error_type=type(error).__name__,
+            )
+            return
+        result = await self._finish_logs(pipeline_id, attempt, outcome, context, raw_context)
+        # A refused write is counted by its reason, never as the outcome it failed to record.
+        self._count(summary, f"logs_{outcome.status if result == log_jobs.RECORDED else result}")
+
+    async def _finish_logs(
+        self,
+        pipeline_id: str,
+        attempt: int,
+        outcome: LogOutcome,
+        context: FailureContext | None,
+        raw_context: str | None = None,
+    ) -> str:
+        """Persist the outcome. Returns log_jobs.RECORDED, LEASE_LOST or CONTEXT_CHANGED."""
+        failure_context_json = None
+        next_attempt_at = None
+        status = log_jobs.UNAVAILABLE
+        if outcome.status == "extracted" and context is not None and outcome.signal is not None:
+            status = log_jobs.EXTRACTED
+            failure_context_json = context.model_copy(
+                update={
+                    "signal": outcome.signal,
+                    "raw_log_excerpt": outcome.signal.extracted_snippet,
+                }
+            ).model_dump_json()
+        elif outcome.status == "retry":
+            status = log_jobs.PENDING
+            next_attempt_at = classify_retry(
+                outcome.headers,
+                attempt,
+                now=self._now(),
+                base_delay=self._config.base_delay_seconds,
+                max_delay=self._config.max_delay_seconds,
+                provider_ceiling=self._config.provider_ceiling_seconds,
+                random_value=self._random,
+            ).next_retry_at
+        async with self._sessions() as session:
+            async with session.begin():
+                result = await log_jobs.complete(
+                    session,
+                    pipeline_id,
+                    attempt,
+                    status=status,
+                    code=outcome.code,
+                    failure_context_json=failure_context_json,
+                    next_attempt_at=next_attempt_at,
+                    expected_context_json=raw_context,
+                )
+        if result == log_jobs.RECORDED:
+            logger.info(
+                "workflow_logs_recorded", pipeline_id=pipeline_id, status=status, code=outcome.code
+            )
+        else:
+            # Nothing was written. LEASE_LOST: another worker owns or finished the row.
+            # CONTEXT_CHANGED: this claim is retried after its lease against the current context.
+            logger.warning(
+                "workflow_logs_write_refused",
+                pipeline_id=pipeline_id,
+                attempt=attempt,
+                reason=result,
+                status=status,
+            )
+        return result
+
+    async def _approval_stage(
+        self,
+        stop: asyncio.Event | None,
+        progress: Callable[[], None] | None,
+        summary: TickSummary,
+    ) -> None:
+        config = self._config.approval_execution
+        if config is None:
+            return
+        # One claim at a time, taken immediately before its execution. A batch would share one
+        # lease across sequential remediations, so a later claim could expire before it started
+        # and a second worker could reclaim and run the same approval concurrently.
+        for _ in range(self._config.batch_size):
+            if stop is not None and stop.is_set():
+                return  # nothing is claimed ahead of execution, so nothing needs releasing
+            async with self._sessions() as session:
+                async with session.begin():
+                    claims, exhausted = await approval_jobs.claim_due(
+                        session,
+                        now=self._now(),
+                        batch=1,
+                        lease_seconds=config.lease_seconds,
+                        max_attempts=config.max_attempts,
+                    )
+            if exhausted:
+                summary.counters["remediation_exhausted"] = (
+                    summary.counters.get("remediation_exhausted", 0) + exhausted
+                )
+            if not claims:
+                if not exhausted:
+                    return
+                continue
+            approval_id, attempt = claims[0]
+            await self._execute_approval(approval_id, attempt, config, summary)
+            if progress is not None:
+                progress()
+
+    async def _execute_approval(
+        self, approval_id: str, attempt: int, config: ApprovalExecutionConfig, summary: TickSummary
+    ) -> None:
+        """One claimed attempt. Authorization is re-derived from PostgreSQL by resume_approval.
+
+        The claim carries only the approval ID: the orchestrator re-reads the approval, re-verifies
+        persisted provenance and every binding, and the hold is its first statement. A held attempt
+        is parked with its attempt refunded. A pipeline left `mutating` by an earlier attempt is
+        never retried automatically, so a PR cannot be created twice.
+        """
+        from src.packages.shared.models import PipelineStatus
+        from src.packages.shared.provenance import UnverifiedProvenanceError
+        from src.packages.shared.remediation_orchestrator import (
+            OrchestrationError,
+            RemediationOrchestrator,
+        )
+
+        if self._orchestrator is None:
+            self._orchestrator = RemediationOrchestrator()
+        retry_code: str | None = None
+        status = approval_jobs.FAILED
+        code: str | None = "remediation_failed"
+        try:
+            async with asyncio.timeout(config.deadline_seconds):
+                record = await self._orchestrator.resume_approval(approval_id)
+        except UnverifiedProvenanceError:
+            async with self._sessions() as session:
+                async with session.begin():
+                    result = await approval_jobs.hold(session, approval_id, attempt)
+            self._record_remediation(summary, approval_id, attempt, "held", result)
+            return
+        except ProvenanceRejected as error:
+            code = f"provenance_{error.code}"
+        except OrchestrationError:
+            code = "binding_mismatch"
+        except TimeoutError:
+            retry_code = "remediation_deadline_exceeded"
+        except Exception as error:
+            # Never log str(error): it can carry API responses. Retried within the budget.
+            logger.error(
+                "remediation_attempt_error",
+                approval_id=approval_id,
+                error_type=type(error).__name__,
+            )
+            retry_code = "remediation_error"
+        else:
+            if record.status == PipelineStatus.COMPLETED:
+                status, code = approval_jobs.COMPLETED, None
+            elif record.status == PipelineStatus.FAILED:
+                retry_code = "mutation_failed"  # the mutation record makes a retry idempotent
+            elif record.status == PipelineStatus.MUTATING:
+                code = "mutation_state_unknown"  # an earlier attempt was cut off mid-mutation
+            else:
+                code = f"pipeline_{record.status.value}"[:64]
+        next_attempt_at = None
+        if retry_code is not None:
+            status, code = approval_jobs.PENDING, retry_code
+            next_attempt_at = classify_retry(
+                {},
+                attempt,
+                now=self._now(),
+                base_delay=self._config.base_delay_seconds,
+                max_delay=self._config.max_delay_seconds,
+                provider_ceiling=self._config.provider_ceiling_seconds,
+                random_value=self._random,
+            ).next_retry_at
+        async with self._sessions() as session:
+            async with session.begin():
+                result = await approval_jobs.complete(
+                    session,
+                    approval_id,
+                    attempt,
+                    status=status,
+                    code=code,
+                    next_attempt_at=next_attempt_at,
+                )
+        outcome = "retry" if retry_code is not None else status
+        self._record_remediation(summary, approval_id, attempt, outcome, result, code)
+
+    def _record_remediation(
+        self,
+        summary: TickSummary,
+        approval_id: str,
+        attempt: int,
+        outcome: str,
+        result: str,
+        code: str | None = approval_jobs.HOLD_CODE,
+    ) -> None:
+        if result != approval_jobs.RECORDED:
+            self._count(summary, "remediation_lease_lost")
+            logger.warning(
+                "remediation_write_refused", approval_id=approval_id, attempt=attempt, reason=result
+            )
+            return
+        self._count(summary, f"remediation_{outcome}")
+        logger.info(
+            "remediation_recorded",
+            approval_id=approval_id,
+            attempt=attempt,
+            outcome=outcome,
+            code=code,
+        )
+
+    async def _release_unstarted(self, claims: list[tuple[str, int]], summary: TickSummary) -> None:
+        for delivery_id, attempt in claims:
+            try:
+                async with self._sessions() as session:
+                    async with session.begin():
+                        released = await WebhookEventRepository(session).release_unstarted(
+                            delivery_id, attempt
+                        )
+            except (OperationalError, InterfaceError, OSError) as error:
+                # Database unavailable during shutdown: the claim is left to stale-claim recovery.
+                summary.release_failed += 1
+                logger.warning("webhook_worker_release_failed", error_type=type(error).__name__)
+                continue
+            if released:
+                summary.released += 1
+            else:
+                summary.superseded += 1
+
+    async def _process(self, delivery_id: str, attempt: int, summary: TickSummary) -> None:
+        async with self._sessions() as session:
+            row = await WebhookEventRepository(session).state(delivery_id)
+        if row is None:
+            summary.superseded += 1
+            return
+        payload = build_verification_payload(row)
+        if payload is None:
+            await self._record_failure(
+                delivery_id,
+                attempt,
+                retryable=False,
+                failure_code="identity_incomplete",
+                headers={},
+                summary=summary,
+            )
+            return
+
+        try:
+            # One deadline bounds every GitHub request in this verification. It is shorter than the
+            # stale-claim window, so a live verification is never reclaimed while still running.
+            async with asyncio.timeout(self._config.verification_deadline_seconds):
+                async with httpx.AsyncClient(
+                    base_url=self._config.github_api_url, timeout=30.0
+                ) as api:
+                    app_auth = GitHubAppAuth(
+                        self._config.github_app_id,
+                        self._config.github_app_private_key,
+                        client=api,
+                    )
+                    provenance = await WorkflowRunProvenanceVerifier(app_auth, api).verify(
+                        payload, delivery_id
+                    )
+        except TimeoutError:
+            await self._record_failure(
+                delivery_id,
+                attempt,
+                retryable=True,
+                failure_code="verification_deadline_exceeded",
+                headers={},
+                summary=summary,
+            )
+            return
+        except (ProvenanceVerificationError, ValueError) as error:
+            retryable = isinstance(error, TransientProvenanceError)
+            code = (
+                error.code
+                if isinstance(error, ProvenanceVerificationError)
+                else "provenance_mismatch"
+            )
+            headers = error.headers if isinstance(error, TransientProvenanceError) else {}
+            await self._record_failure(
+                delivery_id,
+                attempt,
+                retryable=retryable,
+                failure_code=code,
+                headers=headers,
+                summary=summary,
+            )
+            return
+        except Exception as error:
+            # Crash-equivalent: the row stays verifying and the stale-claim window recovers it.
+            # Only the exception type is logged, because its message may contain sensitive data.
+            summary.crashed += 1
+            logger.error(
+                "webhook_worker_verification_interrupted",
+                delivery_id=delivery_id,
+                attempt=attempt,
+                error_type=type(error).__name__,
+            )
+            return
+
+        async with self._sessions() as session:
+            admission = await admit_verified_delivery(
+                session,
+                delivery_id=delivery_id,
+                attempt_number=attempt,
+                provenance=provenance,
+                workflow_name=row.workflow_name or "Unnamed Workflow",
+                run_url=row.run_url or "",
+                conclusion=_conclusion(row.conclusion),
+            )
+        if admission.result == "verified":
+            summary.verified += 1
+        elif admission.result == "superseded":
+            summary.superseded += 1
+        else:
+            # Duplicate or conflicting identity: a terminal outcome, recorded by admission.
+            summary.counters[admission.result] = summary.counters.get(admission.result, 0) + 1
+
+    async def _record_failure(
+        self,
+        delivery_id: str,
+        attempt: int,
+        *,
+        retryable: bool,
+        failure_code: str,
+        headers: dict[str, str],
+        summary: TickSummary,
+    ) -> None:
+        now = self._now()
+        schedule = classify_retry(
+            headers,
+            attempt,
+            now=now,
+            base_delay=self._config.base_delay_seconds,
+            max_delay=self._config.max_delay_seconds,
+            provider_ceiling=self._config.provider_ceiling_seconds,
+            random_value=self._random,
+        )
+        async with self._sessions() as session:
+            async with session.begin():
+                outcome = await WebhookEventRepository(session).record_attempt_failure(
+                    delivery_id,
+                    attempt,
+                    retryable=retryable,
+                    failure_code=failure_code,
+                    next_retry_at=schedule.next_retry_at,
+                    max_attempts=self._config.max_attempts,
+                    retry_status=schedule.status,
+                )
+        if outcome == "retryable_error":
+            summary.retried += 1
+        elif outcome == "provider_hold":
+            summary.held += 1
+        elif outcome == "exhausted":
+            summary.exhausted += 1
+        elif outcome == "rejected":
+            summary.rejected += 1
+        else:
+            summary.superseded += 1
+
+    async def run_forever(
+        self,
+        stop: asyncio.Event,
+        heartbeat: Callable[[str], None],
+    ) -> None:
+        """Poll until ``stop`` is set. Reports state through ``heartbeat`` after each pass."""
+        consecutive_db_failures = 0
+
+        def heartbeat_and_ping(state: str) -> None:
+            heartbeat(state)
+            notify("WATCHDOG=1")
+
+        while not stop.is_set():
+            if not self.app_configured:
+                state = STATE_NOT_CONFIGURED
+                delay = self._config.poll_seconds
+            else:
+                try:
+                    await self.tick(stop, progress=lambda: heartbeat_and_ping(STATE_OK))
+                    consecutive_db_failures = 0
+                    state = STATE_OK
+                    delay = self._config.poll_seconds
+                except (OperationalError, InterfaceError, OSError) as error:
+                    consecutive_db_failures += 1
+                    state = STATE_DATABASE_UNAVAILABLE
+                    delay = min(
+                        self._config.db_backoff_max_seconds,
+                        2.0 ** min(consecutive_db_failures, 10),
+                    )
+                    # Never log str(error): driver messages can echo the connection URL.
+                    logger.warning(
+                        "webhook_worker_database_unavailable",
+                        consecutive_failures=consecutive_db_failures,
+                        retry_in_seconds=delay,
+                        error_type=type(error).__name__,
+                    )
+                except Exception as error:
+                    state = STATE_ERROR
+                    delay = self._config.poll_seconds
+                    logger.error("webhook_worker_tick_failed", error_type=type(error).__name__)
+            heartbeat_and_ping(state)
+            await _sleep_or_stop(stop, delay)
+        heartbeat_and_ping(STATE_STOPPED)
+
+
+async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except TimeoutError:
+        return
+
+
+class HeartbeatFile:
+    """Atomically writes the worker's last state so an external probe can read readiness.
+
+    The temporary file is created with ``mkstemp`` (random name, ``O_EXCL``, never follows a
+    pre-existing link) in the target directory, then renamed over the target. The heartbeat holds
+    no secrets, so it is world-readable (0644) to let monitoring read it without the service user.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+
+    def write(self, state: str) -> None:
+        payload = json.dumps(
+            {"state": state, "updated_at": datetime.now(UTC).isoformat(), "pid": os.getpid()}
+        )
+        try:
+            fd, tmp_name = tempfile.mkstemp(
+                dir=self._path.parent, prefix=self._path.name + ".", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+                os.chmod(tmp_name, 0o644)
+                os.replace(tmp_name, self._path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_name)
+                raise
+        except OSError:
+            # A heartbeat failure must never stop verification; the probe will report it stale.
+            logger.warning("webhook_worker_heartbeat_write_failed")
+
+
+def check_heartbeat(
+    path: str, *, max_age_seconds: int, now: datetime | None = None
+) -> tuple[bool, str]:
+    """Readiness check: fresh heartbeat in an OK state. Returns (healthy, reason)."""
+    current = now or datetime.now(UTC)
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        updated_at = datetime.fromisoformat(data["updated_at"])
+        state = str(data["state"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, "no readable heartbeat"
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    age = (current - updated_at).total_seconds()
+    if age > max_age_seconds:
+        return False, f"heartbeat stale ({int(age)}s)"
+    if state != STATE_OK:
+        return False, f"not ready: {state}"
+    return True, "ok"

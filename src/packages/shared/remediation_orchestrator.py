@@ -12,8 +12,10 @@ from src.packages.database.repositories import (
     PipelineRepositoryProtocol,
 )
 from src.packages.database.session import get_session_factory
-from src.packages.shared.approval_service import ApprovalService
+from src.packages.shared.approval_service import ApprovalService, approval_id_for
+from src.packages.shared.config import settings
 from src.packages.shared.context_resolver import CodebaseContextResolver
+from src.packages.shared.diagnosis_evidence import load_diagnosis_context
 from src.packages.shared.diagnostic_service import DiagnosticService
 from src.packages.shared.fix_service import FixProposalService
 from src.packages.shared.logging import get_logger
@@ -33,6 +35,11 @@ from src.packages.shared.mutation_service import (
     GitMutationService,
     GitMutationServiceProtocol,
 )
+from src.packages.shared.persisted_provenance import (
+    verify_approval_provenance,
+    verify_context_provenance,
+)
+from src.packages.shared.provenance import require_verified_provenance
 from src.packages.shared.validation_service import ValidationService
 
 logger = get_logger("akesis.remediation_orchestrator")
@@ -46,13 +53,16 @@ class OrchestrationError(Exception):
 
 class DiagnosticServiceProtocol(Protocol):
     async def diagnose_failure(
-        self, context: FailureContext, evidence_package: EvidencePackage | None = None
+        self,
+        context: FailureContext,
+        evidence_package: EvidencePackage | None = None,
+        provenance: Any = None,
     ) -> DiagnosticResult: ...
 
 
 class ContextResolverProtocol(Protocol):
-    def resolve_context(
-        self, failure_context: FailureContext, repo_root: Any = None
+    async def resolve_context(
+        self, failure_context: FailureContext, repo_root: Any = None, *, provenance: Any = None
     ) -> EvidencePackage: ...
 
 
@@ -150,7 +160,22 @@ class RemediationOrchestrator:
         self.mutation_service = mutation_service or GitMutationService()
 
     async def process_failure(self, context: FailureContext) -> PipelineRecord:
-        """Executes failure ingestion through diagnostic, fix, validation, and approval gate."""
+        """Executes failure ingestion through diagnostic, fix, validation, and approval gate.
+
+        Fails closed before any persistence or external call while the provenance hold is active.
+        """
+        require_verified_provenance()  # first: no database read before the hold refuses
+        # Diagnose only the persisted, final workflow-log evidence (Phase 1.11), never the
+        # caller's copy of the signal. Raises LogEvidencePending while logs are still in flight.
+        async with get_session_factory()() as session:
+            context = await load_diagnosis_context(context, session=session)
+        provenance = await verify_context_provenance(context)
+        return await self._process_failure_unchecked(context, provenance)
+
+    async def _process_failure_unchecked(
+        self, context: FailureContext, provenance: Any = None
+    ) -> PipelineRecord:
+        """Pipeline body. Private: callers must go through the gated public entry point."""
         pipeline_id = f"pipe_{context.incident_id}"
         now = datetime.now(UTC)
 
@@ -191,7 +216,14 @@ class RemediationOrchestrator:
             async with self.repository_factory() as (_, _, pipe_repo):
                 await pipe_repo.update_pipeline_state(pipeline_id, PipelineStatus.DIAGNOSING)
 
-            diag_result = await self.diagnostic_service.diagnose_failure(context=context)
+            # One verified snapshot per incident: diagnosis and fix synthesis share this evidence.
+            evidence_pkg = await self.context_resolver.resolve_context(
+                failure_context=context,
+                provenance=provenance,
+            )
+            diag_result = await self.diagnostic_service.diagnose_failure(
+                context=context, evidence_package=evidence_pkg, provenance=provenance
+            )
             diag_id = f"diag_{context.incident_id}"
 
             if not diag_result.proposal.is_fixable:
@@ -208,11 +240,7 @@ class RemediationOrchestrator:
                 logger.info("pipeline_halted_unfixable", incident_id=context.incident_id)
                 return updated or record
 
-            # 3. Stage: Codebase Context Resolution
-            evidence_pkg = self.context_resolver.resolve_context(
-                failure_context=context,
-            )
-
+            # 3. Stage: Codebase context availability (resolved once, before diagnosis)
             if (
                 evidence_pkg.retrieval_status in ("unavailable", "empty")
                 or len(evidence_pkg.code_evidences) == 0
@@ -309,23 +337,32 @@ class RemediationOrchestrator:
                 return updated or record
 
             # 6. Stage: Request Human Authorization (Post to Slack)
+            # Persist the complete workflow before the interactive card can be used.
+            approval_id = approval_id_for(context.incident_id, fix_prop.commit_sha)
+            async with self.repository_factory() as (_, _, pipe_repo):
+                await pipe_repo.update_pipeline_state(
+                    pipeline_id,
+                    PipelineStatus.AWAITING_APPROVAL,
+                    diagnosis_id=diag_id,
+                    proposal_id=fix_prop.proposal_id,
+                    approval_id=approval_id,
+                    failure_context_json=context.model_dump_json(),
+                    proposal_json=fix_prop.model_dump_json(),
+                    validation_json=val_result.model_dump_json(),
+                )
             appr_record = await self.approval_service.request_approval(
                 context=context,
                 proposal=fix_prop,
                 validation=val_result,
             )
+            if appr_record.approval_id != approval_id:
+                # The pipeline row must point at the record that was actually persisted.
+                raise OrchestrationError(
+                    "Approval record identifier does not match the persisted pipeline"
+                )
 
             async with self.repository_factory() as (_, _, pipe_repo):
-                updated = await pipe_repo.update_pipeline_state(
-                    pipeline_id,
-                    PipelineStatus.AWAITING_APPROVAL,
-                    diagnosis_id=diag_id,
-                    proposal_id=fix_prop.proposal_id,
-                    approval_id=appr_record.approval_id,
-                    failure_context_json=context.model_dump_json(),
-                    proposal_json=fix_prop.model_dump_json(),
-                    validation_json=val_result.model_dump_json(),
-                )
+                updated = await pipe_repo.get_pipeline(pipeline_id)
 
             logger.info(
                 "pipeline_awaiting_approval",
@@ -356,7 +393,14 @@ class RemediationOrchestrator:
         - NEVER fabricates fallback proposals or validations.
         - Loads and deserializes exact persisted FailureContext, FixProposal, and ValidationResult.
         - Verifies exact proposal ID, commit SHA, and passed validation before mutation.
+        - Fails closed before any database read while the provenance hold is active.
         """
+        require_verified_provenance()  # first: no database read before the hold refuses
+        await verify_approval_provenance(approval_id)
+        return await self._resume_approval_unchecked(approval_id)
+
+    async def _resume_approval_unchecked(self, approval_id: str) -> PipelineRecord:
+        """Resume body. Private: callers must go through the gated public entry point."""
         async with self.repository_factory() as (appr_repo, mut_repo, pipe_repo):
             # 1. Retrieve authoritative approval state from PostgreSQL
             approval = await appr_repo.get_approval(approval_id)
@@ -393,6 +437,13 @@ class RemediationOrchestrator:
                 raise OrchestrationError(
                     f"Approval record status must be 'approved' (got {approval.status.value})."
                 )
+            # Phase 1.14c: the decision is re-authorized at execution time, not trusted from the
+            # job. The recorded approver must still be on the configured approver allowlist.
+            if (
+                not approval.decided_by
+                or approval.decided_by not in settings.slack_approver_user_ids
+            ):
+                raise OrchestrationError("Approval was not decided by an authorized approver")
 
             # 3. Retrieve and deserialize authoritative persisted context, proposal, and validation
             if not pipeline.failure_context_json:
@@ -412,6 +463,19 @@ class RemediationOrchestrator:
                 ) from err
 
             # 4. Strict Security Verification of Invariants
+            if (
+                pipeline.approval_id != approval.approval_id
+                or pipeline.incident_id != approval.incident_id
+                or context.incident_id != pipeline.incident_id
+                or context.repository_owner != pipeline.repository_owner
+                or context.repository_name != pipeline.repository_name
+                or context.run_id != pipeline.run_id
+                or context.commit_sha != pipeline.commit_sha
+                or proposal.incident_id != context.incident_id
+                or validation.incident_id != context.incident_id
+                or validation.commit_sha != context.commit_sha
+            ):
+                raise OrchestrationError("Persisted pipeline context does not match approval")
             if approval.proposal_id != proposal.proposal_id:
                 raise OrchestrationError(
                     f"Approval proposal_id '{approval.proposal_id}' does not match "

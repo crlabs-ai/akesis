@@ -1,7 +1,9 @@
 # ADR-0007: Safe GitHub Pull Request Creation & Controlled Git Mutation
 
 ## Status
-Accepted
+Accepted. The mechanism (shared checkout, `git push`, `GitHubClientProtocol` PR methods) is
+superseded by Phase 1.7 (ADR-0010, ADR-0011): branches and PRs are created through the Git Data API
+with a scoped GitHub App installation token, and the PR base is the verified source branch.
 
 ## Date
 2026-09-01

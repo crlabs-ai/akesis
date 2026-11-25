@@ -34,7 +34,7 @@ describe('App Shell & Navigation', () => {
 
     // Wait for overview content to load
     await waitFor(() => {
-      expect(screen.getByText('READY')).toBeInTheDocument()
+      expect(screen.getByText('REPORTS READY')).toBeInTheDocument()
     })
   })
 })

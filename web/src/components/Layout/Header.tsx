@@ -1,6 +1,10 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, Search } from 'lucide-react'
+import { AccessControl } from '../Access/AccessControl'
+import { openCommandPalette } from '../../lib/paletteEvents'
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 
 interface HeaderProps {
   onRefresh?: () => void
@@ -27,6 +31,9 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
     }
     if (pathname === '/pipelines') {
       return [{ label: 'Pipelines', to: '/pipelines' }]
+    }
+    if (pathname === '/deliveries') {
+      return [{ label: 'Webhook deliveries', to: '/deliveries' }]
     }
     if (pathname === '/health') {
       return [{ label: 'System Health', to: '/health' }]
@@ -64,6 +71,18 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
       </div>
 
       <div className="header-right">
+        <button
+          type="button"
+          className="btn btn-sm palette-trigger"
+          onClick={openCommandPalette}
+          aria-label="Jump to a page (command palette)"
+          title={`Jump to a page (${isMac ? '⌘' : 'Ctrl'}K)`}
+        >
+          <Search size={13} aria-hidden="true" />
+          <span className="palette-trigger-label">Jump to…</span>
+          <kbd className="palette-kbd">{isMac ? '⌘' : 'Ctrl'} K</kbd>
+        </button>
+        <AccessControl />
         {onRefresh && (
           <button
             type="button"

@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -15,6 +15,7 @@ from src.packages.database.repositories import (
     PipelineRepository,
     PipelineRepositoryProtocol,
 )
+from src.packages.shared.approval_service import approval_id_for
 from src.packages.shared.config import settings
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -59,7 +60,11 @@ class BenchmarkDiagService:
         self.root_cause = root_cause
 
     async def diagnose_failure(
-        self, context: FailureContext, evidence_package: EvidencePackage | None = None
+        self,
+        context: FailureContext,
+        evidence_package: EvidencePackage | None = None,
+        provenance: Any = None,
+        **_: object,
     ) -> DiagnosticResult:
         proposal = DiagnosisProposal(
             category=self.category,
@@ -96,8 +101,12 @@ class BenchmarkContextResolver:
     def __init__(self, target_file: str = "src/calculator.py") -> None:
         self.target_file = target_file
 
-    def resolve_context(
-        self, failure_context: FailureContext, repo_root: Any = None
+    async def resolve_context(
+        self,
+        failure_context: FailureContext,
+        repo_root: Any = None,
+        provenance: Any = None,
+        **_: object,
     ) -> EvidencePackage:
         return EvidencePackage(
             incident_id=failure_context.incident_id,
@@ -189,12 +198,17 @@ class BenchmarkApprovalService:
     async def request_approval(
         self, context: FailureContext, proposal: FixProposal, validation: ValidationResult
     ) -> ApprovalRecord:
+        _now = datetime.now(UTC)
         record = ApprovalRecord(
-            approval_id=f"appr_{proposal.proposal_id}",
+            approval_id=approval_id_for(context.incident_id, context.commit_sha),
             incident_id=context.incident_id,
             proposal_id=proposal.proposal_id,
             commit_sha=context.commit_sha,
             status=ApprovalStatus.PENDING,
+            requested_at=_now,
+            expires_at=_now + timedelta(hours=24),
+            created_at=_now,
+            updated_at=_now,
         )
         async with self.session_factory() as session:
             repo = ApprovalRepository(session)
@@ -246,6 +260,16 @@ class BenchmarkMutationService:
         async with self.session_factory() as session:
             repo = MutationRepository(session)
             return await repo.create_mutation(record)
+
+
+@pytest.fixture(autouse=True)
+def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 1.14c: resume re-authorizes the recorded approver against the allowlist."""
+    monkeypatch.setattr(
+        settings,
+        "slack_approver_user_ids",
+        ["reviewer_a", "reviewer_b", "reviewer_c", "alice", "lead_dev"],
+    )
 
 
 @pytest.fixture
@@ -327,7 +351,7 @@ async def test_scenario_a_successful_ruff_lint_remediation(
     )
 
     # 1. Failure ingestion through approval request
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.AWAITING_APPROVAL
     assert pipe.proposal_json is not None
 
@@ -340,7 +364,7 @@ async def test_scenario_a_successful_ruff_lint_remediation(
         )
 
     # 3. Resume and complete mutation
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.COMPLETED
     assert final_pipe.pr_number == 501
     assert mutation_svc.mutation_invoked
@@ -393,7 +417,7 @@ async def test_scenario_b_successful_pytest_remediation(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.AWAITING_APPROVAL
 
     assert pipe.approval_id is not None
@@ -403,7 +427,7 @@ async def test_scenario_b_successful_pytest_remediation(
             pipe.approval_id, ApprovalStatus.APPROVED, reviewer="reviewer_b"
         )
 
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.COMPLETED
     assert final_pipe.pr_number == 501
     assert mutation_svc.mutation_invoked
@@ -454,7 +478,7 @@ async def test_scenario_c_successful_dependency_config_remediation(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.AWAITING_APPROVAL
 
     assert pipe.approval_id is not None
@@ -464,7 +488,7 @@ async def test_scenario_c_successful_dependency_config_remediation(
             pipe.approval_id, ApprovalStatus.APPROVED, reviewer="reviewer_c"
         )
 
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.COMPLETED
 
 
@@ -507,7 +531,7 @@ async def test_scenario_d_low_confidence_diagnosis_rejected(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.FAILED
     assert "not fixable" in (pipe.failure_reason or "")
     assert not mutation_svc.mutation_invoked
@@ -552,7 +576,7 @@ async def test_scenario_e_malformed_fix_proposal_rejected(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.REJECTED
     assert "Malformed unified diff" in (pipe.failure_reason or "")
     assert not mutation_svc.mutation_invoked
@@ -598,7 +622,7 @@ async def test_scenario_f_protected_patch_target_rejected(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.REJECTED
     assert "Protected CI workflow" in (pipe.failure_reason or "")
     assert not mutation_svc.mutation_invoked
@@ -643,7 +667,7 @@ async def test_scenario_g_sandbox_validation_failure_halts_pipeline(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.FAILED
     assert "Sandbox validation failed" in (pipe.failure_reason or "")
     assert not mutation_svc.mutation_invoked
@@ -684,7 +708,7 @@ async def test_scenario_h_human_approval_rejection_prevents_mutation(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.AWAITING_APPROVAL
 
     assert pipe.approval_id is not None
@@ -694,7 +718,7 @@ async def test_scenario_h_human_approval_rejection_prevents_mutation(
             pipe.approval_id, ApprovalStatus.REJECTED, reviewer="security_lead"
         )
 
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.REJECTED
     assert not mutation_svc.mutation_invoked
 
@@ -734,7 +758,7 @@ async def test_scenario_i_approval_expiry_prevents_mutation(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.status == PipelineStatus.AWAITING_APPROVAL
 
     assert pipe.approval_id is not None
@@ -743,7 +767,7 @@ async def test_scenario_i_approval_expiry_prevents_mutation(
         await a_repo.expire_approval(pipe.approval_id)
 
     with pytest.raises(OrchestrationError, match="must be 'approved'"):
-        await orch.resume_approval(pipe.approval_id)
+        await orch._resume_approval_unchecked(pipe.approval_id)
 
     assert not mutation_svc.mutation_invoked
 
@@ -783,14 +807,14 @@ async def test_scenario_j_stale_commit_sha_prevents_mutation(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.approval_id is not None
 
     async with session_factory() as session:
         a_repo = ApprovalRepository(session)
         await a_repo.record_decision(pipe.approval_id, ApprovalStatus.APPROVED, reviewer="alice")
 
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.FAILED
     assert "does not match proposal commit sha" in (final_pipe.failure_reason or "")
 
@@ -830,9 +854,9 @@ async def test_scenario_k_duplicate_request_idempotency(
     )
 
     # First delivery
-    pipe1 = await orch.process_failure(context)
+    pipe1 = await orch._process_failure_unchecked(context)
     # Duplicate webhook delivery
-    pipe2 = await orch.process_failure(context)
+    pipe2 = await orch._process_failure_unchecked(context)
 
     assert pipe1.pipeline_id == pipe2.pipeline_id
     assert pipe1.status == pipe2.status
@@ -873,7 +897,7 @@ async def test_scenario_l_end_to_end_delivery_through_mock_boundary(
         mutation_service=mutation_svc,
     )
 
-    pipe = await orch.process_failure(context)
+    pipe = await orch._process_failure_unchecked(context)
     assert pipe.approval_id is not None
 
     # Human approves
@@ -881,7 +905,7 @@ async def test_scenario_l_end_to_end_delivery_through_mock_boundary(
         a_repo = ApprovalRepository(session)
         await a_repo.record_decision(pipe.approval_id, ApprovalStatus.APPROVED, reviewer="lead_dev")
 
-    final_pipe = await orch.resume_approval(pipe.approval_id)
+    final_pipe = await orch._resume_approval_unchecked(pipe.approval_id)
     assert final_pipe.status == PipelineStatus.COMPLETED
     assert final_pipe.pr_number == 501
     assert final_pipe.pr_url == "https://github.com/crlabs-ai/akesis/pull/501"

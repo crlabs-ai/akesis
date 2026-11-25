@@ -30,7 +30,7 @@ def sample_approval_record() -> ApprovalRecord:
     unique_suffix = f"{now.timestamp():.6f}".replace(".", "_")
     return ApprovalRecord(
         approval_id=f"appr_test_db_{unique_suffix}",
-        incident_id="inc_db_01",
+        incident_id=f"inc_db_{unique_suffix}",
         proposal_id=f"prop_db_{unique_suffix}",
         commit_sha="112233445566",
         status=ApprovalStatus.PENDING,
@@ -38,6 +38,22 @@ def sample_approval_record() -> ApprovalRecord:
         expires_at=now + timedelta(hours=24),
         created_at=now,
         updated_at=now,
+    )
+
+
+async def create_pending_pipeline(session: AsyncSession, approval: ApprovalRecord) -> None:
+    await PipelineRepository(session).create_pipeline(
+        PipelineRecord(
+            pipeline_id=f"pipe_{approval.approval_id}",
+            incident_id=approval.incident_id,
+            repository_owner="synthetic",
+            repository_name="repository",
+            run_id=123,
+            commit_sha=approval.commit_sha,
+            status=PipelineStatus.AWAITING_APPROVAL,
+            proposal_id=approval.proposal_id,
+            approval_id=approval.approval_id,
+        )
     )
 
 
@@ -73,6 +89,7 @@ async def test_approval_state_transitions(
     async with session_factory() as session:
         repo = ApprovalRepository(session)
         await repo.create_approval(sample_approval_record)
+        await create_pending_pipeline(session, sample_approval_record)
 
     # Approve transition
     async with session_factory() as session:
@@ -121,6 +138,7 @@ async def test_concurrent_approve_reject_race(
     async with session_factory() as session:
         repo = ApprovalRepository(session)
         await repo.create_approval(sample_approval_record)
+        await create_pending_pipeline(session, sample_approval_record)
 
     # Simulate two concurrent database sessions racing in parallel tasks
     async def try_approve() -> tuple[ApprovalRecord | None, bool]:

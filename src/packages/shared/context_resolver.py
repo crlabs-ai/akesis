@@ -1,18 +1,30 @@
+"""Bounded source evidence for diagnosis, read only from a verified snapshot (Phase 1.8).
+
+Evidence comes from a private, verified snapshot of the exact failing commit (ADR-0011). Nothing is
+cloned, no shared checkout is read, and no personal access token is used. The snapshot and its
+workspace copy are removed when extraction finishes, on success and on error.
+"""
+
 import re
 from pathlib import Path
 
-from src.packages.sdk.repo_checkout import (
-    GitRepositoryCheckoutManager,
-    InvalidCommitError,
-    RepoCheckoutProtocol,
-    RepositoryCheckoutError,
-)
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     CodeEvidence,
     EvidencePackage,
     FailureContext,
+)
+from src.packages.shared.persisted_provenance import ProvenanceRejected, require_bound_token
+from src.packages.shared.provenance import require_verified_provenance
+from src.packages.shared.source_snapshot import (
+    SnapshotPreparer,
+    SnapshotRejected,
+    SnapshotService,
+    VerifiedSnapshot,
+    create_workspace,
+    discard_workspace,
+    snapshot_matches_token,
 )
 
 logger = get_logger("akesis.context_resolver")
@@ -85,62 +97,89 @@ class CodebaseContextResolver:
 
     def __init__(
         self,
-        checkout_manager: RepoCheckoutProtocol | None = None,
+        snapshot_service: SnapshotPreparer | None = None,
         max_window_lines: int | None = None,
         max_file_size_bytes: int | None = None,
         max_evidence_files: int | None = None,
         max_total_chars: int | None = None,
     ) -> None:
-        self.checkout_manager = checkout_manager or GitRepositoryCheckoutManager()
+        self.snapshot_service = snapshot_service or SnapshotService()
         self.max_window_lines = max_window_lines or settings.max_context_window_lines
         self.max_file_size = max_file_size_bytes or settings.max_file_size_bytes
         self.max_evidence_files = max_evidence_files or settings.max_evidence_files
         self.max_total_chars = max_total_chars or settings.max_total_source_chars
 
-    def resolve_context(
+    async def resolve_context(
         self,
         failure_context: FailureContext,
         repo_root: Path | None = None,
+        *,
+        provenance: object | None = None,
     ) -> EvidencePackage:
-        """Extracts bounded source code snippets around failure locations."""
+        """Extracts bounded source code snippets around failure locations.
+
+        Requires a persisted-provenance token bound to this incident, then the temporary hold.
+        Both checks run before any snapshot acquisition. A caller-chosen source is refused.
+        """
+        if repo_root is not None:
+            raise ProvenanceRejected(
+                "Caller-supplied source is not bound to provenance", code="binding"
+            )
+        token = require_bound_token(
+            provenance,
+            incident_id=failure_context.incident_id,
+            owner=failure_context.repository_owner,
+            name=failure_context.repository_name,
+            head_sha=failure_context.commit_sha,
+        )
+        require_verified_provenance()
+        return await self._resolve_context_unchecked(failure_context, token)
+
+    async def _resolve_context_unchecked(
+        self, failure_context: FailureContext, provenance: object
+    ) -> EvidencePackage:
+        """Context extraction body. Private: callers must use the gated public method."""
         incident_id = failure_context.incident_id
         commit_sha = failure_context.commit_sha
-        repo_owner = failure_context.repository_owner
-        repo_name = failure_context.repository_name
-
+        repo = f"{failure_context.repository_owner}/{failure_context.repository_name}"
         logger.info(
-            "codebase_context_started",
-            incident_id=incident_id,
-            repo=f"{repo_owner}/{repo_name}",
-            commit_sha=commit_sha,
+            "codebase_context_started", incident_id=incident_id, repo=repo, commit_sha=commit_sha
         )
+        try:
+            async with self.snapshot_service.prepare(provenance) as snapshot:
+                if not isinstance(snapshot, VerifiedSnapshot) or not snapshot_matches_token(
+                    provenance, snapshot
+                ):
+                    raise SnapshotRejected("Snapshot is not bound to this incident", code="binding")
+                workspace = create_workspace(snapshot)
+                try:
+                    return self._extract(
+                        failure_context,
+                        workspace,
+                        [f"Read verified snapshot of {repo}@{commit_sha[:8]}"],
+                    )
+                finally:
+                    discard_workspace(workspace)
+        except SnapshotRejected as err:
+            logger.warning("codebase_context_unavailable", incident_id=incident_id, code=err.code)
+            return EvidencePackage(
+                incident_id=incident_id,
+                commit_sha=commit_sha,
+                failure_context=failure_context,
+                code_evidences=[],
+                retrieval_status="unavailable",
+                retrieval_notes=[f"Source snapshot unavailable ({err.code})"],
+            )
 
-        notes: list[str] = []
+    def _extract(
+        self, failure_context: FailureContext, repo_root: Path, notes: list[str] | None = None
+    ) -> EvidencePackage:
+        """Read bounded evidence from a verified source tree. Pure filesystem; no network."""
+        incident_id = failure_context.incident_id
+        commit_sha = failure_context.commit_sha
+        repo_name = failure_context.repository_name
+        notes = list(notes or [])
         evidences: list[CodeEvidence] = []
-
-        # 1. Obtain verified repository root
-        if repo_root is None:
-            try:
-                repo_root = self.checkout_manager.checkout_commit(
-                    repo_owner=repo_owner,
-                    repo_name=repo_name,
-                    commit_sha=commit_sha,
-                )
-                notes.append(f"Successfully checked out {repo_owner}/{repo_name}@{commit_sha[:8]}")
-            except (InvalidCommitError, RepositoryCheckoutError) as err:
-                logger.warning(
-                    "codebase_context_unavailable",
-                    incident_id=incident_id,
-                    reason=str(err),
-                )
-                return EvidencePackage(
-                    incident_id=incident_id,
-                    commit_sha=commit_sha,
-                    failure_context=failure_context,
-                    code_evidences=[],
-                    retrieval_status="unavailable",
-                    retrieval_notes=[f"Repository checkout failed: {err}"],
-                )
 
         # 2. Discover relevant candidate target files
         candidate_targets: list[tuple[str, int | None]] = []

@@ -99,22 +99,63 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
 * **Symptom:** Sandbox validation returns `status: "infrastructure_error"` or `DockerUnavailableError`.
 * **Root Causes:**
   1. Docker daemon is stopped, crashed, or unreachable at `/var/run/docker.sock`.
-  2. The `akesis` application user lacks permissions to communicate with the Docker socket (`dial unix /var/run/docker.sock: permission denied`).
+  2. The validation executor is down, or the API cannot reach its socket (`infrastructure_error`, "Validation executor unavailable"; see Runbook 3a). The API user `akesis` is deliberately **not** in the `docker` group (Phase 1.14b). A `permission denied` on `/var/run/docker.sock` from the API is expected and correct.
   3. Validator image `akesis-validator:v1` has not been built on the host.
 * **Resolution Steps:**
   1. Check Docker daemon status: `sudo systemctl status docker`.
-  2. Check socket permissions: `sudo usermod -aG docker akesis`.
+  2. Check the executor, not the API: `sudo systemctl status akesis-executor` and `id -nG akesis-exec` (must include `docker`). **Never** add `akesis` to the `docker` group; that gives the public-facing API root on the host.
   3. Verify validator image exists: `docker images | grep akesis-validator`.
   4. If missing, rebuild validator image:
      ```bash
      docker build -f docker/Dockerfile.validator -t akesis-validator:v1 .
      ```
-  5. Test container execution manually:
+  5. Test container execution manually with the enforced sandbox flags:
      ```bash
-     docker run --rm --network none akesis-validator:v1 pytest --version
+     docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+       --user "$(id -u):$(id -g)" --pids-limit 256 --memory 512m --cpus=1.0 \
+       --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=64m,mode=1777 \
+       akesis-validator:v1 pytest --version
      ```
+  6. `Read-only file system` in validation output means a tool tried to write outside `/workspace` or `/tmp`. This is enforced (Phase 1.13). Do not remove `--read-only`; find the path the tool writes and report it. `No space left on device` from `/tmp` means a test suite exceeded the 64 MiB tmpfs.
 
 ---
+
+### Runbook 3b: Approved Remediation Jobs (Phase 1.14c)
+Recording a Slack approval queues one job on the approval row (`approvals.execution_status`). Only the worker runs it. The API never executes remediation.
+
+| `execution_status` | Meaning | Action |
+| :--- | :--- | :--- |
+| `pending` | Queued, or scheduled for a retry (`execution_next_attempt_at`). | None. |
+| `running` | Claimed; `execution_next_attempt_at` is the lease. A crashed worker's claim is reclaimed after it, as a counted attempt. | Do not edit by hand. |
+| `held` | The remediation hold refused the job. The decision and the attempt budget are kept, and the job is not claimed again on its own. | Expected while the hold is active. |
+| `completed` | The remediation finished. | None. |
+| `failed` | Terminal. `execution_failure_code` gives the reason: `binding_mismatch` or `provenance_*` (approval, provenance, approver or proposal no longer match), `mutation_state_unknown` (an earlier attempt was cut off mid-mutation; never retried automatically, so no PR is duplicated), or `remediation_retries_exhausted`. | Investigate. For `mutation_state_unknown`, check the remediation branch and PR on GitHub before doing anything. |
+
+**Condition-6 rollout (deliberate recovery):** once the hold is formally superseded, move held jobs back to the queue with `sudo -u akesis-worker sh -c 'cd /etc/akesis/worker && PYTHONPATH=/opt/akesis /opt/akesis/.venv/bin/python -m src.apps.worker.requeue_held --all'`, or name approval IDs instead of `--all`. Only approved, held rows are touched. While the hold is still active, a requeued job is simply held again, without consuming an attempt.
+
+Every run emits one `remediation_requeue` JSON event (kept by journald) with the invoking OS UID and user name as the kernel reports them, the host and PID, a UTC timestamp, what was requested, the exact approval IDs requeued, their count and the resulting state (`pending`). **Authorization limitation:** there is no operator authentication yet. Anyone who can run the tool with the worker's database credentials can requeue, and the recorded identity is the OS account that ran it (`identity_verified: false`), not the person behind a shared or `sudo`-assumed account. Restrict who can become `akesis-worker`, and keep the event with the change record. The hold, not this tool, is what prevents execution.
+
+**Logs:** `remediation_recorded` (outcome and code), `remediation_write_refused` (lease lost; another attempt owns the row), `remediation_attempt_error` (exception type only), `remediation_requeue` (operator requeue audit).
+
+### Runbook 3a: Validation Executor (remote mode)
+* **Symptom:** validation shows `infrastructure_error` with "Validation executor ..." in `stderr`.
+* **Logs:**
+  - caller: `validation_executor_unreachable`, `validation_executor_response_unsigned`, `validation_executor_response_mismatch`
+  - executor: `executor_job_rejected` (with `code`), `executor_peer_refused` (with `peer_uid`)
+* **Reject codes:**
+
+  | Code | Meaning |
+  | :--- | :--- |
+  | `held` | The remediation hold is active. Expected; no action. |
+  | `auth` | Key mismatch or clock skew over 60 s. |
+  | `stale` | The job was issued before the executor restarted. Retry. |
+  | `replay` | The job ID was reused. |
+  | `busy` | Concurrency limit reached. |
+  | `integrity`, `path`, `patch`, `limits`, `schema` | The job failed verification. Investigate the caller; never relax the executor. |
+
+* **Health:** `curl --unix-socket /run/akesis-exec/exec.sock http://e/healthz` returns `{"status":"ok"}`, or `{"status":"unavailable"}` when Docker or the image is missing.
+* **Startup refusals:** "A .env file exists" or "Application credentials are set" means the unit's working directory or environment is wrong. Remove the file or variable. Do not bypass the guard.
+* **Never** set the executor to fall back to local Docker. Remote mode fails closed by design.
 
 ### Runbook 4: Slack Interaction Signature or Replay Failures
 
@@ -138,6 +179,62 @@ WHERE incident_id = 'inc_9f8e7d6c5b4a';
   2. The new push on GitHub will trigger a new CI workflow run. If it fails, Akesis will ingest the new commit and generate a fresh diagnosis and proposal.
 
 ---
+
+### Runbook 6: Webhook Verification Retries, Holds and Exhaustion
+
+**Symptoms:** GitHub deliveries answer `503` with a `Retry-After` header, or `422` with the detail `Delivery verification retries exhausted`. The retry worker reports `not ready` in its health probe.
+
+**Processes:** the API serves webhooks and the operator endpoint. The retry worker is a separate process (`python -m src.apps.worker`) that executes scheduled verification attempts. Both share PostgreSQL. Either can restart without losing state.
+
+**Check worker readiness:**
+
+```bash
+/opt/akesis/.venv/bin/python -m src.apps.worker.healthcheck
+```
+
+Exit code 0 means the heartbeat is fresh and the worker is `ok`. Exit code 1 prints the reason: `heartbeat stale`, `not ready: database_unavailable`, `not ready: github_app_not_configured`, or `no readable heartbeat`.
+
+**List deliveries that need attention (authenticated, read-only):**
+
+```bash
+curl -s -H "X-Akesis-Read-Token: $READ_API_TOKEN" \
+  "http://127.0.0.1:8000/v1/webhook-deliveries?status=exhausted&status=retryable_error&limit=50"
+```
+
+Each item shows `delivery_id`, `status`, `failure_code`, `last_error_code`, `attempt_count`, `max_attempts`, `next_retry_at`, `received_at`, `updated_at` and `event_type`. It never shows payloads, signatures, headers, installation identifiers or credentials. Page with the returned `next_cursor`.
+
+**What each state means:**
+
+| Status | Meaning | Action |
+| :--- | :--- | :--- |
+| `retryable_error`, `next_retry_at` in the future | A transient failure is scheduled. Attempts remain. | No action. The worker runs it when due. |
+| `retryable_error`, `next_retry_at` in the past | Due. The worker claims it on its next pass (about 15 seconds). | If it stays here, check worker readiness. |
+| `provider_hold` | GitHub asked for a delay longer than the 24-hour sanity ceiling. The delay is honoured in full. | No action needed. The worker releases it at the scheduled time. Confirm the delay is expected. |
+| `exhausted` (`failure_code = verification_retries_exhausted`) | All permitted attempts were used. Terminal. | Diagnose using `last_error_code` (see below). Do not reopen the row. |
+| `rejected` | A non-retryable verification failure. | Diagnose `failure_code`. This status is never retried. |
+
+**Diagnosing exhaustion using `last_error_code`:**
+
+- `github_rate_limited` or `github_api_error`: rate limits or an upstream outage. Wait, then re-run the workflow.
+- `github_app_http_error`, `installation_suspended`, `invalid_installation_token` or `github_network_error`: check the GitHub App ID, private key, installation status and GitHub reachability.
+- `app_not_configured`: `GITHUB_APP_ID` or `GITHUB_APP_PRIVATE_KEY` is missing.
+- `identity_incomplete`: the stored identity for the delivery is incomplete. Re-run the workflow.
+- `verification_deadline_exceeded`: one verification exceeded `WEBHOOK_VERIFICATION_DEADLINE_SECONDS` (default 240). Usually GitHub is slow or rate-limiting. The delivery is retried on its own schedule.
+
+**Recovery:**
+
+1. Fix the root cause.
+2. Re-run the workflow run in GitHub. A re-run creates a new delivery with a new delivery ID, so the terminal row is never reopened.
+
+**Do not** update `webhook_events` rows by hand. Manual edits bypass the atomic transitions and leave no audit trail. Authenticated operator requeue is deliberately not implemented; see ADR-0010.
+
+**Shutdown behaviour:** a clean stop finishes only the delivery in flight and releases any claimed delivery it did not start. Released deliveries show `retryable_error` with `next_retry_at` at the time of the stop, and their attempt count is unchanged. If a stop coincides with a database outage, claims may remain `verifying` until the stale window (10 minutes) recovers them.
+
+**Stuck-worker procedure:** if the health probe reports `heartbeat stale`, the worker has stopped making progress. systemd restarts a worker whose watchdog expires (`WatchdogSec=600s`), so a frozen worker is normally restarted on its own. If the probe stays stale, check the journal, then restart with `sudo systemctl restart akesis-worker`. A worker that is alive but waiting out a database outage keeps pinging and is not restarted; fix the database instead. A clean stop removes the heartbeat directory, so the probe reports `no readable heartbeat` after a stop, which is expected. Restarting is safe: a claim in flight becomes reclaimable after 10 minutes, and that reclaim counts as an attempt.
+
+**Workflow-log stage:** each pipeline moves `pending` → `fetching` → `extracted` or `unavailable` (`log_failure_code` gives the reason, for example `log_retrieval_exhausted`). A `fetching` row is a live claim until `log_next_attempt_at`. If the worker is killed or a retrieval is cancelled, the row stays `fetching` until that time (10 minutes by default), and is then reclaimed as a new attempt that counts against `LOG_RETRIEVAL_MAX_ATTEMPTS`. Diagnosis is refused while a row is `pending` or `fetching`. Do not reset `fetching` rows by hand: the lease stops a second worker from retrieving the same logs. A `workflow_logs_write_refused` event means the worker's result was not stored. With `reason=lease_lost`, another attempt owns or has finished the row, and no action is needed. With `reason=context_changed`, the incident changed during retrieval, and the row is retried after its lease. Only `workflow_logs_recorded` means a result was stored. When logs are `unavailable`, diagnosis is told that logs are missing and why, and does not treat the run as having no identifiable failure.
+
+**Logs:** the worker logs structured events `webhook_worker_database_unavailable`, `webhook_worker_verification_interrupted`, `webhook_worker_tick_failed` and `webhook_worker_started`. Logs record exception types, never messages, so connection strings and tokens are not written.
 
 ## 4. Routine Maintenance Procedures
 

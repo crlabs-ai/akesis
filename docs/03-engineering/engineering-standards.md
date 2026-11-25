@@ -5,6 +5,7 @@
 ### 1. Canonical Tooling & Runtime
 * **Python Runtime:** **Python 3.12+**
 * **Package & Environment Manager:** **`uv`** (all dependency management and tool invocation uses `uv`).
+* **GitHub App signing:** `PyJWT[crypto]` provides RS256 signing for short-lived GitHub App JWTs; its cryptography extra supplies the RSA implementation. Keep keys and tokens out of logs and Git configuration.
 
 ### 2. Type Safety & Strict Verification
 All Python code must include complete type annotations and pass `mypy --strict` with zero errors.

@@ -12,6 +12,7 @@ from src.packages.shared.models import (
     FailureContext,
     RemediationDirection,
 )
+from src.packages.shared.persisted_provenance import ProvenanceRejected
 from src.packages.shared.prompt_builder import DiagnosticPromptBuilder
 
 logger = get_logger("akesis.diagnostic_service")
@@ -33,6 +34,7 @@ class DiagnosticService:
         self,
         context: FailureContext,
         evidence_package: EvidencePackage | None = None,
+        provenance: object | None = None,
     ) -> DiagnosticResult:
         """Executes single-call diagnosis with codebase evidence and schema validation."""
         start_time = time.perf_counter()
@@ -44,9 +46,23 @@ class DiagnosticService:
             preliminary_category=context.signal.category,
         )
 
+        # Supplied evidence must describe this exact incident, repository and commit.
+        if evidence_package is not None:
+            bound = evidence_package.failure_context
+            if (
+                evidence_package.incident_id != context.incident_id
+                or evidence_package.commit_sha != context.commit_sha
+                or bound.incident_id != context.incident_id
+                or bound.commit_sha != context.commit_sha
+                or bound.repository_owner != context.repository_owner
+                or bound.repository_name != context.repository_name
+            ):
+                raise ProvenanceRejected("Evidence does not match this incident", code="binding")
         # Resolve codebase evidence if not explicitly passed
-        if evidence_package is None and self.context_resolver:
-            evidence_package = self.context_resolver.resolve_context(context)
+        elif self.context_resolver:
+            evidence_package = await self.context_resolver.resolve_context(
+                context, provenance=provenance
+            )
 
         system_instruction = self.prompt_builder.build_system_instruction()
         user_prompt = self.prompt_builder.build_user_prompt(

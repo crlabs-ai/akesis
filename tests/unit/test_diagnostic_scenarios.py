@@ -1,4 +1,5 @@
-from typing import TypeVar
+from pathlib import Path
+from typing import Any, TypeVar, cast
 
 import pytest
 from pydantic import BaseModel
@@ -8,6 +9,7 @@ from src.packages.shared.models import (
     DiagnosisProposal,
     DiagnosticResult,
     EvidenceItem,
+    EvidencePackage,
     FailureCategory,
     FailureContext,
     FailureSignal,
@@ -34,6 +36,35 @@ class MockLLMClient:
         temperature: float = 0.0,
     ) -> T:
         return self.proposal  # type: ignore[return-value]
+
+
+class _NoEvidenceResolver:
+    """Explicit test double: diagnosis proceeds without repository evidence (no checkout)."""
+
+    async def resolve_context(
+        self,
+        failure_context: FailureContext,
+        repo_root: Path | None = None,
+        provenance: Any = None,
+        **_: object,
+    ) -> None:
+        return None
+
+
+class _StaticEvidenceResolver:
+    """Explicit test double returning a fixed, verified-shaped evidence package."""
+
+    def __init__(self, package: EvidencePackage) -> None:
+        self.package = package
+
+    async def resolve_context(
+        self,
+        failure_context: FailureContext,
+        repo_root: Path | None = None,
+        provenance: Any = None,
+        **_: object,
+    ) -> EvidencePackage:
+        return self.package
 
 
 def create_context(
@@ -101,7 +132,9 @@ async def test_scenario_dependency_failure() -> None:
         reasoning="Pip solver reported resolution conflict on pydantic-core.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result: DiagnosticResult = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.DEPENDENCY
@@ -147,7 +180,9 @@ async def test_scenario_module_not_found() -> None:
         reasoning="Direct traceback to line 4 attempting to import missing module.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.DEPENDENCY
@@ -193,7 +228,9 @@ async def test_scenario_ruff_lint_failure() -> None:
         reasoning="Deterministic linter rule code F401 with exact file and line.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.LINT
@@ -238,7 +275,9 @@ async def test_scenario_mypy_type_failure() -> None:
         reasoning="Mypy reported type mismatch on client function return.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.LINT
@@ -282,7 +321,9 @@ async def test_scenario_pytest_assertion_failure() -> None:
         reasoning="Test failed explicitly on unhandled zero division exception.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.TEST
@@ -322,7 +363,9 @@ async def test_scenario_generic_shell_failure() -> None:
         reasoning="Binary gcc missing from PATH in container runner.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.category == FailureCategory.BUILD
@@ -362,7 +405,9 @@ async def test_scenario_ambiguous_insufficient_evidence() -> None:
         reasoning="No traceback, syntax error, or tool error output was recorded.",
     )
 
-    service = DiagnosticService(llm_client=MockLLMClient(proposal))
+    service = DiagnosticService(
+        context_resolver=cast(Any, _NoEvidenceResolver()), llm_client=MockLLMClient(proposal)
+    )
     result = await service.diagnose_failure(context)
 
     assert result.proposal.evidence_sufficiency == "insufficient"

@@ -1,6 +1,6 @@
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
 from src.packages.shared.config import settings
 from src.packages.shared.logging import get_logger
@@ -9,6 +9,7 @@ logger = get_logger("akesis.security")
 
 
 async def verify_read_token(
+    request: Request,
     x_akesis_read_token: str | None = Header(default=None, alias="X-Akesis-Read-Token"),
 ) -> None:
     """Verifies the X-Akesis-Read-Token header for Read API endpoints.
@@ -19,10 +20,14 @@ async def verify_read_token(
     - Missing or invalid tokens return 401 Unauthorized with a consistent error message.
     - Never logs or echoes the submitted token.
     """
-    configured_token = settings.read_api_token
+    active_settings = getattr(request.app.state, "settings", settings)
+    configured_token = active_settings.read_api_token
     if not configured_token:
-        # Dev/test permissive mode when no token is configured
-        return
+        if active_settings.environment.lower() not in ("production", "prod"):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing read API token"
+        )
 
     if not x_akesis_read_token:
         logger.warning("read_api_access_rejected_missing_token")

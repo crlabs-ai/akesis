@@ -1,13 +1,28 @@
+"""Mutation against disposable PostgreSQL and the synthetic GitHub API (Phase 1.7).
+
+The service runs through its private body with explicit verified fixtures, as ADR-0010 requires
+while the hold is active. Snapshots come from the real engine; no real repository is contacted.
+"""
+
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.packages.database.repositories import ApprovalRepository, MutationRepository
+from src.packages.database.models import MutationModel
+from src.packages.database.repositories import (
+    ApprovalRepository,
+    ApprovalRepositoryProtocol,
+    MutationRepository,
+    MutationRepositoryProtocol,
+)
 from src.packages.shared.config import settings
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -17,72 +32,45 @@ from src.packages.shared.models import (
     FailureSignal,
     FixProposal,
     MutationStatus,
-    ValidationCommand,
+    RepositoryIdentity,
     ValidationResult,
     ValidationStatus,
     WorkflowRunConclusion,
+    WorkflowRunProvenance,
 )
-from src.packages.shared.mutation_service import GitMutationService
+from src.packages.shared.mutation_service import GitMutationService, PullRequestError
+from src.packages.shared.source_snapshot import SnapshotService, VerifiedSnapshot
+from tests.support.fake_github import FakeGitHub, FakeInstallationAuth
+
+REPO_ID = 1001
+FULL = "crlabs-ai/akesis"
+APPROVED = "a" * 40
 
 
-class MockIntegrationGitHubClient:
-    def __init__(self) -> None:
-        self.prs: list[dict[str, Any]] = []
+class _PassingValidation:
+    """Explicit test double for the gated pre-push validation step."""
 
-    async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
-        return {}
-
-    async def get_workflow_run_logs(self, owner: str, repo: str, run_id: int) -> str:
-        return ""
-
-    async def get_commit(self, owner: str, repo: str, commit_sha: str) -> dict[str, Any]:
-        return {"sha": commit_sha}
-
-    async def create_pull_request(
-        self, owner: str, repo: str, title: str, body: str, head: str, base: str
-    ) -> dict[str, Any]:
-        data = {
-            "number": 108,
-            "html_url": f"https://github.com/{owner}/{repo}/pull/108",
-            "title": title,
-            "head": {"sha": "commit_sha_456"},
-        }
-        self.prs.append(data)
-        return data
-
-    async def find_pull_request(
-        self, owner: str, repo: str, head_branch: str, base_branch: str
-    ) -> dict[str, Any] | None:
-        return None
-
-
-class MockIntegrationRepoCheckout:
-    def __init__(self, target_dir: Path) -> None:
-        self.target_dir = target_dir
-
-    def checkout_commit(
-        self, repo_owner: str, repo_name: str, commit_sha: str, clone_url: str | None = None
-    ) -> Path:
-        return self.target_dir
-
-
-class MockIntegrationSandboxRunner:
-    async def run_validation(
-        self,
-        repo_source_dir: Path,
-        patch_diff: str,
-        command: ValidationCommand,
-        timeout_seconds: float | None = None,
-    ) -> Any:
-        from src.packages.sdk.sandbox_runner import ValidationExecutionResult
-
-        return ValidationExecutionResult(
+    async def validate_fix(
+        self, proposal: FixProposal, context: FailureContext
+    ) -> ValidationResult:
+        return ValidationResult(
+            validation_id=f"val_pre_push_{proposal.proposal_id}",
+            proposal_id=proposal.proposal_id,
+            incident_id=context.incident_id,
+            commit_sha=proposal.commit_sha,
+            status=ValidationStatus.PASSED,
+            command_executed="pytest",
             exit_code=0,
-            stdout="1 passed",
-            stderr="",
-            duration_ms=15.0,
-            timed_out=False,
+            duration_ms=1.0,
         )
+
+
+class _Preparer:
+    def __init__(self, fake: FakeGitHub) -> None:
+        self._service = SnapshotService(auth=FakeInstallationAuth(), client_factory=fake.client)
+
+    def prepare(self, token: object) -> AbstractAsyncContextManager[VerifiedSnapshot]:
+        return self._service._open_unchecked(token)
 
 
 @pytest.fixture
@@ -93,35 +81,24 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     await engine.dispose()
 
 
-@pytest.fixture
-def mock_git_repo(tmp_path: Path) -> tuple[Path, str]:
-    import git
-
-    repo_dir = tmp_path / "integration_repo"
-    repo_dir.mkdir()
-    r = git.Repo.init(repo_dir)
-    f = repo_dir / "calc.py"
-    f.write_text("def add(a, b): return a + b\n", encoding="utf-8")
-    r.index.add(["calc.py"])
-    c = r.index.commit("initial commit")
-    return repo_dir, c.hexsha
+@pytest.fixture(autouse=True)
+def snapshot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "snapshots"
+    monkeypatch.setattr(settings, "snapshot_base_dir", str(root))
+    return root
 
 
-@pytest.mark.asyncio
-async def test_full_mutation_flow_with_postgres(
-    session_factory: async_sessionmaker[AsyncSession],
-    mock_git_repo: tuple[Path, str],
-) -> None:
-    repo_dir, commit_sha = mock_git_repo
+async def _seed(
+    factory: async_sessionmaker[AsyncSession],
+) -> tuple[FailureContext, FixProposal, ValidationResult, ApprovalRecord, Any]:
     now = datetime.now(UTC)
-    unique_id = f"{now.timestamp():.6f}".replace(".", "_")
-
-    # 1. Create durable approved approval record in PostgreSQL
-    approval_rec = ApprovalRecord(
-        approval_id=f"appr_mut_{unique_id}",
-        incident_id=f"inc_mut_{unique_id}",
-        proposal_id=f"prop_mut_{unique_id}",
-        commit_sha=commit_sha,
+    unique = f"{now.timestamp():.6f}".replace(".", "_")
+    incident = f"inc_mut_{unique}"
+    approval = ApprovalRecord(
+        approval_id=f"appr_mut_{unique}",
+        incident_id=incident,
+        proposal_id=f"prop_mut_{unique}",
+        commit_sha=APPROVED,
         status=ApprovalStatus.APPROVED,
         decided_by="senior_engineer",
         decided_at=now,
@@ -129,31 +106,43 @@ async def test_full_mutation_flow_with_postgres(
         created_at=now,
         updated_at=now,
     )
-
-    async with session_factory() as session:
-        appr_repo = ApprovalRepository(session)
-        await appr_repo.create_approval(approval_rec)
-
+    async with factory() as session:
+        repo = ApprovalRepository(session)
+        await repo.create_approval(approval)
+        # Production resumes with the record as PostgreSQL returns it, so mirror that exactly.
+        loaded = await repo.get_approval(approval.approval_id)
+        assert loaded is not None
+    provenance = WorkflowRunProvenance(
+        delivery_id=f"delivery-{unique}".replace("_", "-"),
+        event_repository=RepositoryIdentity(id=REPO_ID, full_name=FULL),
+        source_repository=RepositoryIdentity(id=REPO_ID, full_name=FULL),
+        head_sha=APPROVED,
+        head_branch="main",
+        run_id=777,
+        run_attempt=1,
+        installation_id=42,
+        verified_at=now,
+    )
     context = FailureContext(
-        incident_id=approval_rec.incident_id,
+        incident_id=incident,
+        provenance=provenance,
         repository_owner="crlabs-ai",
         repository_name="akesis",
         run_id=777,
         workflow_name="CI",
-        commit_sha=commit_sha,
+        commit_sha=APPROVED,
         branch="main",
-        run_url="https://ci",
+        run_url="https://github.com/crlabs-ai/akesis/actions/runs/777",
         conclusion=WorkflowRunConclusion.FAILURE,
         signal=FailureSignal(
-            category=FailureCategory.TEST, message="test failure", target_file="calc.py"
+            category=FailureCategory.TEST, message="failure", target_file="calc.py"
         ),
         raw_log_excerpt="err",
     )
-
     proposal = FixProposal(
-        proposal_id=approval_rec.proposal_id,
-        incident_id=approval_rec.incident_id,
-        commit_sha=commit_sha,
+        proposal_id=approval.proposal_id,
+        incident_id=incident,
+        commit_sha=APPROVED,
         status="proposed",
         is_valid=True,
         unified_diff=(
@@ -165,52 +154,114 @@ async def test_full_mutation_flow_with_postgres(
         risk_level="low",
         confidence_score=0.95,
     )
-
     validation = ValidationResult(
-        validation_id=f"val_mut_{unique_id}",
+        validation_id=f"val_mut_{unique}",
         proposal_id=proposal.proposal_id,
-        incident_id=context.incident_id,
-        commit_sha=commit_sha,
+        incident_id=incident,
+        commit_sha=APPROVED,
         status=ValidationStatus.PASSED,
         command_executed="pytest",
         exit_code=0,
         duration_ms=25.0,
     )
-
-    from collections.abc import AsyncIterator
-    from contextlib import asynccontextmanager
-
-    from src.packages.database.repositories import (
-        ApprovalRepositoryProtocol,
-        MutationRepositoryProtocol,
+    token = SimpleNamespace(
+        incident_id=incident,
+        pipeline_id=f"pipe_{incident}",
+        delivery_id=provenance.delivery_id,
+        event_repository_id=REPO_ID,
+        source_repository_id=REPO_ID,
+        owner="crlabs-ai",
+        name="akesis",
+        installation_id=42,
+        head_sha=APPROVED,
+        head_branch="main",
     )
+    return context, proposal, validation, loaded, token
 
+
+def _service(factory: async_sessionmaker[AsyncSession], fake: FakeGitHub) -> GitMutationService:
     @asynccontextmanager
-    async def scoped_repo_factory() -> AsyncIterator[
+    async def scoped() -> AsyncIterator[
         tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol]
     ]:
-        async with session_factory() as session:
-            yield (ApprovalRepository(session), MutationRepository(session))
+        async with factory() as session:
+            yield ApprovalRepository(session), MutationRepository(session)
 
-    gh_client = MockIntegrationGitHubClient()
     service = GitMutationService(
-        repository_factory=scoped_repo_factory,
-        github_client=gh_client,
-        repo_checkout=MockIntegrationRepoCheckout(repo_dir),
-        sandbox_runner=MockIntegrationSandboxRunner(),
+        repository_factory=scoped,
+        auth=FakeInstallationAuth(),
+        client_factory=fake.client,
+        snapshot_service=_Preparer(fake),
+    )
+    # Controlled pre-push validation double; the real validator is gated by the provenance hold.
+    service.validation_service = cast(Any, _PassingValidation())
+    return service
+
+
+def _fake(**overrides: Any) -> FakeGitHub:
+    return FakeGitHub(
+        repo_id=REPO_ID,
+        full_name=FULL,
+        files={"calc.py": ("100644", b"def add(a, b): return a + b\n")},
+        commit_sha=APPROVED,
+        **overrides,
     )
 
-    # 2. Execute mutation pipeline
-    record = await service.create_pull_request(context, proposal, validation, approval_rec)
-    assert record.status == MutationStatus.PR_CREATED
-    assert record.pr_number == 108
-    assert record.resulting_commit_sha is not None
 
-    # 3. Verify record was durably written to PostgreSQL
+@pytest.mark.asyncio
+async def test_full_mutation_flow_with_postgres(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    context, proposal, validation, approval, token = await _seed(session_factory)
+    fake = _fake()
+    record = await _service(session_factory, fake)._create_pull_request_unchecked(
+        context, proposal, validation, approval, token
+    )
+    assert record.status == MutationStatus.PR_CREATED
+    assert record.pr_number == 1
+    assert record.pr_url == f"https://github.com/{FULL}/pull/1"
+    assert fake.pulls[0]["base"]["ref"] == "main"
+
     async with session_factory() as session:
-        mut_repo = MutationRepository(session)
-        persisted = await mut_repo.get_mutation(record.mutation_id)
-        assert persisted is not None
-        assert persisted.status == MutationStatus.PR_CREATED
-        assert persisted.pr_number == 108
-        assert persisted.resulting_commit_sha == record.resulting_commit_sha
+        persisted = await MutationRepository(session).get_mutation(record.mutation_id)
+    assert persisted is not None
+    assert persisted.status == MutationStatus.PR_CREATED
+    assert persisted.pr_number == 1
+    assert persisted.validation_status == ValidationStatus.PASSED
+    assert persisted.resulting_commit_sha == fake.refs[record.branch_name]
+    assert (persisted.repository_owner, persisted.repository_name) == ("crlabs-ai", "akesis")
+
+
+@pytest.mark.asyncio
+async def test_retry_after_pr_failure_keeps_one_durable_record_and_one_pr(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    context, proposal, validation, approval, token = await _seed(session_factory)
+    fake = _fake(fail={"pull_create": 502})
+    service = _service(session_factory, fake)
+    with pytest.raises(PullRequestError):
+        await service._create_pull_request_unchecked(context, proposal, validation, approval, token)
+
+    async with session_factory() as session:
+        failed = await MutationRepository(session).get_by_proposal_and_commit(
+            proposal.proposal_id, APPROVED
+        )
+    assert failed is not None and failed.status == MutationStatus.FAILED
+
+    fake.fail.clear()
+    record = await service._create_pull_request_unchecked(
+        context, proposal, validation, approval, token
+    )
+    again = await service._create_pull_request_unchecked(
+        context, proposal, validation, approval, token
+    )
+    assert record.mutation_id == again.mutation_id == failed.mutation_id
+    assert len(fake.pulls) == 1
+    assert sum(1 for verb, path, _ in fake.writes if (verb, path) == ("POST", "/git/refs")) == 1
+    async with session_factory() as session:
+        rows = await session.scalar(
+            select(func.count())
+            .select_from(MutationModel)
+            .where(MutationModel.proposal_id == proposal.proposal_id)
+        )
+    assert rows == 1

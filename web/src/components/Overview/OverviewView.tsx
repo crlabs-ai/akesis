@@ -1,121 +1,217 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { apiClient, ApiError } from '../../services/api'
-import type { IncidentSummary, PipelineSummary, ReadinessResponse } from '../../types/api'
+import { apiClient } from '../../services/api'
+import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import type { IncidentSummary, PipelineSummary, ReadinessResponse, WebhookDelivery } from '../../types/api'
 import { StatusBadge } from '../Common/StatusBadge'
 import { CopyButton } from '../Common/CopyButton'
 import { TableSkeleton } from '../Common/Skeleton'
-import { AlertTriangle } from 'lucide-react'
+import { ApiErrorPanel } from '../Common/ApiErrorPanel'
+import { Info } from 'lucide-react'
 
+/** Size of each list on this page. Counts shown here are page sizes, never totals. */
 const RECENT_LIMIT = 8
 
 export const OverviewView: React.FC = () => {
   const [incidents, setIncidents] = useState<IncidentSummary[]>([])
   const [pipelines, setPipelines] = useState<PipelineSummary[]>([])
   const [readiness, setReadiness] = useState<ReadinessResponse | null>(null)
+  const [readinessError, setReadinessError] = useState<unknown>(null)
+  const [incidentsError, setIncidentsError] = useState<unknown>(null)
+  const [pipelinesError, setPipelinesError] = useState<unknown>(null)
+  const [liveness, setLiveness] = useState<string | null>(null)
+  const [livenessError, setLivenessError] = useState<unknown>(null)
+  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([])
+  const [deliveriesError, setDeliveriesError] = useState<unknown>(null)
   const [isLoading, setIsLoading] = useState<boolean>(true)
-  const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  const loadData = async () => {
+  // Each source settles independently. A failed source shows its own error state; it never
+  // becomes an empty list, and it never hides the other sources.
+  const loadData = useCallback(async () => {
     setIsLoading(true)
-    setError(null)
-    try {
-      const [readinessRes, incidentsRes, pipelinesRes] = await Promise.all([
-        apiClient.getReadiness().catch((err) => {
-          console.error('Readiness check error:', err)
-          return null
-        }),
-        apiClient.getIncidents({ limit: 10, offset: 0 }).catch((err) => {
-          console.error('Incidents load error:', err)
-          return []
-        }),
-        apiClient.getPipelines({ limit: 10, offset: 0 }).catch((err) => {
-          console.error('Pipelines load error:', err)
-          return []
-        }),
-      ])
+    const [readinessResult, incidentsResult, pipelinesResult, livenessResult, deliveriesResult] = await Promise.allSettled([
+      apiClient.getReadiness(),
+      apiClient.getIncidents({ limit: RECENT_LIMIT, offset: 0 }),
+      apiClient.getPipelines({ limit: RECENT_LIMIT, offset: 0 }),
+      apiClient.getLiveness(),
+      apiClient.getWebhookDeliveries({ limit: 25 }),
+    ])
 
-      setReadiness(readinessRes)
-      setIncidents(incidentsRes)
-      setPipelines(pipelinesRes)
-      setLastUpdated(new Date())
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.message)
-      } else {
-        setError('Failed to fetch operational status from backend')
-      }
-    } finally {
-      setIsLoading(false)
+    if (livenessResult.status === 'fulfilled') {
+      setLiveness(livenessResult.value.status)
+      setLivenessError(null)
+    } else {
+      setLiveness(null)
+      setLivenessError(livenessResult.reason)
     }
-  }
 
-  useEffect(() => {
-    loadData()
+    if (deliveriesResult.status === 'fulfilled') {
+      setDeliveries(deliveriesResult.value.items)
+      setDeliveriesError(null)
+    } else {
+      setDeliveries([])
+      setDeliveriesError(deliveriesResult.reason)
+    }
+
+    if (readinessResult.status === 'fulfilled') {
+      setReadiness(readinessResult.value)
+      setReadinessError(null)
+    } else {
+      setReadiness(null)
+      setReadinessError(readinessResult.reason)
+    }
+
+    if (incidentsResult.status === 'fulfilled') {
+      setIncidents(incidentsResult.value)
+      setIncidentsError(null)
+    } else {
+      setIncidents([])
+      setIncidentsError(incidentsResult.reason)
+    }
+
+    if (pipelinesResult.status === 'fulfilled') {
+      setPipelines(pipelinesResult.value)
+      setPipelinesError(null)
+    } else {
+      setPipelines([])
+      setPipelinesError(pipelinesResult.reason)
+    }
+
+    setLastUpdated(new Date())
+    setIsLoading(false)
   }, [])
 
-  // Derived metrics from loaded records ONLY
-  const loadedIncidentCount = incidents.length
-  const loadedPipelineCount = pipelines.length
-  const pendingApprovalsCount = incidents.filter(
-    (inc) => inc.approval_status === 'pending' || inc.current_stage === 'awaiting_approval'
-  ).length
+  useEffect(() => {
+    void loadData()
+  }, [loadData])
+  useTokenChangeReload(() => void loadData())
 
-  const readinessTone =
-    readiness?.status === 'ready' ? 'is-ok' : readiness ? 'is-warn' : 'is-fail'
-  const readinessLabel = readiness?.status === 'ready' ? 'READY' : readiness ? readiness.status.toUpperCase() : 'UNREACHABLE'
+  const probeLabel =
+    readinessError !== null
+      ? 'UNREACHABLE'
+      : readiness?.status === 'ready'
+        ? 'REPORTS READY'
+        : readiness
+          ? readiness.status.toUpperCase()
+          : '—'
+  const probeTone =
+    readinessError !== null ? 'is-fail' : readiness?.status === 'ready' ? 'is-ok' : 'is-warn'
 
   return (
     <div className="overview-view">
-      {error && (
-        <div className="ov-notice" role="alert">
-          <AlertTriangle size={14} />
-          <div>
-            <div className="ov-notice-title">Backend connection notice</div>
-            <div className="ov-notice-desc">{error}</div>
-          </div>
-        </div>
-      )}
+      <div className="hold-banner" role="note">
+        <strong>Remediation disabled (ADR-0010 hold).</strong> Verified webhook deliveries are recorded. No fix
+        is generated, approved or merged, and no pull request is created. This is the policy in force, not a
+        live status reading.
+      </div>
 
-      {/* Control-plane header: service state and loaded counts, stated plainly */}
       <header className="ov-header">
         <div className="ov-header-title">
-          <h1>Overview</h1>
-          <span className="ov-header-sub">Remediation control plane</span>
+          <h1>Command center</h1>
+          <span className="ov-header-sub">What is running, and what needs attention</span>
         </div>
+      </header>
 
-        <dl className="ov-stats" aria-label="System Operational Strip">
-          <div className="ov-stat">
-            <dt>API Readiness:</dt>
+      <section className="ov-status" aria-labelledby="ov-status-title">
+        <h2 id="ov-status-title" className="ov-block-title">System status</h2>
+        <dl className="ov-status-grid" aria-label="System Operational Strip">
+          <div className="ov-status-item">
+            <dt>API process</dt>
             <dd>
-              <span className={`ov-state ${readinessTone}`}>
+              {livenessError !== null ? (
+                <span className="ov-state is-fail"><span className="ov-dot" aria-hidden="true" />Unreachable</span>
+              ) : liveness === 'ok' ? (
+                <span className="ov-state is-ok"><span className="ov-dot" aria-hidden="true" />Responding</span>
+              ) : (
+                <span className="ov-state">Checking…</span>
+              )}
+            </dd>
+          </div>
+          <div className="ov-status-item">
+            <dt>API probe</dt>
+            <dd>
+              <span className={`ov-state ${probeTone}`}>
                 <span className="ov-dot" aria-hidden="true" />
-                {readinessLabel}
+                {probeLabel}
               </span>
-              {readiness?.environment && <span className="ov-env mono">{readiness.environment}</span>}
+              <span className="ov-env">process only · database not checked</span>
             </dd>
           </div>
-          <div className="ov-stat">
-            <dt>Loaded Incidents:</dt>
-            <dd className="ov-num">{isLoading ? '—' : loadedIncidentCount}</dd>
+          <div className="ov-status-item">
+            <dt>Database</dt>
+            <dd><span className="ov-state is-muted">Not checked by any endpoint</span></dd>
           </div>
-          <div className="ov-stat">
-            <dt>Pending Approvals:</dt>
-            <dd className={`ov-num ${pendingApprovalsCount > 0 ? 'is-warn' : ''}`}>
-              {isLoading ? '—' : pendingApprovalsCount}
+          <div className="ov-status-item">
+            <dt>Retry worker</dt>
+            <dd><span className="ov-state is-muted">Not reported: the API has no worker status</span></dd>
+          </div>
+          <div className="ov-status-item">
+            <dt>Webhook deliveries</dt>
+            <dd>
+              {deliveriesError !== null ? (
+                <span className="ov-state is-fail"><span className="ov-dot" aria-hidden="true" />Unavailable</span>
+              ) : isLoading ? (
+                <span className="ov-state">Checking…</span>
+              ) : (
+                <span className="ov-state is-ok"><span className="ov-dot" aria-hidden="true" />Readable · newest {deliveries.length}</span>
+              )}
             </dd>
           </div>
-          <div className="ov-stat">
-            <dt>Loaded Pipelines:</dt>
-            <dd className="ov-num">{isLoading ? '—' : loadedPipelineCount}</dd>
-          </div>
-          <div className="ov-stat ov-stat-probe">
-            <dt>Last probe</dt>
-            <dd className="mono">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'probing…'}</dd>
+          <div className="ov-status-item ov-status-probe">
+            <dt>Last checked</dt>
+            <dd className="mono">{lastUpdated ? lastUpdated.toLocaleTimeString() : 'checking…'}</dd>
           </div>
         </dl>
-      </header>
+      </section>
+
+      <section className="ov-metrics" aria-labelledby="ov-metrics-title">
+        <h2 id="ov-metrics-title" className="ov-block-title">Needs attention</h2>
+        <p className="ov-block-note">
+          Counts cover the newest 25 deliveries only. The backend does not provide totals, so these are not
+          fleet-wide figures.
+        </p>
+        <div className="ov-metric-grid">
+          <div className="ov-metric tone-info">
+            <span className="ov-metric-label">Retryable (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'retryable_error').length}</span>
+          </div>
+          <div className="ov-metric tone-danger">
+            <span className="ov-metric-label">Exhausted (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'exhausted').length}</span>
+          </div>
+          <div className="ov-metric tone-warn">
+            <span className="ov-metric-label">Provider hold (newest 25)</span>
+            <span className="ov-metric-value">{deliveriesError !== null ? 'n/a' : isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : deliveries.filter((d) => d.status === 'provider_hold').length}</span>
+          </div>
+        </div>
+        <dl className="ov-stats" aria-label="Loaded record counts">
+          <div className="ov-stat">
+            <dt>Incidents shown (newest {RECENT_LIMIT}):</dt>
+            <dd className="ov-num">{isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : incidentsError !== null ? 'n/a' : incidents.length}</dd>
+          </div>
+          <div className="ov-stat">
+            <dt>Pipelines shown (newest {RECENT_LIMIT}):</dt>
+            <dd className="ov-num">{isLoading ? <span className="sk-bar sk-inline" aria-hidden="true" /> : pipelinesError !== null ? 'n/a' : pipelines.length}</dd>
+          </div>
+        </dl>
+        <p className="ov-note">
+          <Info size={12} aria-hidden="true" /> Page sizes, not totals.{' '}
+          <Link to="/deliveries" className="ov-link">Open webhook deliveries</Link>
+        </p>
+      </section>
+
+      <section className="ov-trends" aria-labelledby="ov-trends-title">
+        <h2 id="ov-trends-title" className="ov-block-title">Trends</h2>
+        <p className="ov-block-note">
+          No trend chart is drawn. The API exposes the current state of deliveries, not their history, so a chart
+          would have to invent a series. Charts will appear once the backend provides history.
+        </p>
+      </section>
+
+      {readinessError !== null && (
+        <ApiErrorPanel error={readinessError} subject="API probe" onRetry={() => void loadData()} />
+      )}
 
       <div className="ov-grid">
         {/* Incidents */}
@@ -127,8 +223,10 @@ export const OverviewView: React.FC = () => {
 
           {isLoading ? (
             <TableSkeleton label="Loading incident queue" columns={[3, 3, 1, 1]} rows={6} />
+          ) : incidentsError !== null ? (
+            <ApiErrorPanel error={incidentsError} subject="incidents" onRetry={() => void loadData()} />
           ) : incidents.length === 0 ? (
-            <div className="ov-empty">No incidents recorded in database.</div>
+            <div className="ov-empty">The backend returned no incidents.</div>
           ) : (
             <div className="ov-table-wrap">
               <table className="ov-table">
@@ -141,7 +239,7 @@ export const OverviewView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {incidents.slice(0, RECENT_LIMIT).map((inc) => (
+                  {incidents.map((inc) => (
                     <tr key={inc.incident_id}>
                       <td>
                         <div className="ov-cell-id">
@@ -180,8 +278,10 @@ export const OverviewView: React.FC = () => {
 
           {isLoading ? (
             <TableSkeleton label="Loading pipeline ledger" columns={[3, 2, 2, 2]} rows={6} />
+          ) : pipelinesError !== null ? (
+            <ApiErrorPanel error={pipelinesError} subject="pipelines" onRetry={() => void loadData()} />
           ) : pipelines.length === 0 ? (
-            <div className="ov-empty">No orchestration pipelines recorded.</div>
+            <div className="ov-empty">The backend returned no pipelines.</div>
           ) : (
             <div className="ov-table-wrap">
               <table className="ov-table">
@@ -194,7 +294,7 @@ export const OverviewView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {pipelines.slice(0, RECENT_LIMIT).map((pipe) => (
+                  {pipelines.map((pipe) => (
                     <tr key={pipe.pipeline_id}>
                       <td>
                         <div className="ov-cell-id">

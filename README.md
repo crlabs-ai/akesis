@@ -58,7 +58,7 @@ GitHub Pull Request Delivery
 
 ## 2. Key Engineering Properties
 
-* **Exact Commit-SHA Alignment:** Fixes are grounded exclusively in source code checked out at the exact commit SHA that failed in CI (`GitRepositoryCheckoutManager`).
+* **Exact Commit-SHA Alignment:** Fixes are grounded exclusively in a verified, private snapshot of the exact commit SHA that failed in CI, read through the GitHub Git Data API (ADR-0011).
 * **Structured AI Diagnostic Engine:** Diagnostic reasoning and unified diffs are generated using schema-constrained Pydantic models with Google Gemini (`gemini-1.5-flash`), with deterministic fallbacks if the model is unreachable.
 * **Passive Untrusted Data Boundary:** CI logs and codebase comments are treated strictly as passive untrusted data, preventing prompt injection attacks from altering system instructions.
 * **Strict Patch Budgets:** Patches are constrained to at most 2 files, 100 diff lines, and 4,000 characters. Workflow files (`.github/workflows/`), `.git/`, and `.env*` files are strictly protected from modification.
@@ -124,7 +124,7 @@ graph TD
     MutationSvc -->|16. Verify SHA & Invariants| ApprTable
     MutationSvc -->|17. Pre-Push Validation| DockerBox
     MutationSvc -->|18. Persist Mutation State| MutTable
-    MutationSvc -->|19. Push Branch & Open PR| GHAPI
+    MutationSvc -->|19. Create Branch & Open PR| GHAPI
 ```
 
 ---
@@ -135,9 +135,9 @@ graph TD
 | :--- | :---: | :--- |
 | **GitHub Webhook Ingestion** | **Implemented** | Constant-time HMAC-SHA256 signature verification on `workflow_run` events. |
 | **CI Log Signal Extraction** | **Implemented** | Strips ANSI codes; parses tracebacks, Pytest, Ruff, Mypy, and Pip failures. |
-| **Exact Commit Context Retrieval** | **Implemented** | GitPython detached HEAD checkout; bounded 40-line windowing; path traversal prevention. |
+| **Exact Commit Context Retrieval** | **Implemented** | Verified snapshot of the exact commit (no clone); bounded 40-line windowing; path traversal prevention. |
 | **Structured AI Diagnosis** | **Implemented** | Gemini REST API adapter with Pydantic JSON schema generation and 0.0 confidence fallback. |
-| **Deterministic Fix Synthesis** | **Implemented** | Prompt engineering for unified diffs; strict budget enforcement (max 2 files / 100 lines / 4KB). |
+| **Deterministic Fix Synthesis** | **Implemented** | Prompt engineering for unified diffs; strict budget enforcement (max 2 files / 100 lines / 4,000 characters). |
 | **Protected File Shielding** | **Implemented** | Blocks modifications to `.github/workflows/`, `.git/`, `.env*`, and binaries. |
 | **Docker Sandbox Validation** | **Implemented** | Unprivileged container (`uid 1000`), `--network none`, allowlisted commands (`pytest`, `ruff`, `mypy`). |
 | **PostgreSQL Persistence** | **Implemented** | Async SQLAlchemy models for `approvals` and `mutations`; Alembic migrations. |
@@ -229,7 +229,7 @@ Before setting up Akesis, verify that the following tools are installed on your 
 * **Git:** Version 2.40 or higher (`git --version`).
 * **API Credentials (for live integrations):**
   * Google Gemini API Key (from Google AI Studio).
-  * GitHub Personal Access Token or GitHub App credentials with `repo` and `actions:read` permissions.
+  * A GitHub App (ID and private key) installed on the target repository with Contents and Pull requests write, Metadata read, and Actions read.
   * Slack App Signing Secret and Incoming Webhook URL.
 
 ---
@@ -248,7 +248,7 @@ uv sync
 ### 2. Configure Environment Variables
 ```bash
 cp .env.example .env
-# Edit .env and supply your GEMINI_API_KEY, GITHUB_TOKEN, and secrets
+# Edit .env and supply your GEMINI_API_KEY, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, and secrets
 ```
 
 ### 3. Start PostgreSQL Database
@@ -301,13 +301,13 @@ Akesis is configured via environment variables defined in [src/packages/shared/c
 | `LOG_LEVEL` | string | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` | No |
 | `DATABASE_URL` | string | `postgresql+asyncpg://...:5436/akesis` | Async connection string for PostgreSQL database | Yes |
 | `GITHUB_WEBHOOK_SECRET` | string | `test_webhook_secret` | Secret used to verify HMAC-SHA256 on incoming GitHub webhooks | Yes |
-| `GITHUB_TOKEN` | string | `""` | GitHub Personal Access Token or App Token for REST API access | Yes |
+| `GITHUB_APP_ID` | integer | `0` | GitHub App ID; all GitHub calls use its installation tokens | Yes |
+| `GITHUB_APP_PRIVATE_KEY` | string | `""` | GitHub App private key (PEM) | Yes |
 | `GITHUB_API_URL` | string | `https://api.github.com` | Base URL for GitHub REST API | No |
 | `GEMINI_API_KEY` | string | `""` | API key for Google Gemini model access | Yes |
 | `GEMINI_MODEL` | string | `gemini-1.5-flash` | Gemini model identifier used for diagnosis and fix proposals | No |
 | `GEMINI_API_URL` | string | `https://generativelanguage.../v1beta`| Base REST endpoint for Gemini API | No |
 | `GEMINI_TIMEOUT_SECONDS` | float | `30.0` | HTTP request timeout for LLM calls | No |
-| `REPO_CHECKOUT_BASE_DIR` | string | `/tmp/akesis/repos` | Local filesystem directory where repositories are checked out | No |
 | `MAX_CONTEXT_WINDOW_LINES`| integer| `40` | Maximum source code lines extracted around target error line | No |
 | `MAX_FILE_SIZE_BYTES` | integer| `500000` (500KB) | Maximum source file size inspected during context retrieval | No |
 | `MAX_EVIDENCE_FILES` | integer| `3` | Maximum number of candidate source files retrieved per incident | No |

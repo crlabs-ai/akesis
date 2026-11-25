@@ -77,13 +77,13 @@ graph TD
 ## 2. Core Subsystems & Components
 
 ### 2.1 Ingestion & Diagnostic Pipeline
-1. **Webhook Gateway (`src/apps/api/routes.py`):** Ingests `workflow_run` events, verifies HMAC-SHA256 signatures, and acknowledges immediately.
-2. **Log Parser (`src/packages/shared/log_parser.py`):** Strips ANSI formatting and extracts structured `FailureSignal` (category, error type, target file, stack frames).
+1. **Webhook Gateway (`src/apps/api/routes.py`):** Ingests `workflow_run` events, verifies HMAC-SHA256 signatures and provenance, and persists the verified incident with an empty `FailureSignal` (log status `pending`).
+2. **Workflow Log Stage (retry worker, `src/packages/shared/workflow_logs.py`):** Claims pending pipelines, re-verifies their persisted provenance (database only), downloads the verified run attempt's log archive with an `actions:read` installation token (`src/packages/sdk/github_actions_logs.py`), and stores a redacted, bounded `FailureSignal` produced by the Log Parser (`src/packages/shared/log_parser.py`). Outcomes: `extracted`, or `unavailable` with a stable code; transient failures retry with backoff up to `LOG_RETRIEVAL_MAX_ATTEMPTS`.
 3. **Diagnostic Engine (`src/packages/shared/diagnostic_service.py`):** Uses structured JSON generation with Gemini to produce evidence-backed `DiagnosisProposal`.
-4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Materializes repository at exact failing commit SHA via `GitRepositoryCheckoutManager` and extracts bounded `CodeEvidence`.
+4. **Codebase Context Resolver (`src/packages/shared/context_resolver.py`):** Reads a verified, private snapshot of the exact failing commit (ADR-0011) and extracts bounded `CodeEvidence`.
 
 ### 2.2 Synthesis & Sandbox Validation
-1. **Fix Proposal Engine (`src/packages/shared/fix_service.py`):** Prompts LLM for minimal unified diffs bounded by strict patch budgets (max 2 files, 120 lines, 8KB).
+1. **Fix Proposal Engine (`src/packages/shared/fix_service.py`):** Prompts LLM for minimal unified diffs bounded by strict patch budgets (max 2 files, 100 lines, 4,000 characters).
 2. **Patch Validator (`src/packages/shared/patch_validator.py`):** Verifies unified diff syntax, target-file grounding, and blocks protected files (`.github/workflows/`).
 3. **Docker Sandbox Runner (`src/packages/sdk/sandbox_runner.py`):** Runs isolated container (`akesis-validator:v1`) with `--network none`, `--cap-drop ALL`, non-root execution, and verbatim `git apply` (no whitespace fixing).
 4. **Validation Service (`src/packages/shared/validation_service.py`):** Executes deterministic allowlisted validation commands (`pytest`, `ruff`, `mypy`, `python -m compileall`).
@@ -95,9 +95,10 @@ graph TD
 
 ### 2.4 Controlled Git Mutation & PR Creation
 1. **Pre-flight & SHA Verification:** Enforces proposal validity, sandbox validation exit code 0, human approval, and exact commit SHA match.
-2. **Deterministic Fix Branch:** Generates collision-resistant branch (`akesis/fix/<incident>/<proposal>`) and protects base branches (`main`, `master`, `develop`).
-3. **Pre-Push Validation:** Re-validates the patched working tree in Docker prior to pushing remote branch.
-4. **GitHub PR Delivery:** Uses `GitHubClient` to push branch and open a Pull Request with complete audit metadata.
+2. **Same-Repository Only:** Fork-sourced runs (event repository ID differs from source repository ID) are refused before any I/O.
+3. **Deterministic Fix Branch:** Generates collision-resistant branch (`akesis/fix/<incident>/<proposal>`) and refuses protected names (`main`, `master`, `develop`, ...).
+4. **Snapshot-Based Patch:** Applies the approved patch verbatim to a copy of a verified snapshot of the approved commit, then re-validates it in Docker before any remote write.
+5. **GitHub Delivery (`src/packages/sdk/github_git_writer.py`):** With a GitHub App installation token scoped to the event repository, creates blobs, tree and commit through the Git Data API (each verified against local object IDs), creates the branch (never forced), and opens a Pull Request whose base is the exact verified source branch. The source branch must still point at the approved commit before each remote step. Akesis never merges.
 
 ---
 
