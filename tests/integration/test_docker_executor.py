@@ -118,7 +118,10 @@ def test_no_network() -> None:
 
 
 def test_identity_and_capabilities() -> None:
-    assert (os.getuid(), os.getgid()) == (1000, 1000)
+    uid, gid = os.getuid(), os.getgid()
+    assert uid != 0 and gid != 0  # never root
+    workspace = os.stat(".")
+    assert (workspace.st_uid, workspace.st_gid) == (uid, gid)  # the workspace owner, any host UID
     assert _status("CapEff") == "0000000000000000"
     assert _status("CapBnd") == "0000000000000000"
     assert _status("NoNewPrivs") == "1"

@@ -409,7 +409,9 @@ async def test_network_identity_and_capabilities_are_restricted(snapshot_root: P
     )
     result = await _run(snapshot_root, script)
     lines = result.stdout.splitlines()
-    assert lines[:2] == ["1000", "1000"]
+    # The container runs as the workspace owner, which this test process created: never fixed
+    # to 1000 (that only held when the host was UID 1000) and never root.
+    assert lines[:2] == [str(os.getuid()), str(os.getgid())] and "0" not in lines[:2]
     assert "lo" in lines and "eth0" not in lines
     status = {k: v.strip() for k, _, v in (line.partition(":") for line in lines if ":" in line)}
     assert status["CapEff"] == "0000000000000000" and status["CapBnd"] == "0000000000000000"
