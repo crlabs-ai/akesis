@@ -45,6 +45,7 @@ from src.packages.shared.persisted_provenance import ProvenanceRejected, verify_
 from src.packages.shared.remediation_orchestrator import (
     OrchestrationError,
     RemediationOrchestrator,
+    default_approver_authority,
 )
 from src.packages.shared.source_snapshot import SnapshotService
 from src.packages.shared.webhook_worker import (
@@ -275,7 +276,17 @@ async def test_allowlisted_slack_viewer_cannot_approve(monkeypatch: pytest.Monke
                 )
             )
         ).scalar_one()
-        await add_member(db, workspace_id, member, "viewer", slack_user_id=APPROVER)
+        owner = (
+            await db.execute(
+                select(WorkspaceMembershipModel.user_id).where(
+                    WorkspaceMembershipModel.workspace_id == workspace_id,
+                    WorkspaceMembershipModel.role == "owner",
+                )
+            )
+        ).scalar_one()
+        await add_member(
+            db, workspace_id, member, "viewer", slack_user_id=APPROVER, attested_by=owner
+        )
     response = await _slack(seeded.approval.approval_id)
     assert response.status_code == 403
     job = await _job(seeded.approval.approval_id)
@@ -292,6 +303,65 @@ async def test_slack_user_mapped_only_in_another_workspace_cannot_approve(
         await reset_identity(db)  # APPROVER now approves only for an unrelated installation
         await seed_approver_workspace(db, SEEDED_INSTALLATION_ID + 1, APPROVER)
     assert (await _slack(seeded.approval.approval_id)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_attested_mapping_still_needs_the_global_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Owner attestation adds to the global Slack allowlist; it never replaces it."""
+    monkeypatch.setattr(approval_service, "slack_client", _Slack())
+    seeded = await seed_incident("valid")
+    async with get_session_factory()() as db:
+        await reset_identity(db)
+        await seed_approver_workspace(db, SEEDED_INSTALLATION_ID, "U0NOTLISTED")
+    response = await _slack(seeded.approval.approval_id, user="U0NOTLISTED")
+    assert response.status_code == 403
+    job = await _job(seeded.approval.approval_id)
+    assert (job.status, job.execution_status) == ("pending", None)
+
+
+async def _clear_mapping(mapped_slack_user: str, **values: Any) -> None:
+    async with get_session_factory()() as db:
+        await db.execute(
+            update(WorkspaceMembershipModel)
+            .where(WorkspaceMembershipModel.slack_user_id == mapped_slack_user)
+            .values(**values)
+        )
+        await db.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"slack_user_id": None, "slack_mapped_by": None, "slack_mapped_at": None},  # revoked
+        {"slack_mapped_by": None, "slack_mapped_at": None},  # attestation removed (legacy)
+    ],
+)
+async def test_job_time_authorization_refuses_a_mapping_changed_after_approval(
+    monkeypatch: pytest.MonkeyPatch, change: dict[str, Any]
+) -> None:
+    """The decision was valid when recorded; the remediation job re-checks and refuses, before
+    reading any persisted proposal, snapshot or GitHub state."""
+    monkeypatch.setattr(approval_service, "slack_client", _Slack())
+    seeded = await seed_incident("valid")
+    approval_id = seeded.approval.approval_id
+    assert (await _slack(approval_id)).status_code == 200
+    assert await default_approver_authority(approval_id, APPROVER) is True
+    await _clear_mapping(APPROVER, **change)
+    assert await default_approver_authority(approval_id, APPROVER) is False
+    unused: Any = object()  # no service may be reached
+    orchestrator = RemediationOrchestrator(
+        diagnostic_service=unused,
+        context_resolver=unused,
+        fix_service=unused,
+        validation_service=unused,
+        approval_service=unused,
+        mutation_service=unused,
+    )
+    with pytest.raises(OrchestrationError, match="not an authorized approver in the workspace"):
+        await orchestrator._resume_approval_unchecked(approval_id)
 
 
 @pytest.mark.asyncio

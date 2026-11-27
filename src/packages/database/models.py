@@ -510,7 +510,7 @@ class WorkspaceMembershipModel(Base):
     __tablename__ = "workspace_memberships"
     __table_args__ = (
         CheckConstraint(_in("role", WORKSPACE_ROLES), name="ck_workspace_memberships_role"),
-        # A Slack identity maps to at most one member per workspace (set by owners/admins only).
+        # A Slack identity maps to at most one member per workspace (set by owners only).
         UniqueConstraint("workspace_id", "slack_user_id", name="uq_membership_slack_user"),
     )
 
@@ -522,6 +522,13 @@ class WorkspaceMembershipModel(Base):
     )
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     slack_user_id: Mapped[str | None] = mapped_column(String(32))
+    # Owner attestation (ADR-0012 §6): who mapped the Slack identity, and when. A mapping without
+    # both, or whose attester is no longer an owner of this workspace, authorizes nothing. This is
+    # an attestation by a person, not cryptographic proof that the member controls the Slack ID.
+    slack_mapped_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="SET NULL")
+    )
+    slack_mapped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

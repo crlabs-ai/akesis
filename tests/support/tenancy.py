@@ -129,8 +129,15 @@ async def add_member(
     role: str,
     *,
     slack_user_id: str | None = None,
+    attested_by: str | None = None,
 ) -> None:
+    """Insert or update a membership. A Slack mapping authorizes approvals only with an
+    attesting owner (`attested_by`); without it the mapping is unattributed (legacy)."""
     now = datetime.now(UTC)
+    attestation = {
+        "slack_mapped_by": attested_by if slack_user_id else None,
+        "slack_mapped_at": now if slack_user_id and attested_by else None,
+    }
     await db.execute(
         insert(WorkspaceMembershipModel)
         .values(
@@ -138,12 +145,13 @@ async def add_member(
             user_id=user_id,
             role=role,
             slack_user_id=slack_user_id,
+            **attestation,
             created_at=now,
             updated_at=now,
         )
         .on_conflict_do_update(
             index_elements=["workspace_id", "user_id"],
-            set_={"role": role, "slack_user_id": slack_user_id},
+            set_={"role": role, "slack_user_id": slack_user_id, **attestation},
         )
     )
     await db.commit()
@@ -177,7 +185,14 @@ async def seed_approver_workspace(
     members = []
     for slack_user_id in slack_user_ids:
         member = await seed_user(db, 1 + secrets.randbelow(2**40))
-        await add_member(db, workspace_id, member.user_id, role, slack_user_id=slack_user_id)
+        await add_member(
+            db,
+            workspace_id,
+            member.user_id,
+            role,
+            slack_user_id=slack_user_id,
+            attested_by=owner.user_id,
+        )
         members.append(Tenant(member.user_id, workspace_id, member.session_token))
     return members[0] if members else Tenant(owner.user_id, workspace_id, owner.session_token)
 

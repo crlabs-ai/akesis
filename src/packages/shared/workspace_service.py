@@ -12,10 +12,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from src.packages.database.models import (
     GitHubInstallationModel,
@@ -151,6 +152,7 @@ async def list_members(db: AsyncSession, scope: WorkspaceScope) -> list[dict[str
     ).all()
     # Slack mappings are an approval credential: only member managers see them.
     show_slack = can_manage_members(scope.role)
+    logins = {user.user_id: user.github_login for _, user in rows}
     return [
         {
             "user_id": user.user_id,
@@ -159,6 +161,12 @@ async def list_members(db: AsyncSession, scope: WorkspaceScope) -> list[dict[str
             "avatar_url": user.avatar_url,
             "role": membership.role,
             "slack_user_id": membership.slack_user_id if show_slack else None,
+            "slack_mapped_by_login": (
+                logins.get(membership.slack_mapped_by)
+                if show_slack and membership.slack_mapped_by
+                else None
+            ),
+            "slack_mapped_at": membership.slack_mapped_at if show_slack else None,
             "joined_at": membership.created_at,
         }
         for membership, user in rows
@@ -258,27 +266,65 @@ async def leave_workspace(db: AsyncSession, scope: WorkspaceScope) -> None:
 async def set_slack_user(
     db: AsyncSession, scope: WorkspaceScope, target_user_id: str, slack_user_id: str | None
 ) -> None:
-    """Map a member to their Slack user ID for approvals. Set by owners/admins, never self-claimed
-    (an owner may set their own, since an owner can already grant themselves anything)."""
-    if not can_manage_members(scope.role):
-        raise _forbidden()
+    """Create, change or revoke (None) a member's Slack approver mapping. Owner attestation:
+
+    * only a workspace OWNER may set or revoke any mapping, including their own;
+    * the owner's own Slack identity (mapped to them in any workspace) is never put on another
+      member, so an owner cannot approve through someone else's account;
+    * only members who may approve (APPROVER, MAINTAINER, ADMIN, OWNER) can be mapped;
+    * the mapping records the attesting owner and time. Approval checks re-validate both.
+
+    This is attestation by an accountable person, not proof that the member controls the Slack
+    account; verified Slack identity is separate future work (ADR-0012)."""
+    if scope.role != Role.OWNER:
+        raise _forbidden("owner_required")
     if slack_user_id is not None and not _SLACK_USER.fullmatch(slack_user_id):
         raise WorkspaceError("invalid_slack_user_id")
     target = await _member(db, scope.workspace_id, target_user_id)
-    if target_user_id == scope.user_id:
-        if scope.role != Role.OWNER:
+    if slack_user_id is None:
+        target.slack_user_id = target.slack_mapped_by = target.slack_mapped_at = None
+        target.updated_at = datetime.now(UTC)
+        await db.commit()
+        logger.info(
+            "slack_mapping_revoked",
+            workspace_id=scope.workspace_id,
+            target=target_user_id,
+            by=scope.user_id,
+        )
+        return
+    if not can_approve(Role(target.role)):
+        await db.rollback()
+        raise WorkspaceError("member_cannot_approve", 400)
+    if target_user_id != scope.user_id:
+        own_identities = set(
+            (
+                await db.execute(
+                    select(WorkspaceMembershipModel.slack_user_id).where(
+                        WorkspaceMembershipModel.user_id == scope.user_id,
+                        WorkspaceMembershipModel.slack_user_id.is_not(None),
+                    )
+                )
+            ).scalars()
+        )
+        if slack_user_id in own_identities:
             await db.rollback()
             raise _forbidden("cannot_map_own_slack_identity")
-    elif not can_manage(scope.role, Role(target.role)):
-        await db.rollback()
-        raise _forbidden()
+    now = datetime.now(UTC)
     target.slack_user_id = slack_user_id
-    target.updated_at = datetime.now(UTC)
+    target.slack_mapped_by = scope.user_id
+    target.slack_mapped_at = now
+    target.updated_at = now
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
         raise WorkspaceError("slack_user_already_mapped", 409) from None
+    logger.info(
+        "slack_mapping_attested",
+        workspace_id=scope.workspace_id,
+        target=target_user_id,
+        by=scope.user_id,
+    )
 
 
 # --- Invitations ------------------------------------------------------------------------------
@@ -728,6 +774,21 @@ async def _store_repositories(
         )
 
 
+async def linked_installation(
+    db: AsyncSession, scope: WorkspaceScope, installation_id: int
+) -> GitHubInstallationModel | None:
+    """The installation if, and only if, this workspace links it."""
+    found: GitHubInstallationModel | None = (
+        await db.execute(
+            select(GitHubInstallationModel).where(
+                GitHubInstallationModel.installation_id == installation_id,
+                GitHubInstallationModel.workspace_id == scope.workspace_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return found
+
+
 async def sync_repositories(
     db: AsyncSession,
     scope: WorkspaceScope,
@@ -738,14 +799,7 @@ async def sync_repositories(
     """Refresh the stored repositories of an installation this workspace has linked."""
     if not can_manage_members(scope.role):
         raise _forbidden()
-    linked = (
-        await db.execute(
-            select(GitHubInstallationModel).where(
-                GitHubInstallationModel.installation_id == installation_id,
-                GitHubInstallationModel.workspace_id == scope.workspace_id,
-            )
-        )
-    ).scalar_one_or_none()
+    linked = await linked_installation(db, scope, installation_id)
     if linked is None:
         raise WorkspaceError("installation_not_found", 404)
     verify_installation_ownership(
@@ -820,12 +874,20 @@ async def list_repositories(db: AsyncSession, scope: WorkspaceScope) -> list[dic
 async def workspace_approver_authorized(
     db: AsyncSession, approval_id: str, slack_user_id: str
 ) -> bool:
-    """Is this Slack user mapped to an approver (or higher) in the workspace that owns the
-    approval's pipeline? Default deny: no verified installation, no linked workspace, no mapping
-    or too low a role all answer False. Checked when the decision is recorded and again when the
-    remediation job runs, so revoking a member stops their pending approvals."""
+    """Is this Slack user an owner-attested approver in the workspace that owns the approval's
+    pipeline? Default deny. True only if all hold, read fresh from PostgreSQL:
+
+    * the pipeline has a verified installation linked to a workspace;
+    * a member of that workspace is mapped to this Slack user, with an attester and a time;
+    * the attester is still an OWNER of that same workspace;
+    * the member's current role may approve (APPROVER or higher).
+
+    The global Slack allowlist is checked separately by both callers. Called when the decision is
+    recorded and again when the remediation job runs, so a revoked mapping, a removed or demoted
+    member, a demoted attester or an unlinked installation stops a pending approval."""
     if not slack_user_id:
         return False
+    attester = aliased(WorkspaceMembershipModel)
     role = (
         await db.execute(
             select(WorkspaceMembershipModel.role)
@@ -837,9 +899,18 @@ async def workspace_approver_authorized(
                 PipelineModel,
                 PipelineModel.installation_id == GitHubInstallationModel.installation_id,
             )
+            .join(
+                attester,
+                and_(
+                    attester.workspace_id == WorkspaceMembershipModel.workspace_id,
+                    attester.user_id == WorkspaceMembershipModel.slack_mapped_by,
+                    attester.role == Role.OWNER.value,
+                ),
+            )
             .where(
                 PipelineModel.approval_id == approval_id,
                 WorkspaceMembershipModel.slack_user_id == slack_user_id,
+                WorkspaceMembershipModel.slack_mapped_at.is_not(None),
             )
         )
     ).scalar_one_or_none()

@@ -63,6 +63,9 @@ class MemberView(BaseModel):
     avatar_url: str | None
     role: str
     slack_user_id: str | None
+    # Who attested the Slack mapping, and when (owners and admins only; null otherwise).
+    slack_mapped_by_login: str | None = None
+    slack_mapped_at: datetime | None = None
     joined_at: datetime
 
 
@@ -291,8 +294,14 @@ async def link_installation(
 async def sync_installation(
     installation_id: int, request: Request, scope: Scope, db: DbSession
 ) -> dict[str, int]:
+    """Re-list an installation's repositories. Authorization (OWNER/ADMIN) and the workspace's own
+    link are checked first, so an installation ID of another workspace, or one that does not
+    exist, gets the same 404 and causes no GitHub call at all."""
     if not can_manage_members(scope.role):
         raise auth_http_error(WorkspaceError("insufficient_role", 403))
+    linked = await workspace_service.linked_installation(db, scope, installation_id)
+    if linked is None:
+        raise auth_http_error(WorkspaceError("installation_not_found", 404))
     repositories = await _repositories(request, installation_id)
     count = await _call(
         workspace_service.sync_repositories(db, scope, installation_id, repositories)

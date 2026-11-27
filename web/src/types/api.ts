@@ -198,6 +198,9 @@ export interface WorkspaceMember {
   role: WorkspaceRole
   /** Shown only to owners and admins; null otherwise. */
   slack_user_id: string | null
+  /** The owner who attested the Slack mapping, and when (owners and admins only). */
+  slack_mapped_by_login?: string | null
+  slack_mapped_at?: string | null
   joined_at: string
 }
 

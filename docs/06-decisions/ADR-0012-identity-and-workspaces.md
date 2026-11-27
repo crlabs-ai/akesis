@@ -95,9 +95,16 @@ boundary: GitHub already decides who can access it.
 
 ### 6. Approvals: Slack only, plus the workspace role
 * Slack stays the only approval channel. The global allowlist, workspace and channel checks are
-  unchanged. In addition, the clicking Slack user must be mapped to an APPROVER-or-higher member
-  of the workspace that owns the incident. The mapping is set by an owner or admin and is never
-  self-claimed (an owner may set their own).
+  unchanged and still required. In addition, the clicking Slack user must be mapped to an
+  APPROVER-or-higher member of the workspace that owns the incident, by **owner attestation**:
+  * only a workspace OWNER creates, changes or revokes a mapping (admins cannot);
+  * an owner's own Slack ID (mapped to them in any workspace) is never put on another member;
+  * only members who may approve (APPROVER, MAINTAINER, ADMIN, OWNER) can be mapped;
+  * each mapping records `slack_mapped_by` and `slack_mapped_at` (migration
+    `0011_slack_mapping_attestation`);
+  * a mapping authorizes an approval only while it has both, its attester is still an OWNER of
+    that workspace, and the member's current role may approve. Revoked, unattributed (legacy) or
+    orphaned mappings fail closed.
 * The same check runs again when the remediation job executes, and the job refuses a pipeline
   whose `installation_id` differs from its verified provenance. Removing a member, lowering their
   role or unlinking the installation stops their pending approvals.
@@ -106,6 +113,13 @@ boundary: GitHub already decides who can access it.
 `require_verified_provenance()` and the remediation hold (ADR-0010), executor socket
 authorization, Docker isolation, GitHub mutation safeguards and the no-auto-merge rule. The new
 checks run after the hold, never instead of it.
+
+### Not yet: verified Slack identity
+Owner attestation means an accountable owner vouches that a Slack user ID belongs to a member. It
+is **not** cryptographic proof that the member controls that Slack account, and an owner who
+attests a false mapping can misattribute approvals (bounded by the global allowlist). Binding a
+Slack identity to the member themselves, for example with Sign in with Slack (OpenID Connect) or
+a code delivered in Slack, is a separate future security task that needs its own ADR.
 
 ## Consequences
 * The console needs a GitHub App with user authorization enabled (client ID, client secret,

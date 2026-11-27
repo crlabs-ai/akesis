@@ -34,7 +34,9 @@ export function actionMessage(error: unknown): string {
   const known: Record<string, string> = {
     insufficient_role: 'Your role does not allow this.',
     cannot_change_own_role: 'You cannot change your own role.',
-    cannot_map_own_slack_identity: 'Only an owner can set their own Slack identity.',
+    cannot_map_own_slack_identity: 'Your own Slack identity cannot be mapped to another member.',
+    owner_required: 'Only a workspace owner can do this.',
+    member_cannot_approve: 'Only approvers, maintainers, admins and owners can be mapped to Slack.',
     last_owner: 'A workspace needs at least one owner.',
     use_leave: 'Use “Leave workspace” to remove yourself.',
     personal_workspace: 'A personal workspace has exactly one member.',

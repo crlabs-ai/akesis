@@ -55,7 +55,8 @@ export const MembersView: React.FC = () => {
         <h1 className={styles.title}>Members</h1>
         <p className={styles.sub}>
           {workspace.name} · your role: <strong>{role}</strong>. Approvers and above can approve
-          remediation in Slack once an owner or admin maps their Slack user ID.
+          remediation in Slack once a workspace owner maps and attests their Slack user ID. The
+          owner vouches for the mapping; Akesis does not verify Slack account ownership.
         </p>
       </header>
 
@@ -120,7 +121,7 @@ export const MembersView: React.FC = () => {
                   </td>
                   {manager && (
                     <td>
-                      <SlackField member={member} editable={canManage(member) || role === 'owner'} onSave={act} />
+                      <SlackField member={member} editable={role === 'owner'} onSave={act} />
                     </td>
                   )}
                   {manager && (
@@ -252,27 +253,46 @@ const SlackField: React.FC<{
   onSave: (action: () => Promise<unknown>) => Promise<void>
 }> = ({ member, editable, onSave }) => {
   const [value, setValue] = useState(member.slack_user_id ?? '')
-  if (!editable) return <span className="mono">{member.slack_user_id ?? '—'}</span>
+  const attestation = member.slack_user_id ? (
+    member.slack_mapped_by_login && member.slack_mapped_at ? (
+      <span className="muted">
+        {' '}
+        attested by @{member.slack_mapped_by_login}, {new Date(member.slack_mapped_at).toLocaleDateString()}
+      </span>
+    ) : (
+      <span className="muted"> not attested: cannot approve until an owner sets it again</span>
+    )
+  ) : null
+  if (!editable)
+    return (
+      <span>
+        <span className="mono">{member.slack_user_id ?? '—'}</span>
+        {attestation}
+      </span>
+    )
   return (
-    <form
-      className={styles.row}
-      onSubmit={(event) => {
-        event.preventDefault()
-        void onSave(() => apiClient.setSlackUser(member.user_id, value.trim() || null))
-      }}
-    >
-      <input
-        className="input-text mono"
-        aria-label={`Slack user ID for ${member.github_login}`}
-        placeholder="U0123ABCD"
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        maxLength={32}
-        spellCheck={false}
-      />
-      <button type="submit" className="btn btn-sm">
-        Save
-      </button>
-    </form>
+    <div>
+      <form
+        className={styles.row}
+        onSubmit={(event) => {
+          event.preventDefault()
+          void onSave(() => apiClient.setSlackUser(member.user_id, value.trim() || null))
+        }}
+      >
+        <input
+          className="input-text mono"
+          aria-label={`Slack user ID for ${member.github_login}`}
+          placeholder="U0123ABCD"
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          maxLength={32}
+          spellCheck={false}
+        />
+        <button type="submit" className="btn btn-sm">
+          Save
+        </button>
+      </form>
+      {attestation}
+    </div>
   )
 }

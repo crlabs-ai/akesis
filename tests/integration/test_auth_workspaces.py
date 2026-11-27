@@ -64,8 +64,8 @@ async def db() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
             delete(PipelineModel).where(
                 or_(
                     PipelineModel.installation_id.between(900_000, 999_999),
-                    PipelineModel.pipeline_id.in_(("pipe_scoped", "pipe_inc_orphan")),
-                    PipelineModel.pipeline_id.like("pipe_inc_b_%"),
+                    PipelineModel.pipeline_id.in_(("pipe_scoped", "pipe_inc_orphan", "pipe_slack")),
+                    PipelineModel.pipeline_id.startswith("pipe_inc_b_", autoescape=True),
                 )
             )
         )
@@ -502,9 +502,25 @@ async def test_workspace_approver_check_is_scoped_to_the_owning_workspace(
         outsider_owner = await seed_user(s, 9904)
         team = await seed_team(s, owner)
         other_team = await seed_team(s, outsider_owner)
-        await add_member(s, team, approver.user_id, "approver", slack_user_id="U0APPROVER")
-        await add_member(s, team, viewer.user_id, "viewer", slack_user_id="U0VIEWER")
-        await add_member(s, other_team, outsider_owner.user_id, "owner", slack_user_id="U0OTHER")
+        await add_member(
+            s,
+            team,
+            approver.user_id,
+            "approver",
+            slack_user_id="U0APPROVER",
+            attested_by=owner.user_id,
+        )
+        await add_member(
+            s, team, viewer.user_id, "viewer", slack_user_id="U0VIEWER", attested_by=owner.user_id
+        )
+        await add_member(
+            s,
+            other_team,
+            outsider_owner.user_id,
+            "owner",
+            slack_user_id="U0OTHER",
+            attested_by=outsider_owner.user_id,
+        )
         await link_installation(s, team, 990_100, owner.user_id)
         await link_installation(s, other_team, 990_200, outsider_owner.user_id)
         await PipelineRepository(s).create_pipeline(
@@ -1040,3 +1056,279 @@ async def test_only_workspace_admins_link_installations(
         response = await _link(app, maintainer, team, 900_010)
         assert not routes["user_installations"].called
     assert response.status_code == 403 and response.json() == {"detail": "insufficient_role"}
+
+
+# --- Sync: authorize and check the workspace link before any GitHub call ----------------------
+
+
+async def _sync(
+    app: FastAPI, tenant: Tenant, workspace_id: str, installation_id: int
+) -> httpx.Response:
+    async with _client(app, tenant) as client:
+        return await client.post(
+            f"/v1/workspaces/{workspace_id}/installations/{installation_id}/sync", headers=CSRF
+        )
+
+
+async def test_sync_of_a_linked_installation_works(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _ = await _team_with_owner(db)
+    with respx.mock:
+        routes = _mock_installation_flow(
+            900_011, account_id=USER_ACCOUNT, account_login="team-owner", account_type="User"
+        )
+        assert (await _link(app, owner, owner.workspace_id, 900_011)).status_code == 201
+        routes["repositories"].respond(
+            json={
+                "repositories": [
+                    {
+                        "id": 1,
+                        "full_name": "team-owner/only",
+                        "private": True,
+                        "owner": {"id": USER_ACCOUNT},
+                    }
+                ]
+            }
+        )
+        response = await _sync(app, owner, owner.workspace_id, 900_011)
+    assert response.status_code == 200 and response.json() == {"repositories": 1}
+    async with _client(app, owner) as client:
+        repos = (await client.get(f"/v1/workspaces/{owner.workspace_id}/repositories")).json()
+    assert [r["full_name"] for r in repos] == ["team-owner/only"]
+
+
+async def test_sync_of_an_unlinked_installation_is_404_with_no_github_call(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _ = await _team_with_owner(db)
+    with respx.mock(assert_all_called=False) as github:
+        _mock_installation_flow(
+            900_012, account_id=USER_ACCOUNT, account_login="team-owner", account_type="User"
+        )
+        unknown = await _sync(app, owner, owner.workspace_id, 900_012)  # real, but not linked
+        made_up = await _sync(app, owner, owner.workspace_id, 123_456_789)  # does not exist
+        assert github.calls.call_count == 0  # no token request, no repository listing
+    for response in (unknown, made_up):
+        assert response.status_code == 404
+        assert response.json() == {"detail": "installation_not_found"}
+
+
+async def test_sync_across_workspaces_is_404_with_no_github_call(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, team = await _team_with_owner(db)
+    async with db() as s:
+        outsider = await seed_user(s, USER_ACCOUNT + 50, "outsider")
+        outsider_team = await seed_team(s, outsider, "Outsider team")
+        own_second_team = await seed_team(s, owner, "Second team")
+        await link_installation(s, team, 900_013, owner.user_id)
+    with respx.mock(assert_all_called=False) as github:
+        _mock_installation_flow(
+            900_013, account_id=USER_ACCOUNT, account_login="team-owner", account_type="User"
+        )
+        # Another tenant's owner, using their own workspace with this workspace's installation ID.
+        foreign = await _sync(app, outsider, outsider_team, 900_013)
+        # The same user's other workspace: the link is per workspace, not per user.
+        sibling = await _sync(app, owner, own_second_team, 900_013)
+        # A non-member naming the owning workspace directly.
+        intruder = await _sync(app, outsider, team, 900_013)
+        assert github.calls.call_count == 0
+    for response in (foreign, sibling):
+        assert response.status_code == 404
+        assert response.json() == {"detail": "installation_not_found"}
+    assert intruder.status_code == 404 and intruder.json() == {"detail": "workspace_not_found"}
+
+
+async def test_sync_requires_owner_or_admin_before_any_lookup(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, team = await _team_with_owner(db)
+    async with db() as s:
+        maintainer = await seed_user(s, USER_ACCOUNT + 51, "maint2")
+        await add_member(s, team, maintainer.user_id, "maintainer")
+        await link_installation(s, team, 900_014, owner.user_id)
+    with respx.mock(assert_all_called=False) as github:
+        linked = await _sync(app, maintainer, team, 900_014)
+        unlinked = await _sync(app, maintainer, team, 900_999)
+        assert github.calls.call_count == 0
+    for response in (linked, unlinked):  # same answer: the role check reveals no link state
+        assert response.status_code == 403 and response.json() == {"detail": "insufficient_role"}
+
+
+# --- Slack approver mappings: owner attestation ----------------------------------------------
+
+
+async def _slack_team(
+    db: async_sessionmaker[AsyncSession],
+) -> tuple[Tenant, Tenant, Tenant, str]:
+    """A team with an owner, an admin and an approver, linked to installation 990_300, plus an
+    awaiting-approval pipeline `appr_slack` on that installation."""
+    now = datetime.now(UTC)
+    async with db() as s:
+        owner = await seed_user(s, 31_001, "owner1")
+        admin = await seed_user(s, 31_002, "admin1")
+        approver = await seed_user(s, 31_003, "approver1")
+        team = await seed_team(s, owner)
+        await add_member(s, team, admin.user_id, "admin")
+        await add_member(s, team, approver.user_id, "approver")
+        await link_installation(s, team, 990_300, owner.user_id)
+        await PipelineRepository(s).create_pipeline(
+            PipelineRecord(
+                pipeline_id="pipe_slack",
+                incident_id="inc_slack",
+                repository_owner="acme",
+                repository_name="repo",
+                run_id=1,
+                commit_sha="c" * 40,
+                installation_id=990_300,
+                approval_id="appr_slack",
+                status=PipelineStatus.AWAITING_APPROVAL,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    return owner, admin, approver, team
+
+
+async def _map(
+    app: FastAPI, actor: Tenant, team: str, target: Tenant, slack_user_id: str | None
+) -> httpx.Response:
+    async with _client(app, actor) as client:
+        return await client.put(
+            f"/v1/workspaces/{team}/members/{target.user_id}/slack",
+            json={"slack_user_id": slack_user_id},
+            headers=CSRF,
+        )
+
+
+async def _authorized(db: async_sessionmaker[AsyncSession], slack_user_id: str) -> bool:
+    async with db() as s:
+        return await workspace_approver_authorized(s, "appr_slack", slack_user_id)
+
+
+async def _membership(
+    db: async_sessionmaker[AsyncSession], team: str, tenant: Tenant
+) -> WorkspaceMembershipModel:
+    async with db() as s:
+        return (
+            await s.execute(
+                select(WorkspaceMembershipModel).where(
+                    WorkspaceMembershipModel.workspace_id == team,
+                    WorkspaceMembershipModel.user_id == tenant.user_id,
+                )
+            )
+        ).scalar_one()
+
+
+async def test_admin_cannot_create_modify_or_revoke_slack_mappings(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, admin, approver, team = await _slack_team(db)
+    for slack_id in ("U0APPROVER", None):
+        response = await _map(app, admin, team, approver, slack_id)
+        assert response.status_code == 403 and response.json() == {"detail": "owner_required"}
+    assert (await _map(app, owner, team, approver, "U0APPROVER")).status_code == 204
+    changed = await _map(app, admin, team, approver, "U0OTHER")
+    revoked = await _map(app, admin, team, approver, None)
+    assert changed.status_code == revoked.status_code == 403
+    assert (await _membership(db, team, approver)).slack_user_id == "U0APPROVER"
+
+
+async def test_owner_mapping_records_actor_and_time_and_authorizes(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _, approver, team = await _slack_team(db)
+    before = datetime.now(UTC)
+    assert (await _map(app, owner, team, approver, "U0APPROVER")).status_code == 204
+    row = await _membership(db, team, approver)
+    assert row.slack_mapped_by == owner.user_id
+    assert row.slack_mapped_at is not None and before <= row.slack_mapped_at <= datetime.now(UTC)
+    assert await _authorized(db, "U0APPROVER") is True
+    async with _client(app, owner) as client:
+        members = (await client.get(f"/v1/workspaces/{team}/members")).json()
+    shown = next(m for m in members if m["user_id"] == approver.user_id)
+    assert shown["slack_mapped_by_login"] == "owner1" and shown["slack_mapped_at"]
+
+
+async def test_owner_cannot_map_their_own_slack_id_to_another_member(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _, approver, team = await _slack_team(db)
+    assert (await _map(app, owner, team, owner, "U0OWNER")).status_code == 204  # their own row
+    same_workspace = await _map(app, owner, team, approver, "U0OWNER")
+    async with db() as s:  # and not in another workspace they own either
+        second = await seed_team(s, owner, "Second")
+        await add_member(s, second, approver.user_id, "approver")
+    other_workspace = await _map(app, owner, second, approver, "U0OWNER")
+    for response in (same_workspace, other_workspace):
+        assert response.status_code == 403
+        assert response.json() == {"detail": "cannot_map_own_slack_identity"}
+    assert (await _membership(db, team, approver)).slack_user_id is None
+
+
+async def test_only_members_who_may_approve_can_be_mapped(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _, approver, team = await _slack_team(db)
+    async with db() as s:
+        viewer = await seed_user(s, 31_004, "viewer1")
+        await add_member(s, team, viewer.user_id, "viewer")
+    response = await _map(app, owner, team, viewer, "U0VIEWER")
+    assert response.status_code == 400 and response.json() == {"detail": "member_cannot_approve"}
+    # A mapped approver later demoted to viewer loses approval authority at once.
+    assert (await _map(app, owner, team, approver, "U0APPROVER")).status_code == 204
+    async with _client(app, owner) as client:
+        demoted = await client.patch(
+            f"/v1/workspaces/{team}/members/{approver.user_id}",
+            json={"role": "viewer"},
+            headers=CSRF,
+        )
+    assert demoted.status_code == 204
+    assert await _authorized(db, "U0APPROVER") is False
+
+
+async def test_unattributed_mappings_authorize_nothing(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, admin, approver, team = await _slack_team(db)
+    async with db() as s:  # a legacy row: mapped, but no attester or time
+        await add_member(s, team, approver.user_id, "approver", slack_user_id="U0LEGACY")
+    assert await _authorized(db, "U0LEGACY") is False
+    async with db() as s:  # attested by an admin (never possible through the API): still nothing
+        await add_member(
+            s,
+            team,
+            approver.user_id,
+            "approver",
+            slack_user_id="U0LEGACY",
+            attested_by=admin.user_id,
+        )
+    assert await _authorized(db, "U0LEGACY") is False
+
+
+async def test_attestation_ends_when_the_attesting_owner_is_no_longer_an_owner(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, admin, approver, team = await _slack_team(db)
+    assert (await _map(app, owner, team, approver, "U0APPROVER")).status_code == 204
+    async with db() as s:
+        await add_member(s, team, admin.user_id, "owner")  # a second owner, so the first can go
+    async with _client(app, admin) as client:
+        demoted = await client.patch(
+            f"/v1/workspaces/{team}/members/{owner.user_id}", json={"role": "admin"}, headers=CSRF
+        )
+    assert demoted.status_code == 204
+    assert await _authorized(db, "U0APPROVER") is False
+
+
+async def test_revoked_mappings_authorize_nothing(
+    app: FastAPI, db: async_sessionmaker[AsyncSession]
+) -> None:
+    owner, _, approver, team = await _slack_team(db)
+    assert (await _map(app, owner, team, approver, "U0APPROVER")).status_code == 204
+    assert await _authorized(db, "U0APPROVER") is True
+    assert (await _map(app, owner, team, approver, None)).status_code == 204
+    row = await _membership(db, team, approver)
+    assert (row.slack_user_id, row.slack_mapped_by, row.slack_mapped_at) == (None, None, None)
+    assert await _authorized(db, "U0APPROVER") is False

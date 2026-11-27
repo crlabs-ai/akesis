@@ -69,7 +69,7 @@ export const OnboardingView: React.FC = () => {
         </Step>
         <Step n={3} done={false} title="Map approvers to Slack">
           <p className={styles.note}>
-            Approvals happen only in Slack. An owner or admin maps each approver’s Slack user ID on{' '}
+            Approvals happen only in Slack. A workspace owner maps and attests each approver’s Slack user ID on{' '}
             <Link className="ws-inline-link" to={appPath('/members')}>Members</Link>.
           </p>
         </Step>
