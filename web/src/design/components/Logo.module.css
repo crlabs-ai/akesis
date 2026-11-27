@@ -1,0 +1,15 @@
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ak-text);
+}
+
+.wordmark {
+  font-family: var(--ak-font-display);
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ak-text);
+}

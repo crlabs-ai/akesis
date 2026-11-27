@@ -108,7 +108,7 @@ describe('command palette', () => {
     const input = screen.getByRole('combobox')
     fireEvent.change(input, { target: { value: 'health' } })
     fireEvent.keyDown(input, { key: 'Enter' })
-    expect(screen.getByTestId('where')).toHaveTextContent('/health')
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/app\/health$/)
     expect(screen.queryByRole('dialog', { name: 'Jump to a page' })).not.toBeInTheDocument()
   })
 
@@ -116,15 +116,15 @@ describe('command palette', () => {
     renderShell('/')
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
     fireEvent.click(screen.getByRole('option', { name: /Incidents/ }))
-    expect(screen.getByTestId('where')).toHaveTextContent('/incidents')
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/app\/incidents$/)
   })
 
   it('closes on Escape without navigating', () => {
-    renderShell('/pipelines')
+    renderShell('/app/pipelines')
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: 'Jump to a page' })).not.toBeInTheDocument()
-    expect(screen.getByTestId('where')).toHaveTextContent('/pipelines')
+    expect(screen.getByTestId('where')).toHaveTextContent(/^\/app\/pipelines$/)
   })
 
   it('opens from the header button and from the window event', () => {

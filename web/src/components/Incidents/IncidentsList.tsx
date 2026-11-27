@@ -7,6 +7,7 @@ import { StatusBadge } from '../Common/StatusBadge'
 import { TableSkeleton } from '../Common/Skeleton'
 import { CopyButton } from '../Common/CopyButton'
 import { AlertTriangle, ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Search } from 'lucide-react'
+import { appPath } from '../../lib/routes'
 
 export const IncidentsList: React.FC = () => {
   const navigate = useNavigate()
@@ -163,13 +164,13 @@ export const IncidentsList: React.FC = () => {
                 {filteredIncidents.map((inc) => (
                   <tr
                     key={inc.incident_id}
-                    onClick={() => navigate(`/incidents/${inc.incident_id}`)}
+                    onClick={() => navigate(appPath(`/incidents/${inc.incident_id}`))}
                     className="in-row"
                   >
                     <td>
                       <div className="in-cell-id">
                         <Link
-                          to={`/incidents/${inc.incident_id}`}
+                          to={appPath(`/incidents/${inc.incident_id}`)}
                           className="mono in-id"
                           title={inc.incident_id}
                           onClick={(e) => e.stopPropagation()}

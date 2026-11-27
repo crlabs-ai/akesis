@@ -8,6 +8,7 @@ import { CopyButton } from '../Common/CopyButton'
 import { TableSkeleton } from '../Common/Skeleton'
 import { ApiErrorPanel } from '../Common/ApiErrorPanel'
 import { Info } from 'lucide-react'
+import { appPath } from '../../lib/routes'
 
 /** Size of each list on this page. Counts shown here are page sizes, never totals. */
 const RECENT_LIMIT = 8
@@ -197,7 +198,7 @@ export const OverviewView: React.FC = () => {
         </dl>
         <p className="ov-note">
           <Info size={12} aria-hidden="true" /> Page sizes, not totals.{' '}
-          <Link to="/deliveries" className="ov-link">Open webhook deliveries</Link>
+          <Link to={appPath('/deliveries')} className="ov-link">Open webhook deliveries</Link>
         </p>
       </section>
 
@@ -218,7 +219,7 @@ export const OverviewView: React.FC = () => {
         <section className="ov-section" aria-labelledby="ov-incidents-title">
           <div className="ov-section-head">
             <h2 id="ov-incidents-title">Recent incidents</h2>
-            <Link to="/incidents" className="ov-link">View all</Link>
+            <Link to={appPath('/incidents')} className="ov-link">View all</Link>
           </div>
 
           {isLoading ? (
@@ -243,7 +244,7 @@ export const OverviewView: React.FC = () => {
                     <tr key={inc.incident_id}>
                       <td>
                         <div className="ov-cell-id">
-                          <Link to={`/incidents/${inc.incident_id}`} className="mono ov-id">
+                          <Link to={appPath(`/incidents/${inc.incident_id}`)} className="mono ov-id">
                             {inc.incident_id.slice(0, 12)}
                           </Link>
                           <CopyButton text={inc.incident_id} label="Incident ID" />
@@ -273,7 +274,7 @@ export const OverviewView: React.FC = () => {
         <section className="ov-section" aria-labelledby="ov-pipelines-title">
           <div className="ov-section-head">
             <h2 id="ov-pipelines-title">Recent pipelines</h2>
-            <Link to="/pipelines" className="ov-link">View all</Link>
+            <Link to={appPath('/pipelines')} className="ov-link">View all</Link>
           </div>
 
           {isLoading ? (
@@ -303,7 +304,7 @@ export const OverviewView: React.FC = () => {
                         </div>
                       </td>
                       <td>
-                        <Link to={`/incidents/${pipe.incident_id}`} className="mono ov-sub-link">
+                        <Link to={appPath(`/incidents/${pipe.incident_id}`)} className="mono ov-sub-link">
                           {pipe.incident_id.slice(0, 10)}
                         </Link>
                       </td>

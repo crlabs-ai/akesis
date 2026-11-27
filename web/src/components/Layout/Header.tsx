@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { RefreshCw, Search } from 'lucide-react'
 import { AccessControl } from '../Access/AccessControl'
 import { openCommandPalette } from '../../lib/paletteEvents'
+import { appPath } from '../../lib/routes'
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
 
@@ -13,7 +14,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false }) => {
   const location = useLocation()
-  const pathname = location.pathname
+  // Breadcrumbs are computed on the console-relative path; links get the /app prefix back.
+  const pathname = location.pathname.replace(/^\/app(?=\/|$)/, '') || '/'
 
   const getBreadcrumbs = () => {
     if (pathname === '/') {
@@ -41,7 +43,7 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
     return [{ label: 'Console', to: '/' }]
   }
 
-  const breadcrumbs = getBreadcrumbs()
+  const breadcrumbs = getBreadcrumbs().map((crumb) => ({ ...crumb, to: appPath(crumb.to) }))
 
   return (
     <header className="app-header">

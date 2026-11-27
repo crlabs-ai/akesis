@@ -1,0 +1,322 @@
+.section {
+  position: relative;
+  padding-block: var(--ak-space-24);
+}
+
+.list {
+  display: grid;
+  gap: var(--ak-space-24);
+}
+
+/* Art and copy side by side; every other row mirrors. Stacked on narrow screens. */
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--ak-space-10);
+  align-items: center;
+}
+
+.row > * {
+  min-width: 0;
+}
+
+@media (min-width: 900px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: var(--ak-space-16);
+  }
+
+  .row[data-flip] .art {
+    order: 2;
+  }
+}
+
+.copy {
+  display: grid;
+  gap: var(--ak-space-4);
+  justify-items: start;
+  max-width: 440px;
+}
+
+.row[data-flip] .copy {
+  justify-self: end;
+}
+
+.title {
+  font-family: var(--ak-font-display);
+  font-size: var(--ak-text-2xl);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.body {
+  color: var(--ak-text-secondary);
+}
+
+/* ---- Shared wireframe language: thin grey outlines on black, one element lit in blue ---- */
+
+.art {
+  --line: rgba(255, 255, 255, 0.12);
+  --line-soft: rgba(255, 255, 255, 0.07);
+  --lit: #3d9bff;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+}
+
+/* A tablet-like frame: an outer shell and an inner screen, both softly rounded. */
+.device {
+  box-sizing: border-box;
+  width: min(100%, 420px);
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 32px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0));
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+
+.screen {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: #050505;
+  /* Fade the lower edge out, so the device reads as continuing. */
+  mask-image: linear-gradient(to bottom, #000 75%, transparent);
+}
+
+.dots {
+  display: flex;
+  gap: 6px;
+}
+
+.dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.bar {
+  display: block;
+  height: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.mono {
+  font-family: var(--ak-font-mono);
+  font-size: 12px;
+  color: #cfe6ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pill {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-family: var(--ak-font-mono);
+  font-size: 10px;
+  color: var(--ak-text-muted);
+  white-space: nowrap;
+}
+
+/* The one lit element in each drawing. */
+.lit {
+  border: 1px solid rgba(61, 155, 255, 0.85) !important;
+  background: rgba(61, 155, 255, 0.08);
+  box-shadow: 0 0 0 1px rgba(61, 155, 255, 0.15), 0 0 28px rgba(61, 155, 255, 0.35), inset 0 0 18px rgba(61, 155, 255, 0.12);
+  animation: glow 3.6s ease-in-out infinite;
+}
+
+@keyframes glow {
+  50% {
+    box-shadow: 0 0 0 1px rgba(61, 155, 255, 0.25), 0 0 40px rgba(61, 155, 255, 0.5), inset 0 0 22px rgba(61, 155, 255, 0.18);
+  }
+}
+
+/* Evidence: log rows */
+.tabs {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.tabActive,
+.tab {
+  height: 26px;
+  border-radius: 999px;
+}
+
+.tabActive {
+  width: 84px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tab {
+  width: 54px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.logRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+}
+
+.logRow:not(.lit) {
+  border-color: var(--line-soft);
+}
+
+/* Diff */
+.diffHead {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.diffRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 24px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+}
+
+.sign {
+  width: 10px;
+  font-family: var(--ak-font-mono);
+  font-size: 13px;
+  color: #ff9a8f;
+}
+
+.diffRow.lit .mono {
+  color: #ffd2cc;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 154, 143, 0.6);
+}
+
+.diffFoot {
+  display: flex;
+}
+
+/* Sandbox: a keyboard of containers, fed by one wire */
+.keys {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, 64px);
+  gap: 10px;
+  padding-top: 56px;
+  mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, #000 55%, transparent);
+}
+
+.key {
+  display: grid;
+  place-items: center;
+  height: 64px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
+  color: #cfe6ff;
+}
+
+.keyWide {
+  grid-column: span 2;
+}
+
+.keyLit {
+  border-color: rgba(61, 155, 255, 0.9);
+  box-shadow: inset 0 0 0 4px #050505, inset 0 0 0 5px rgba(61, 155, 255, 0.5), 0 0 30px rgba(61, 155, 255, 0.4);
+  animation: glow 3.6s ease-in-out infinite;
+}
+
+/* The signed executor's line: down from above into the sealed container (column 3, row 2). */
+.wire {
+  position: absolute;
+  top: 0;
+  left: calc(2 * (64px + 10px) + 32px);
+  width: 1px;
+  height: calc(56px + 64px + 10px);
+  background: linear-gradient(to bottom, transparent, rgba(61, 155, 255, 0.9));
+}
+
+.wire::after {
+  content: '';
+  position: absolute;
+  left: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #cfe6ff;
+  box-shadow: 0 0 10px #3d9bff;
+}
+
+/* Approval */
+.approval {
+  gap: 14px;
+}
+
+.actions {
+  position: relative;
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--ak-text-secondary);
+}
+
+.action.lit {
+  color: #e6f2ff;
+}
+
+.cursor {
+  position: absolute;
+  left: 92px;
+  top: 22px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+  animation: press 3.6s ease-in-out infinite;
+}
+
+@keyframes press {
+  0%,
+  100% {
+    transform: translate(10px, 8px);
+  }
+  45%,
+  60% {
+    transform: translate(0, 0);
+  }
+  52% {
+    transform: translate(0, 0) scale(0.9);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lit,
+  .keyLit,
+  .cursor {
+    animation: none;
+  }
+}

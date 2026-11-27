@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Zap,
 } from 'lucide-react'
+import { appPath } from '../../lib/routes'
 
 export const IncidentDetailWorkspace: React.FC = () => {
   const { incidentId } = useParams<{ incidentId: string }>()
@@ -65,7 +66,7 @@ export const IncidentDetailWorkspace: React.FC = () => {
         <div className="state-box-title">Error Loading Incident Workspace</div>
         <div className="state-box-desc">{error || 'Incident data unavailable'}</div>
         <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <Link to="/incidents" className="btn btn-sm">
+          <Link to={appPath('/incidents')} className="btn btn-sm">
             <ArrowLeft size={11} />
             <span>Back to Incidents</span>
           </Link>
@@ -88,7 +89,7 @@ export const IncidentDetailWorkspace: React.FC = () => {
       <header className="ws-header">
         <div className="ws-header-row">
           <div className="ws-title-group" style={{ gap: 8 }}>
-            <Link to="/incidents" className="btn btn-sm btn-icon" title="Back to incidents">
+            <Link to={appPath('/incidents')} className="btn btn-sm btn-icon" title="Back to incidents">
               <ArrowLeft size={12} />
             </Link>
             <span className="mono ws-id" title={incident.incident_id} style={{ fontWeight: 600 }}>
