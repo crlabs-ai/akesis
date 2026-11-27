@@ -1,0 +1,246 @@
+.section {
+  position: relative;
+  padding-block: var(--ak-space-32);
+}
+
+/* A deep-blue wash behind each section that swells as the model moves through view. */
+.section::before,
+.cta::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: radial-gradient(ellipse 60% 55% at 50% 50%, rgba(0, 108, 255, calc(0.04 + 0.1 * var(--ak-scene-glow, 0))), transparent 70%);
+  pointer-events: none;
+}
+
+/* Centred headers, as in the reference; the security split keeps its own alignment. */
+.header {
+  justify-items: center;
+  margin-inline: auto;
+  text-align: center;
+}
+
+/* Readable over the glowing scene: a soft dark halo behind section copy. */
+.header,
+.ctaInner {
+  text-shadow: 0 0 24px rgba(0, 0, 0, 0.9), 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+
+.split .header {
+  justify-items: start;
+  margin-inline: 0;
+  text-align: left;
+}
+
+/* Capabilities, rich mode: one pinned screen; the card track slides sideways. */
+.section[data-rich] {
+  display: flex;
+  align-items: center;
+  min-height: 100vh;
+  padding-block: var(--ak-space-16);
+  overflow: hidden;
+}
+
+.section[data-rich] .rail {
+  width: 100%;
+}
+
+.section[data-rich] .track {
+  display: flex;
+  gap: var(--ak-space-5);
+  width: max-content;
+}
+
+.section[data-rich] .track > li {
+  flex: none;
+  width: 400px;
+  min-height: 260px;
+}
+
+.header {
+  display: grid;
+  gap: var(--ak-space-4);
+  max-width: 760px;
+  margin-bottom: var(--ak-space-12);
+}
+
+.grid3,
+.grid2 {
+  display: grid;
+  gap: var(--ak-space-4);
+}
+
+@media (min-width: 720px) {
+  .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (min-width: 1024px) {
+  .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+.cardTitle {
+  margin-bottom: var(--ak-space-2);
+  font-family: var(--ak-font-display);
+  font-size: var(--ak-text-lg);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.cardBody {
+  font-size: var(--ak-text-sm);
+  color: var(--ak-text-secondary);
+}
+
+.iconTile {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--ak-space-5);
+  border: 1px solid var(--ak-border-strong);
+  border-radius: var(--ak-radius-md);
+  background: var(--ak-accent-soft);
+  color: var(--ak-ice);
+}
+
+.split {
+  display: grid;
+  gap: var(--ak-space-12);
+  align-items: center;
+}
+
+@media (min-width: 1024px) {
+  .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+
+.principles {
+  display: grid;
+  gap: var(--ak-space-6);
+}
+
+.principle {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: var(--ak-space-4);
+}
+
+.principleIcon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--ak-radius-sm);
+  background: var(--ak-accent-soft);
+  color: var(--ak-ice);
+}
+
+.principleTitle {
+  margin-bottom: var(--ak-space-1);
+  font-size: var(--ak-text-md);
+  font-weight: 600;
+}
+
+.terminal {
+  display: grid;
+  gap: var(--ak-space-3);
+  min-width: 0;
+}
+
+.terminalNote {
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+/* Integrations */
+.integrationHead {
+  display: flex;
+  align-items: center;
+  gap: var(--ak-space-3);
+  margin-bottom: var(--ak-space-2);
+}
+
+.integrationHead .iconTile {
+  margin-bottom: 0;
+}
+
+.integrationHead .cardTitle {
+  margin: 0 auto 0 0;
+}
+
+/* Final CTA: centred inside the particle tunnel. */
+.cta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 100vh;
+  padding-block: var(--ak-space-16) var(--ak-space-24);
+}
+
+.cta > .ctaInner {
+  width: 100%;
+}
+
+.ctaInner {
+  display: grid;
+  gap: var(--ak-space-6);
+  justify-items: center;
+  text-align: center;
+}
+
+.ctaInner h2 {
+  max-width: 18ch;
+}
+
+.accent {
+  color: var(--ak-ice);
+}
+
+.ctaActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--ak-space-3);
+}
+
+/* Footer */
+.footer {
+  padding-block: var(--ak-space-12);
+  border-top: 1px solid var(--ak-glass-border);
+}
+
+.footerInner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ak-space-6) var(--ak-space-10);
+}
+
+.footerLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-5);
+  font-size: var(--ak-text-sm);
+  color: var(--ak-text-secondary);
+}
+
+.footerLinks a:hover {
+  color: var(--ak-text);
+}
+
+.footerNote {
+  width: 100%;
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+/* Code over the particle field reads as glass. */
+.terminal figure {
+  border-color: var(--ak-glass-border);
+  background: var(--ak-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}

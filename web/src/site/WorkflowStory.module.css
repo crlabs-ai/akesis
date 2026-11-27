@@ -1,0 +1,233 @@
+.section {
+  position: relative;
+  padding-block: var(--ak-space-24);
+}
+
+.header {
+  display: grid;
+  gap: var(--ak-space-4);
+  max-width: 760px;
+  margin-bottom: var(--ak-space-12);
+}
+
+/* Base (touch, small screens, reduced motion): a plain vertical timeline, everything expanded. */
+.story {
+  position: relative;
+}
+
+.timeline {
+  position: relative;
+  display: grid;
+  gap: var(--ak-space-8);
+}
+
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 21px;
+  top: 22px;
+  bottom: 22px;
+  width: 1px;
+  background: var(--ak-border-strong);
+  opacity: 0.45;
+}
+
+.stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  gap: var(--ak-space-2) var(--ak-space-5);
+}
+
+.node {
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 11px;
+  height: 11px;
+  margin: 16px;
+  border: 1px solid var(--ak-text-muted);
+  border-radius: 50%;
+  background: var(--ak-bg);
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-secondary);
+  transition:
+    background-color var(--ak-duration-base) var(--ak-ease-out),
+    border-color var(--ak-duration-base) var(--ak-ease-out),
+    color var(--ak-duration-base) var(--ak-ease-out),
+    box-shadow var(--ak-duration-base) var(--ak-ease-out);
+}
+
+.stage[data-active] .node {
+  border-color: var(--ak-accent);
+  color: var(--ak-accent);
+  box-shadow: 0 0 0 6px var(--ak-accent-soft);
+}
+
+.content {
+  display: grid;
+  gap: var(--ak-space-2);
+  padding-top: 9px;
+}
+
+.title {
+  font-family: var(--ak-font-display);
+  font-size: var(--ak-text-xl);
+  font-weight: 500;
+  letter-spacing: -0.015em;
+}
+
+.detail {
+  display: grid;
+  gap: var(--ak-space-3);
+}
+
+.body {
+  max-width: 56ch;
+  color: var(--ak-text-secondary);
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ak-space-2);
+}
+
+.tag {
+  padding: 2px var(--ak-space-2);
+  border: 1px solid var(--ak-border-strong);
+  border-radius: var(--ak-radius-sm);
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+.example {
+  grid-column: 2;
+  display: grid;
+  gap: var(--ak-space-2);
+  max-width: 560px;
+}
+
+.exampleNote {
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+.note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ak-space-2);
+  max-width: 760px;
+  margin-top: var(--ak-space-12);
+  padding: var(--ak-space-4);
+  border: 1px solid var(--ak-border);
+  border-radius: var(--ak-radius-md);
+  background: var(--ak-bg-raised);
+  font-size: var(--ak-text-sm);
+  color: var(--ak-text-secondary);
+}
+
+.note svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--ak-info);
+}
+
+/*
+ * Rich mode (wide screen, fine pointer, motion allowed): the section is pinned and scroll scrubs
+ * through the stages. The active stage expands on the left; its example fills the right column.
+ */
+.rich {
+  display: flex;
+  align-items: center;
+  min-height: calc(100vh - 160px);
+}
+
+/* The timeline takes the left 42%; examples are anchored to it and sit in the space to its right. */
+.rich .timeline {
+  width: 42%;
+  gap: var(--ak-space-3);
+}
+
+.rich .stage {
+  position: static;
+}
+
+.rich .timeline::after {
+  content: '';
+  position: absolute;
+  left: 21px;
+  top: 22px;
+  width: 1px;
+  height: calc((100% - 44px) * var(--progress, 0));
+  background: var(--ak-blue);
+  box-shadow: 0 0 10px var(--ak-blue);
+}
+
+.rich .stage .title {
+  font-size: var(--ak-text-lg);
+  color: var(--ak-text-muted);
+  transition: color var(--ak-duration-base) var(--ak-ease-out);
+}
+
+.rich .stage[data-done] .title {
+  color: var(--ak-text-secondary);
+}
+
+.rich .stage[data-active] .title {
+  color: var(--ak-text);
+}
+
+.rich .stage[data-done] .node {
+  border-color: var(--ak-accent-line);
+  color: var(--ak-accent);
+}
+
+/* Collapsed visually, still in the accessibility tree for screen readers. */
+.rich .detail {
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    max-height var(--ak-duration-slow) var(--ak-ease-out),
+    opacity var(--ak-duration-base) var(--ak-ease-out);
+}
+
+.rich .stage[data-active] .detail {
+  max-height: 240px;
+  opacity: 1;
+}
+
+.rich .example {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + var(--ak-space-16));
+  /*
+   * The free 58% of the container, minus the gap. Derived from the container width rather than a
+   * percentage: an absolutely positioned child of a grid item resolves percentages unreliably.
+   */
+  width: calc(min(100vw - 2 * var(--ak-gutter), var(--ak-container)) * 0.58 - var(--ak-space-16));
+  max-width: none;
+  opacity: 0;
+  transform: translateY(calc(-50% + 12px));
+  transition:
+    opacity var(--ak-duration-base) var(--ak-ease-out),
+    transform var(--ak-duration-slow) var(--ak-ease-out);
+  pointer-events: none;
+}
+
+.rich .stage[data-active] .example {
+  opacity: 1;
+  transform: translateY(-50%);
+}
+
+/* Frosted glass over the 3D mark, dark enough to keep the code at reading contrast. */
+.rich .example figure {
+  border-color: var(--ak-border-strong);
+  background: rgba(6, 10, 20, 0.62);
+  backdrop-filter: blur(18px) saturate(120%);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+}

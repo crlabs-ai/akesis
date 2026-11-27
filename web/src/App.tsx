@@ -1,50 +1,39 @@
-import React, { useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { NavRail } from './components/Layout/NavRail'
-import { Header } from './components/Layout/Header'
-import { OverviewView } from './components/Overview/OverviewView'
-import { IncidentsList } from './components/Incidents/IncidentsList'
-import { IncidentDetailWorkspace } from './components/IncidentDetail/IncidentDetailWorkspace'
-import { PipelineExplorer } from './components/Pipelines/PipelineExplorer'
-import { WebhookDeliveriesView } from './components/Deliveries/WebhookDeliveriesView'
-import { SystemHealthView } from './components/Health/SystemHealthView'
-import { PageTransition } from './components/Layout/PageTransition'
-import { CommandPalette } from './components/Command/CommandPalette'
+import React, { Suspense, lazy } from 'react'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { ToastProvider } from './design'
+import { APP_BASE, LEGACY_CONSOLE_PATHS } from './lib/routes'
 
-export const App: React.FC = () => {
-  const [refreshKey, setRefreshKey] = useState<number>(0)
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false)
+// Each surface is its own chunk: visitors to the public site never download the console.
+const LandingPage = lazy(() => import('./site/LandingPage'))
+const Console = lazy(() => import('./console/Console'))
 
-  const handleManualRefresh = () => {
-    setIsRefreshing(true)
-    setRefreshKey((prev) => prev + 1)
-    setTimeout(() => setIsRefreshing(false), 500)
-  }
+/** Old console URLs (/incidents/…, /health) keep working: same path, now under /app. */
+function LegacyConsoleRedirect() {
+  const { pathname, search, hash } = useLocation()
+  return <Navigate to={`${APP_BASE}${pathname}${search}${hash}`} replace />
+}
 
+export function AppRoutes() {
   return (
-    <BrowserRouter>
-      <div className="app-shell">
-        <NavRail />
-        <div className="main-wrapper">
-          <Header onRefresh={handleManualRefresh} isRefreshing={isRefreshing} />
-          <main className="content-area" key={refreshKey}>
-            <PageTransition>
-              <Routes>
-                <Route path="/" element={<OverviewView />} />
-                <Route path="/incidents" element={<IncidentsList />} />
-                <Route path="/incidents/:incidentId" element={<IncidentDetailWorkspace />} />
-                <Route path="/pipelines" element={<PipelineExplorer />} />
-                <Route path="/deliveries" element={<WebhookDeliveriesView />} />
-                <Route path="/health" element={<SystemHealthView />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </PageTransition>
-          </main>
-        </div>
-      </div>
-      <CommandPalette />
-    </BrowserRouter>
+    <Suspense fallback={<div className="ak" aria-busy="true" />}>
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path={`${APP_BASE}/*`} element={<Console />} />
+        {LEGACY_CONSOLE_PATHS.map((path) => (
+          <Route key={path} path={`${path}/*`} element={<LegacyConsoleRedirect />} />
+        ))}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   )
 }
+
+export const App: React.FC = () => (
+  <BrowserRouter>
+    <ToastProvider>
+      <AppRoutes />
+    </ToastProvider>
+  </BrowserRouter>
+)
 
 export default App

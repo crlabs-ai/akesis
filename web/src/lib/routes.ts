@@ -1,5 +1,16 @@
 import { Activity, AlertOctagon, GitMerge, LayoutDashboard, Webhook, type LucideIcon } from 'lucide-react'
 
+/** The operator console lives under /app; the public site owns /. */
+export const APP_BASE = '/app'
+
+/** A console path ("/incidents") as a routable URL ("/app/incidents"). "/" is the console home. */
+export function appPath(path: string): string {
+  return path === '/' ? APP_BASE : `${APP_BASE}${path}`
+}
+
+/** Paths the console used before it moved under /app; they redirect so old links keep working. */
+export const LEGACY_CONSOLE_PATHS = ['/incidents', '/pipelines', '/deliveries', '/health'] as const
+
 export interface AppRoute {
   to: string
   label: string
@@ -22,16 +33,16 @@ export const ROUTE_GROUPS: RouteGroup[] = [
   {
     label: 'Operate',
     routes: [
-      { to: '/', label: 'Overview', icon: LayoutDashboard, end: true, keywords: ['home', 'command center', 'status'] },
-      { to: '/incidents', label: 'Incidents', icon: AlertOctagon, end: false, keywords: ['failures', 'investigation'] },
-      { to: '/pipelines', label: 'Pipelines', icon: GitMerge, end: false, keywords: ['workflow', 'stages', 'remediation'] },
+      { to: appPath('/'), label: 'Overview', icon: LayoutDashboard, end: true, keywords: ['home', 'command center', 'status'] },
+      { to: appPath('/incidents'), label: 'Incidents', icon: AlertOctagon, end: false, keywords: ['failures', 'investigation'] },
+      { to: appPath('/pipelines'), label: 'Pipelines', icon: GitMerge, end: false, keywords: ['workflow', 'stages', 'remediation'] },
     ],
   },
   {
     label: 'Delivery & health',
     routes: [
-      { to: '/deliveries', label: 'Webhook deliveries', icon: Webhook, end: false, keywords: ['deliveries', 'webhook', 'retry', 'events'] },
-      { to: '/health', label: 'System Health', icon: Activity, end: false, keywords: ['health', 'liveness', 'readiness', 'worker'] },
+      { to: appPath('/deliveries'), label: 'Webhook deliveries', icon: Webhook, end: false, keywords: ['deliveries', 'webhook', 'retry', 'events'] },
+      { to: appPath('/health'), label: 'System Health', icon: Activity, end: false, keywords: ['health', 'liveness', 'readiness', 'worker'] },
     ],
   },
 ]

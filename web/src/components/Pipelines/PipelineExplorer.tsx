@@ -8,6 +8,7 @@ import { StatusBadge } from '../Common/StatusBadge'
 import { CopyButton } from '../Common/CopyButton'
 import { TableSkeleton } from '../Common/Skeleton'
 import { AlertTriangle, ChevronLeft, ChevronRight, ExternalLink, RefreshCw, Search } from 'lucide-react'
+import { appPath } from '../../lib/routes'
 
 export const PipelineExplorer: React.FC = () => {
   const [pipelines, setPipelines] = useState<PipelineSummary[]>([])
@@ -108,7 +109,7 @@ export const PipelineExplorer: React.FC = () => {
               <CopyButton text={selectedPipeline.pipeline_id} label="Pipeline ID" />
               <StatusBadge status={selectedPipeline.status} type="pipeline" />
             </div>
-            <Link to={`/incidents/${selectedPipeline.incident_id}`} className="btn btn-sm">
+            <Link to={appPath(`/incidents/${selectedPipeline.incident_id}`)} className="btn btn-sm">
               <span>Open incident</span>
               <ArrowIcon />
             </Link>
@@ -270,7 +271,7 @@ export const PipelineExplorer: React.FC = () => {
 
                       <td>
                         <Link
-                          to={`/incidents/${pipe.incident_id}`}
+                          to={appPath(`/incidents/${pipe.incident_id}`)}
                           className="mono pl-incident"
                           onClick={(e) => e.stopPropagation()}
                         >

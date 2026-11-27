@@ -1,0 +1,115 @@
+.nav {
+  position: sticky;
+  top: 12px;
+  z-index: var(--ak-z-nav);
+  padding-inline: var(--ak-gutter);
+}
+
+/* Logo on its own; links and actions share one centred glass pill. */
+.bar {
+  display: flex;
+  align-items: center;
+  height: 64px;
+}
+
+.pill {
+  display: none;
+  align-items: center;
+  gap: var(--ak-space-6);
+  margin-inline: auto;
+  padding: 6px 6px 6px var(--ak-space-5);
+  border: 1px solid var(--ak-glass-border);
+  border-radius: var(--ak-radius-pill);
+  background: var(--ak-glass);
+  backdrop-filter: saturate(160%) blur(18px);
+  -webkit-backdrop-filter: saturate(160%) blur(18px);
+}
+
+/* Balances the logo so the pill stays centred. */
+.bar::after {
+  content: '';
+  flex: 0 0 auto;
+  width: 120px;
+}
+
+.brand {
+  display: inline-flex;
+  border-radius: var(--ak-radius-sm);
+}
+
+.links {
+  display: flex;
+  gap: var(--ak-space-1);
+}
+
+.link {
+  padding: var(--ak-space-2) var(--ak-space-3);
+  border-radius: var(--ak-radius-pill);
+  font-size: var(--ak-text-sm);
+  color: var(--ak-text-secondary);
+  transition: color var(--ak-duration-fast) var(--ak-ease-out);
+}
+
+.link:hover {
+  color: var(--ak-text);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--ak-space-2);
+}
+
+.menuButton {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-left: auto;
+  border: 1px solid var(--ak-border-strong);
+  border-radius: var(--ak-radius-pill);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mobileMenu {
+  margin-top: var(--ak-space-2);
+  border: 1px solid var(--ak-border-strong);
+  border-radius: var(--ak-radius-lg);
+  background: var(--ak-bg-raised);
+}
+
+.mobileMenu nav {
+  display: grid;
+  gap: var(--ak-space-1);
+  padding-block: var(--ak-space-4) var(--ak-space-6);
+}
+
+.mobileLink {
+  padding: var(--ak-space-3) 0;
+  border-bottom: 1px solid var(--ak-border);
+  font-size: var(--ak-text-lg);
+}
+
+.mobileActions {
+  display: grid;
+  gap: var(--ak-space-2);
+  margin-top: var(--ak-space-4);
+}
+
+@media (min-width: 900px) {
+  .pill {
+    display: flex;
+  }
+
+  .menuButton,
+  .mobileMenu {
+    display: none;
+  }
+}
+
+@media (max-width: 899px) {
+  .bar::after {
+    display: none;
+  }
+}

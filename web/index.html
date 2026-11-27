@@ -4,12 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#000000" />
-    <meta name="description" content="Akesis Developer Control Plane — Autonomous CI/CD Remediation Platform" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;650&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
-    <title>Akesis — Developer Control Plane | CRLabs</title>
+    <meta name="theme-color" content="#07080a" />
+    <meta
+      name="description"
+      content="Akesis investigates failed GitHub Actions runs, verifies the evidence, validates a fix in an isolated sandbox and opens a pull request only after a person approves it."
+    />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Self-hosted OFL fonts (public/fonts): nothing is fetched from a third party. -->
+    <link rel="preload" href="/fonts/geist-wght.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- The landing's 3D scene, only where it runs (RICH_MOTION_QUERY): fetched with the page. -->
+    <link rel="preload" href="/scene/model.glb" as="fetch" crossorigin media="(min-width: 960px) and (pointer: fine) and (prefers-reduced-motion: no-preference)" />
+    <link rel="preload" href="/scene/alpha-map.png" as="image" crossorigin media="(min-width: 960px) and (pointer: fine) and (prefers-reduced-motion: no-preference)" />
+    <title>Akesis · Broken builds, fixed with proof</title>
+    <style>
+      /* Dark from the first paint, before any stylesheet arrives. */
+      html, body { margin: 0; background: #07080a; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

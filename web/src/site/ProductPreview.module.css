@@ -1,0 +1,134 @@
+.section {
+  position: relative;
+  padding-block: var(--ak-space-24);
+}
+
+.header {
+  display: grid;
+  gap: var(--ak-space-4);
+  max-width: 760px;
+  margin-bottom: var(--ak-space-12);
+}
+
+.bare {
+  padding-block: 0 var(--ak-space-24);
+}
+
+/* Glass window: the scene's glow shows through it, as under the reference's hero. */
+.window {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--ak-glass-border);
+  border-radius: var(--ak-radius-xl);
+  background: rgba(6, 12, 24, 0.55);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.5);
+}
+
+.chrome {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ak-space-3);
+  padding: var(--ak-space-3) var(--ak-space-4);
+  border-bottom: 1px solid var(--ak-glass-border);
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.lights {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.lights i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ak-border-strong);
+}
+
+.address {
+  margin-right: auto;
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+.body {
+  display: grid;
+  gap: var(--ak-space-6);
+  padding: var(--ak-space-6);
+}
+
+.incidentHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ak-space-4);
+}
+
+.meta {
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
+
+.incidentTitle {
+  margin-top: var(--ak-space-1);
+  font-family: var(--ak-font-display);
+  font-size: var(--ak-text-xl);
+  font-weight: 500;
+}
+
+.stages {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--ak-border);
+  border-radius: var(--ak-radius-md);
+  background: var(--ak-border);
+}
+
+@media (min-width: 900px) {
+  .stages { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+.stage {
+  display: grid;
+  gap: var(--ak-space-1);
+  padding: var(--ak-space-3) var(--ak-space-4);
+  background: var(--ak-bg-raised);
+}
+
+.stageName {
+  font-size: var(--ak-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ak-text);
+}
+
+.panel {
+  display: grid;
+  gap: var(--ak-space-3);
+  max-width: 70ch;
+  font-size: var(--ak-text-sm);
+  color: var(--ak-text-secondary);
+}
+
+.panel code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--ak-bg-hover);
+  font-family: var(--ak-font-mono);
+  font-size: 0.92em;
+  color: var(--ak-text);
+}
+
+.muted {
+  font-family: var(--ak-font-mono);
+  font-size: var(--ak-text-xs);
+  color: var(--ak-text-muted);
+}
