@@ -2,7 +2,7 @@
 
 `python -m src.apps.executor` runs this before importing any Akesis module, because the shared
 `Settings` loads `.env` from the working directory and the environment at import time. The executor
-must never hold GitHub, Slack, Gemini, database or read-API credentials.
+must never hold GitHub, Slack, Gemini, database, read-API or sign-in credentials.
 """
 
 import os
@@ -20,6 +20,8 @@ FORBIDDEN_ENVIRONMENT = frozenset(
         "SLACK_WEBHOOK_URL",
         "SLACK_SIGNING_SECRET",
         "READ_API_TOKEN",
+        "GITHUB_APP_CLIENT_SECRET",
+        "AUTH_TOKEN_ENCRYPTION_KEY",
         "SANDBOX_EXECUTOR_REQUEST_KEY",
         "SANDBOX_EXECUTOR_RESPONSE_KEY",
     }

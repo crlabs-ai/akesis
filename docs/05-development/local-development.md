@@ -51,6 +51,41 @@ GEMINI_API_KEY=your_gemini_api_key_here
 SLACK_SIGNING_SECRET=test_slack_signing_secret
 ```
 
+### Step 3b: Configure GitHub sign-in (Phase 2, ADR-0012)
+The console requires a signed-in GitHub user. Akesis uses its existing GitHub App's user
+authorization; no separate OAuth App is needed. No credential below is ever sent to the browser.
+
+1. GitHub > Settings > Developer settings > GitHub Apps > your Akesis App > **General**.
+2. **Callback URL:** `http://localhost:5173/auth/callback` (production:
+   `https://<console host>/auth/callback`). It must equal `AUTH_REDIRECT_URI` exactly.
+3. Leave **"Request user authorization (OAuth) during installation"** off and **"Enable Device
+   Flow"** off. Keep **"Expire user authorization tokens"** on (recommended; sessions re-authorize).
+4. Copy the **Client ID** and generate a **client secret**.
+5. **Permissions:** sign-in needs no extra permission; `GET /user`, `GET /users/{username}` and
+   `GET /user/installations` work with the user token. To link **organization** installations,
+   add the organization permission **Members: Read-only**, so Akesis can verify the user is an
+   owner of that organization (without it, organization links are refused). Repository listing
+   uses an installation token scoped to `metadata: read`.
+6. In `.env`:
+   ```ini
+   GITHUB_APP_CLIENT_ID=Iv1.xxxxxxxxxxxxxxxx
+   GITHUB_APP_CLIENT_SECRET=<generated secret>
+   AUTH_REDIRECT_URI=http://localhost:5173/auth/callback
+   AUTH_COOKIE_SECURE=false            # plain-http localhost only
+   AUTH_TOKEN_ENCRYPTION_KEY=<output of the command below>
+   ```
+   ```bash
+   uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+7. Run the console through the Vite dev server (`npm run dev` in `web/`), which proxies `/v1` to
+   the API, so the session cookie is same-origin. Sign in at `http://localhost:5173/login`, then
+   link your App installation under **Get started** or **Settings**. Without the client ID and
+   secret, `/login` reports "GitHub sign-in is not configured" and no tenant data is reachable.
+
+Production refuses to start unless the client ID and secret are set, `AUTH_REDIRECT_URI` is
+`https://…/auth/callback`, `AUTH_COOKIE_SECURE=true`, the Fernet key is valid, and the sign-in
+secrets differ from every other secret.
+
 ### Step 4: Start PostgreSQL 16 Database
 ```bash
 # Start local PostgreSQL container exposed on port 5436

@@ -18,6 +18,7 @@ The Akesis Ingestion Gateway exposes public and webhook-authenticated endpoints.
 1. **GitHub Webhooks:** Authenticated using the `X-Hub-Signature-256` header containing an HMAC-SHA256 signature calculated over the raw request payload using `GITHUB_WEBHOOK_SECRET`.
 2. **Slack Interactive Callbacks:** Authenticated using the `X-Slack-Signature` header calculated using `SLACK_SIGNING_SECRET` and paired with `X-Slack-Request-Timestamp` to prevent replay attacks (maximum 300-second window).
 3. **Health Endpoints:** Unauthenticated public probes for load balancer and orchestrator health checks.
+4. **Signed-in users (ADR-0012):** GitHub sign-in sets the HttpOnly `akesis_session` cookie. Every `/v1/me` and `/v1/workspaces/...` route requires it, and workspace routes also require membership (404 for non-members, 403 for too low a role). State-changing requests must send `X-Akesis-CSRF: 1`.
 
 ---
 
@@ -28,7 +29,12 @@ The Akesis Ingestion Gateway exposes public and webhook-authenticated endpoints.
 | `GET` | `/health/liveness` | None | Liveness probe indicating service process is running |
 | `GET` | `/health/readiness` | None | Readiness probe confirming configuration and environment readiness |
 | `POST` | `/v1/webhooks/github` | HMAC-SHA256 (`X-Hub-Signature-256`) | Ingests GitHub Actions `workflow_run` failure events |
-| `POST` | `/v1/slack/interactions` | HMAC-SHA256 (`X-Slack-Signature`) | Handles interactive button callbacks from Slack approval cards |
+| `POST` | `/v1/slack/interactions` | HMAC-SHA256 (`X-Slack-Signature`) + allowlist + workspace approver role | Handles interactive button callbacks from Slack approval cards (the only approval channel) |
+| `GET` | `/v1/auth/github/login` | None | Starts GitHub sign-in (303 to GitHub; sets the browser-binding cookie) |
+| `POST` | `/v1/auth/github/callback` | Binding cookie + CSRF | Body `{code, state}`; sets the session cookie; returns `{return_to}` |
+| `POST` | `/v1/auth/logout`, `/v1/auth/sessions/revoke-all` | Session + CSRF | Revoke this session, or every session of the user |
+| `GET` | `/v1/me`, `/v1/me/invitations` | Session | The user, their workspaces and pending invitations |
+| `*` | `/v1/workspaces/...` | Session + membership | Workspaces, members, invitations, installations, repositories, incidents, pipelines, deliveries. Full list: `docs/02-architecture/system-architecture.md` §2.6 |
 
 ---
 

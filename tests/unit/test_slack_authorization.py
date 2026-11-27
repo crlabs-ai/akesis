@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import pytest
 from fastapi.testclient import TestClient
 
+from src.apps.api import routes
 from src.apps.api.main import create_app
 from src.packages.shared.approval_service import approval_service
 from src.packages.shared.config import Settings, settings
@@ -15,17 +16,25 @@ from src.packages.shared.models import ApprovalRecord, ApprovalStatus
 
 
 @pytest.mark.parametrize(
-    ("user", "team", "channel", "action", "expected"),
+    ("user", "team", "channel", "action", "in_workspace", "expected"),
     [
-        ("U1", "T1", "C1", "approve_fix", 200),
-        ("U2", "T1", "C1", "approve_fix", 403),
-        ("U1", "T2", "C1", "approve_fix", 403),
-        ("U1", "T1", "C2", "approve_fix", 403),
-        ("U1", "T1", "C1", "other", 400),
+        ("U1", "T1", "C1", "approve_fix", True, 200),
+        # ADR-0012: allowlisted, but not an approver in the incident's workspace.
+        ("U1", "T1", "C1", "approve_fix", False, 403),
+        ("U2", "T1", "C1", "approve_fix", True, 403),
+        ("U1", "T2", "C1", "approve_fix", True, 403),
+        ("U1", "T1", "C2", "approve_fix", True, 403),
+        ("U1", "T1", "C1", "other", True, 400),
     ],
 )
 def test_signed_slack_policy(
-    monkeypatch: pytest.MonkeyPatch, user: str, team: str, channel: str, action: str, expected: int
+    monkeypatch: pytest.MonkeyPatch,
+    user: str,
+    team: str,
+    channel: str,
+    action: str,
+    in_workspace: bool,
+    expected: int,
 ) -> None:
     policy = Settings(
         environment="test",
@@ -43,6 +52,8 @@ def test_signed_slack_policy(
     )
     mock = AsyncMock(return_value=(record, True))
     monkeypatch.setattr(approval_service, "record_decision", mock)
+    authority = AsyncMock(return_value=in_workspace)
+    monkeypatch.setattr(routes, "workspace_approver_authorized", authority)
     payload = {
         "user": {"id": user},
         "team": {"id": team},

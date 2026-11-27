@@ -5,7 +5,7 @@ Status: Informational / Architectural Roadmap
 Classification: FUTURE PRODUCTION SCALING / NOT IN V1 SCOPE
 ```
 
-This document catalogs architectural patterns, infrastructure components, and platform enhancements that will become relevant as Akesis evolves into a distributed multi-tenant production platform. **None of these items are required or implemented in Akesis V1.**
+This document catalogs architectural patterns, infrastructure components, and platform enhancements that will become relevant as Akesis evolves into a distributed multi-tenant production platform. **None of these items are required or implemented in Akesis V1.** Phase 2 adds GitHub sign-in and installation-anchored workspaces (ADR-0012) on the single service; the distributed patterns below remain future work.
 
 ---
 

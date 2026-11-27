@@ -260,7 +260,7 @@ export const SystemHealthView: React.FC = () => {
               <strong>Sandbox validation:</strong> Not reported by any endpoint this console calls. No sandbox status is shown.
             </li>
             <li>
-              <strong>GitHub credentials:</strong> Not sent to or stored in this browser. Only the operator read token is held here, for the session.
+              <strong>GitHub credentials:</strong> Not sent to or stored in this browser. Your session is an HttpOnly cookie that page code cannot read.
             </li>
             <li>
               <strong>Slack:</strong> Not reported by any endpoint this console calls.

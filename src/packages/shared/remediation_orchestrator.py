@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -41,6 +41,16 @@ from src.packages.shared.persisted_provenance import (
 )
 from src.packages.shared.provenance import require_verified_provenance
 from src.packages.shared.validation_service import ValidationService
+
+
+async def default_approver_authority(approval_id: str, slack_user_id: str) -> bool:
+    """Phase 2 (ADR-0012): the approver must still be a mapped approver-or-higher member of the
+    workspace that owns this approval's pipeline. Read fresh from PostgreSQL."""
+    from src.packages.shared.workspace_service import workspace_approver_authorized
+
+    async with get_session_factory()() as session:
+        return await workspace_approver_authorized(session, approval_id, slack_user_id)
+
 
 logger = get_logger("akesis.remediation_orchestrator")
 
@@ -150,8 +160,10 @@ class RemediationOrchestrator:
         validation_service: ValidationServiceProtocol | None = None,
         approval_service: ApprovalServiceProtocol | None = None,
         mutation_service: GitMutationServiceProtocol | None = None,
+        approver_authority: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         self.repository_factory = repository_factory or default_orchestrator_repositories
+        self.approver_authority = approver_authority or default_approver_authority
         self.diagnostic_service = diagnostic_service or DiagnosticService()
         self.context_resolver = context_resolver or CodebaseContextResolver()
         self.fix_service = fix_service or FixProposalService()
@@ -197,6 +209,10 @@ class RemediationOrchestrator:
                 repository_name=context.repository_name,
                 run_id=context.run_id,
                 commit_sha=context.commit_sha,
+                # Only verified provenance anchors a pipeline to a workspace (ADR-0012).
+                installation_id=(
+                    context.provenance.installation_id if context.provenance else None
+                ),
                 status=PipelineStatus.RECEIVED,
                 failure_context_json=context.model_dump_json(),
                 created_at=now,
@@ -444,6 +460,10 @@ class RemediationOrchestrator:
                 or approval.decided_by not in settings.slack_approver_user_ids
             ):
                 raise OrchestrationError("Approval was not decided by an authorized approver")
+            # Phase 2 (ADR-0012): and they must still hold an approver role in the owning
+            # workspace, so revoking a member stops their pending approvals.
+            if not await self.approver_authority(approval_id, approval.decided_by):
+                raise OrchestrationError("Approver is not an authorized approver in the workspace")
 
             # 3. Retrieve and deserialize authoritative persisted context, proposal, and validation
             if not pipeline.failure_context_json:
@@ -471,6 +491,11 @@ class RemediationOrchestrator:
                 or context.repository_name != pipeline.repository_name
                 or context.run_id != pipeline.run_id
                 or context.commit_sha != pipeline.commit_sha
+                # Phase 2 (ADR-0012): the job acts only through the installation that anchors the
+                # pipeline to its workspace, as recorded in verified provenance.
+                or pipeline.installation_id is None
+                or context.provenance is None
+                or context.provenance.installation_id != pipeline.installation_id
                 or proposal.incident_id != context.incident_id
                 or validation.incident_id != context.incident_id
                 or validation.commit_sha != context.commit_sha

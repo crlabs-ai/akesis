@@ -5,7 +5,7 @@ import { WebhookDeliveriesView } from '../components/Deliveries/WebhookDeliverie
 import { describeNextRetry } from '../lib/deliveryFormat'
 import { ApiErrorPanel } from '../components/Common/ApiErrorPanel'
 import { ApiError, apiClient } from '../services/api'
-import { authStore } from '../services/authStore'
+import { session } from '../services/session'
 import type { WebhookDelivery, WebhookDeliveryPage } from '../types/api'
 
 const delivery = (overrides: Partial<WebhookDelivery> = {}): WebhookDelivery => ({
@@ -29,10 +29,10 @@ const page = (items: WebhookDelivery[], next: string | null = null): WebhookDeli
 
 describe('WebhookDeliveriesView', () => {
   beforeEach(() => {
-    authStore.reset()
+    session.reset()
     vi.restoreAllMocks()
   })
-  afterEach(() => authStore.reset())
+  afterEach(() => session.reset())
 
   const renderView = () =>
     render(
@@ -104,24 +104,24 @@ describe('WebhookDeliveriesView', () => {
     )
   })
 
-  it('reports an authentication failure and offers token entry instead of an empty table', async () => {
+  it('reports an ended session and offers sign-in instead of an empty table', async () => {
     vi.spyOn(apiClient, 'getWebhookDeliveries').mockRejectedValue(
-      new ApiError('Invalid or missing read API token', 401, undefined, 'unauthorized')
+      new ApiError('not_signed_in', 401, undefined, 'unauthorized')
     )
     renderView()
-    await waitFor(() => expect(screen.getByText('Read token required')).toBeInTheDocument())
-    expect(screen.getByLabelText('Read token')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Sign in required')).toBeInTheDocument())
+    expect(screen.getByRole('link', { name: 'Sign in with GitHub' })).toHaveAttribute('href', '/login')
     expect(screen.queryByText(/zero rows/)).not.toBeInTheDocument()
   })
 
-  it('names a rejected token in the stale banner while keeping the rows that loaded', async () => {
+  it('names an ended session in the stale banner while keeping the rows that loaded', async () => {
     vi.spyOn(apiClient, 'getWebhookDeliveries')
       .mockResolvedValueOnce(page([delivery({ delivery_id: 'kept-under-401' })]))
-      .mockRejectedValueOnce(new ApiError('Invalid or missing read API token', 401, undefined, 'unauthorized'))
+      .mockRejectedValueOnce(new ApiError('not_signed_in', 401, undefined, 'unauthorized'))
     renderView()
     await waitFor(() => expect(screen.getByText('kept-under-401')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Exhausted' }))
-    await waitFor(() => expect(screen.getByText(/The read token was rejected/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/Your session ended/)).toBeInTheDocument())
     expect(screen.getByText('kept-under-401')).toBeInTheDocument()
   })
 
@@ -153,10 +153,14 @@ describe('describeNextRetry', () => {
 })
 
 describe('ApiErrorPanel', () => {
-  it('shows the token form for an unauthorized failure', () => {
-    render(<ApiErrorPanel error={new ApiError('nope', 401, undefined, 'unauthorized')} />)
-    expect(screen.getByText('Read token required')).toBeInTheDocument()
-    expect(screen.getByLabelText('Read token')).toBeInTheDocument()
+  it('offers GitHub sign-in for an unauthorized failure', () => {
+    render(
+      <MemoryRouter>
+        <ApiErrorPanel error={new ApiError('nope', 401, undefined, 'unauthorized')} />
+      </MemoryRouter>
+    )
+    expect(screen.getByText('Sign in required')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Sign in with GitHub' })).toBeInTheDocument()
   })
 
   it('never describes a server failure as missing data', () => {

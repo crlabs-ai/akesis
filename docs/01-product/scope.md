@@ -17,7 +17,8 @@ This document defines the strict boundaries for Akesis V1, Planned Future Phases
     2. **Dependency & Import Collisions:** (missing package imports, syntax failures).
     3. **Test Assertion Failures:** (pytest unit test regressions).
 * **Execution & Validation Model:** Ephemeral Docker container sandbox (`akesis-validator:v1`, `--network none`, `--cap-drop ALL`, verbatim `git apply`).
-* **Human-in-the-Loop Approval:** Mandatory human authorization via interactive Slack cards; durable approval state transitions in PostgreSQL.
+* **Human-in-the-Loop Approval:** Mandatory human authorization via interactive Slack cards; durable approval state transitions in PostgreSQL. The approver must be a mapped APPROVER-or-higher member of the incident's workspace (ADR-0012).
+* **Identity and Workspaces (Phase 2, ADR-0012):** GitHub sign-in through the Akesis GitHub App, server-side sessions, one personal workspace per user, team workspaces with invitations and five roles, and tenant isolation anchored on the GitHub App installation.
 * **Delivery Model:** Controlled Git mutation, deterministic fix branch creation, and GitHub Pull Request with rich audit context.
 * **Evaluation Baseline:** 10–12 curated representative benchmark scenarios.
 

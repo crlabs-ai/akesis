@@ -1,7 +1,7 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { RefreshCw, Search } from 'lucide-react'
-import { AccessControl } from '../Access/AccessControl'
+import { AccountMenu } from '../Account/AccountMenu'
 import { openCommandPalette } from '../../lib/paletteEvents'
 import { appPath } from '../../lib/routes'
 
@@ -84,7 +84,7 @@ export const Header: React.FC<HeaderProps> = ({ onRefresh, isRefreshing = false 
           <span className="palette-trigger-label">Jump to…</span>
           <kbd className="palette-kbd">{isMac ? '⌘' : 'Ctrl'} K</kbd>
         </button>
-        <AccessControl />
+        <AccountMenu />
         {onRefresh && (
           <button
             type="button"

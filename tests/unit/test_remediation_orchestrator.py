@@ -13,6 +13,7 @@ from src.packages.database.repositories import (
     MutationRepositoryProtocol,
     PipelineRepositoryProtocol,
 )
+from src.packages.shared import remediation_orchestrator
 from src.packages.shared.config import settings
 from src.packages.shared.context_resolver import CodebaseContextResolver
 from src.packages.shared.diagnostic_service import DiagnosticService
@@ -34,9 +35,11 @@ from src.packages.shared.models import (
     PipelineStatus,
     PipelineSummary,
     RemediationDirection,
+    RepositoryIdentity,
     ValidationResult,
     ValidationStatus,
     WorkflowRunConclusion,
+    WorkflowRunProvenance,
 )
 from src.packages.shared.mutation_service import StaleCommitError
 from src.packages.shared.remediation_orchestrator import (
@@ -395,7 +398,19 @@ def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def sample_context() -> FailureContext:
+    repo = RepositoryIdentity(id=1001, full_name="crlabs-ai/akesis")
     return FailureContext(
+        provenance=WorkflowRunProvenance(
+            delivery_id="delivery-orch",
+            event_repository=repo,
+            source_repository=repo,
+            head_sha="a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            head_branch="main",
+            run_id=555,
+            run_attempt=1,
+            installation_id=42,
+            verified_at=datetime.now(UTC),
+        ),
         incident_id="inc_orch_01",
         repository_owner="crlabs-ai",
         repository_name="akesis",
@@ -410,6 +425,20 @@ def sample_context() -> FailureContext:
         ),
         raw_log_excerpt="assert 1 == 2",
     )
+
+
+@pytest.fixture(autouse=True)
+def workspace_approvers(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Unit tests run without PostgreSQL: the workspace approver check answers yes and records
+    every call. Dedicated tests below cover the refusals."""
+    calls: list[tuple[str, str]] = []
+
+    async def allow(approval_id: str, slack_user_id: str) -> bool:
+        calls.append((approval_id, slack_user_id))
+        return True
+
+    monkeypatch.setattr(remediation_orchestrator, "default_approver_authority", allow)
+    return calls
 
 
 # 1. Successful pipeline through approval-pending state.
@@ -1344,3 +1373,65 @@ async def test_resolved_evidence_is_the_object_passed_to_diagnosis_and_fix(
     assert len(resolved) == 1
     assert seen["diagnosis"] is resolved[0]
     assert seen["fix"] is resolved[0]
+
+
+def _tenant_orchestrator(
+    authority: Any = None,
+) -> tuple[RemediationOrchestrator, MockApprovalRepo, MockPipelineRepo]:
+    appr_repo, mut_repo, pipe_repo = MockApprovalRepo(), MockMutationRepo(), MockPipelineRepo()
+
+    @asynccontextmanager
+    async def repo_factory() -> AsyncIterator[
+        tuple[ApprovalRepositoryProtocol, MutationRepositoryProtocol, PipelineRepositoryProtocol]
+    ]:
+        yield (appr_repo, mut_repo, pipe_repo)
+
+    orch = RemediationOrchestrator(
+        repository_factory=repo_factory,
+        diagnostic_service=MockDiagService(),
+        context_resolver=MockContextResolver(),
+        fix_service=MockFixService(),
+        validation_service=MockValidationService(),
+        approval_service=MockApprovalService(appr_repo),
+        mutation_service=MockMutationService(mut_repo),
+        approver_authority=authority,
+    )
+    return orch, appr_repo, pipe_repo
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_an_approver_no_longer_in_the_workspace(
+    sample_context: FailureContext,
+) -> None:
+    """ADR-0012: revoking a member (or their approver role) stops their pending approvals."""
+
+    async def revoked(approval_id: str, slack_user_id: str) -> bool:
+        return False
+
+    orch, appr_repo, pipe_repo = _tenant_orchestrator(revoked)
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
+    assert pipe_rec.installation_id == 42  # anchored to the verified installation
+    assert pipe_rec.approval_id is not None
+    await appr_repo.record_decision(pipe_rec.approval_id, ApprovalStatus.APPROVED, reviewer="alice")
+    with pytest.raises(OrchestrationError, match="not an authorized approver in the workspace"):
+        await orch._resume_approval_unchecked(approval_id=pipe_rec.approval_id)
+    after = await pipe_repo.get_by_approval_id(pipe_rec.approval_id)
+    assert after is not None and after.status != PipelineStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_resume_refuses_a_pipeline_moved_to_another_installation(
+    sample_context: FailureContext, workspace_approvers: list[tuple[str, str]]
+) -> None:
+    """A background job never acts across workspaces: the pipeline's tenant anchor must equal
+    the installation in its verified provenance."""
+    orch, appr_repo, pipe_repo = _tenant_orchestrator()
+    pipe_rec = await orch._process_failure_unchecked(sample_context)
+    assert pipe_rec.approval_id is not None
+    stored = await pipe_repo.get_by_approval_id(pipe_rec.approval_id)
+    assert stored is not None
+    pipe_repo.records[stored.pipeline_id] = stored.model_copy(update={"installation_id": 43})
+    await appr_repo.record_decision(pipe_rec.approval_id, ApprovalStatus.APPROVED, reviewer="alice")
+    with pytest.raises(OrchestrationError):
+        await orch._resume_approval_unchecked(approval_id=pipe_rec.approval_id)
+    assert workspace_approvers == [(pipe_rec.approval_id, "alice")]

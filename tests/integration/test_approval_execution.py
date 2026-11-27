@@ -25,7 +25,13 @@ from sqlalchemy import select, update
 
 from src.apps.api.main import create_app
 from src.packages.database import approval_jobs
-from src.packages.database.models import ApprovalModel, PipelineModel, WebhookEventModel
+from src.packages.database.models import (
+    ApprovalModel,
+    GitHubInstallationModel,
+    PipelineModel,
+    WebhookEventModel,
+    WorkspaceMembershipModel,
+)
 from src.packages.database.repositories import ApprovalRepository
 from src.packages.database.session import get_session_factory
 from src.packages.sdk.remote_sandbox_runner import RemoteSandboxRunner
@@ -47,8 +53,9 @@ from src.packages.shared.webhook_worker import (
     TickSummary,
     WorkerConfig,
 )
-from tests.integration.seeding import Seeded, seed_incident
+from tests.integration.seeding import SEEDED_INSTALLATION_ID, Seeded, seed_incident
 from tests.integration.test_approval_flow import create_slack_signature
+from tests.support.tenancy import add_member, reset_identity, seed_approver_workspace
 
 APPROVER = "U12345"
 REPO = Path(__file__).resolve().parents[2]
@@ -56,8 +63,12 @@ _REAL_RUN = subprocess.run  # kept before any test patches subprocess.run
 
 
 @pytest.fixture(autouse=True)
-def approvers(monkeypatch: pytest.MonkeyPatch) -> None:
+async def approvers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_module.settings, "slack_approver_user_ids", [APPROVER])
+    # ADR-0012: the seeded installation's workspace maps APPROVER to an approver member.
+    async with get_session_factory()() as db:
+        await reset_identity(db)
+        await seed_approver_workspace(db, SEEDED_INSTALLATION_ID, APPROVER)
 
 
 class Orchestrator:
@@ -242,6 +253,45 @@ async def test_unauthorized_or_rejected_decisions_queue_nothing(
     assert (await _slack(approval_id, action="reject_fix")).status_code == 200
     job = await _job(approval_id)
     assert (job.status, job.execution_status) == ("rejected", None)
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_slack_viewer_cannot_approve(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scenario 9: the global allowlist is not enough; a viewer cannot approve remediation."""
+    monkeypatch.setattr(approval_service, "slack_client", _Slack())
+    seeded = await seed_incident("valid")
+    async with get_session_factory()() as db:
+        workspace_id = (
+            await db.execute(
+                select(GitHubInstallationModel.workspace_id).where(
+                    GitHubInstallationModel.installation_id == SEEDED_INSTALLATION_ID
+                )
+            )
+        ).scalar_one()
+        member = (
+            await db.execute(
+                select(WorkspaceMembershipModel.user_id).where(
+                    WorkspaceMembershipModel.slack_user_id == APPROVER
+                )
+            )
+        ).scalar_one()
+        await add_member(db, workspace_id, member, "viewer", slack_user_id=APPROVER)
+    response = await _slack(seeded.approval.approval_id)
+    assert response.status_code == 403
+    job = await _job(seeded.approval.approval_id)
+    assert (job.status, job.execution_status) == ("pending", None)
+
+
+@pytest.mark.asyncio
+async def test_slack_user_mapped_only_in_another_workspace_cannot_approve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(approval_service, "slack_client", _Slack())
+    seeded = await seed_incident("valid")
+    async with get_session_factory()() as db:
+        await reset_identity(db)  # APPROVER now approves only for an unrelated installation
+        await seed_approver_workspace(db, SEEDED_INSTALLATION_ID + 1, APPROVER)
+    assert (await _slack(seeded.approval.approval_id)).status_code == 403
 
 
 @pytest.mark.asyncio

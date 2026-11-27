@@ -15,10 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.apps.api.auth import Scope
 from src.packages.database.models import WebhookEventModel
 from src.packages.database.session import get_db_session
 from src.packages.database.webhook_events import WebhookEventRepository
-from src.packages.shared.security import verify_read_token
 
 router = APIRouter()
 
@@ -82,13 +82,13 @@ def _summary(row: WebhookEventModel, max_attempts: int) -> WebhookDeliverySummar
 
 
 @router.get(
-    "/v1/webhook-deliveries",
+    "/v1/workspaces/{workspace_id}/deliveries",
     response_model=WebhookDeliveryPage,
     summary="List webhook deliveries that are scheduled for retry or exhausted (read-only)",
-    dependencies=[Depends(verify_read_token)],
 )
 async def list_webhook_deliveries(
     request: Request,
+    scope: Scope,
     status: Annotated[list[OperatorStatus] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: Annotated[str | None, Query(max_length=512)] = None,
@@ -104,7 +104,7 @@ async def list_webhook_deliveries(
     max_attempts = request.app.state.settings.webhook_retry_max_attempts
     rows = list(
         await WebhookEventRepository(session).list_deliveries(
-            statuses, cursor=after, limit=limit + 1
+            statuses, scope=scope, cursor=after, limit=limit + 1
         )
     )
     has_more = len(rows) > limit

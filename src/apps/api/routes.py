@@ -22,6 +22,7 @@ from fastapi import (
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.apps.api.auth import Scope
 from src.packages.database.models import WebhookEventModel
 from src.packages.database.repositories import IncidentRepository, PipelineRepository
 from src.packages.database.session import get_db_session
@@ -43,7 +44,6 @@ from src.packages.shared.models import (
     WorkflowRunConclusion,
     WorkflowRunEvent,
 )
-from src.packages.shared.security import verify_read_token
 from src.packages.shared.webhook_admission import admit_verified_delivery
 from src.packages.shared.webhook_retry import RetrySchedule, classify_retry
 from src.packages.shared.workflow_provenance import (
@@ -51,6 +51,7 @@ from src.packages.shared.workflow_provenance import (
     TransientProvenanceError,
     WorkflowRunProvenanceVerifier,
 )
+from src.packages.shared.workspace_service import workspace_approver_authorized
 
 logger = get_logger("akesis.api.routes")
 router = APIRouter()
@@ -450,6 +451,7 @@ async def handle_slack_interaction(
     request: Request,
     x_slack_signature: str | None = Header(default=None, alias="X-Slack-Signature"),
     x_slack_request_timestamp: str | None = Header(default=None, alias="X-Slack-Request-Timestamp"),
+    session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> dict[str, Any]:
     """Verifies and records a Slack decision. Remediation runs later, in the worker only."""
     raw_body = await request.body()
@@ -516,6 +518,10 @@ async def handle_slack_interaction(
         or channel_id != policy.slack_channel_id
     ):
         raise HTTPException(status_code=403, detail="Slack approver is not authorized")
+    # ADR-0012: the global allowlist is necessary but not sufficient. The Slack user must also be
+    # mapped (by a workspace owner/admin) to an approver in the workspace that owns this incident.
+    if not await workspace_approver_authorized(session, approval_id, user_id):
+        raise HTTPException(status_code=403, detail="Slack approver is not authorized")
     decision = decisions[action_id]
 
     try:
@@ -547,36 +553,37 @@ async def handle_slack_interaction(
 
 
 @router.get(
-    "/v1/incidents",
+    "/v1/workspaces/{workspace_id}/incidents",
     response_model=list[IncidentSummary],
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(verify_read_token)],
     summary="List incident summaries with pagination and deterministic ordering",
 )
 async def list_incidents(
     limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
     offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    *,
+    scope: Scope,
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> list[IncidentSummary]:
     """Returns a list of lightweight incident summaries without diff_content."""
     repo = IncidentRepository(session)
-    return await repo.list_incidents(limit=limit, offset=offset)
+    return await repo.list_incidents(scope=scope, limit=limit, offset=offset)
 
 
 @router.get(
-    "/v1/incidents/{incident_id}",
+    "/v1/workspaces/{workspace_id}/incidents/{incident_id}",
     response_model=IncidentDetail,
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(verify_read_token)],
     summary="Get full incident detail by ID including diff_content and execution context",
 )
 async def get_incident(
     incident_id: str,
+    scope: Scope,
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> IncidentDetail:
     """Returns full incident detail including patch diff, proposals, and logs."""
     repo = IncidentRepository(session)
-    incident = await repo.get_incident(incident_id)
+    incident = await repo.get_incident(incident_id, scope=scope)
     if incident is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -586,17 +593,18 @@ async def get_incident(
 
 
 @router.get(
-    "/v1/pipelines",
+    "/v1/workspaces/{workspace_id}/pipelines",
     response_model=list[PipelineSummary],
     status_code=status.HTTP_200_OK,
-    dependencies=[Depends(verify_read_token)],
     summary="List recent pipeline summaries with pagination and deterministic ordering",
 )
 async def list_pipelines(
     limit: int = Query(default=20, ge=1, le=100, description="Max items to return (1-100)"),
     offset: int = Query(default=0, ge=0, description="Pagination offset (>=0)"),
+    *,
+    scope: Scope,
     session: AsyncSession = Depends(get_db_session),  # noqa: B008
 ) -> list[PipelineSummary]:
     """Returns recent pipeline execution summaries from PostgreSQL."""
     repo = PipelineRepository(session)
-    return await repo.list_recent_pipelines(limit=limit, offset=offset)
+    return await repo.list_recent_pipelines(scope=scope, limit=limit, offset=offset)

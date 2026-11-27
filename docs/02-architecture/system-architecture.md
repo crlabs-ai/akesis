@@ -100,6 +100,41 @@ graph TD
 4. **Snapshot-Based Patch:** Applies the approved patch verbatim to a copy of a verified snapshot of the approved commit, then re-validates it in Docker before any remote write.
 5. **GitHub Delivery (`src/packages/sdk/github_git_writer.py`):** With a GitHub App installation token scoped to the event repository, creates blobs, tree and commit through the Git Data API (each verified against local object IDs), creates the branch (never forced), and opens a Pull Request whose base is the exact verified source branch. The source branch must still point at the approved commit before each remote step. Akesis never merges.
 
+### 2.5 Identity, Workspaces and Tenant Isolation (ADR-0012)
+Users sign in with the Akesis GitHub App's user authorization (PKCE). Sessions are server-side
+and carried in an HttpOnly cookie. Every incident, pipeline and delivery belongs to the workspace
+that links the GitHub App installation in its verified provenance, and every read is filtered by
+that workspace in SQL after a fresh membership check.
+
+### 2.6 Route Structure
+Frontend (console SPA) paths and API paths never overlap: the SPA owns `/`, `/login`,
+`/auth/callback` and `/app/*`; the API owns `/v1/*` and `/health/*`.
+
+| Surface | Paths |
+| :--- | :--- |
+| Public site | `/` |
+| Sign-in | `/login`, `/auth/callback` (GitHub redirects here; the page posts `code` and `state` to the API) |
+| Console | `/app`, `/app/onboarding`, `/app/incidents`, `/app/incidents/:id`, `/app/pipelines`, `/app/deliveries`, `/app/approvals` (read-only), `/app/health`, `/app/members`, `/app/settings` |
+
+| API | Auth | Purpose |
+| :--- | :--- | :--- |
+| `GET /v1/auth/github/login` | none | Start sign-in; sets the binding cookie and redirects to GitHub |
+| `POST /v1/auth/github/callback` | binding cookie + CSRF header | Validate state, exchange the code (PKCE), set the session cookie |
+| `POST /v1/auth/logout`, `POST /v1/auth/sessions/revoke-all` | session + CSRF | Revoke this or every session |
+| `GET /v1/me`, `GET /v1/me/invitations`, `POST /v1/me/invitations/{id}/accept` | session | The user, their workspaces and invitations |
+| `GET, POST /v1/workspaces`; `PATCH /v1/workspaces/{workspace_id}`; `POST …/leave` | session | List, create, rename, leave |
+| `/v1/workspaces/{workspace_id}/members[/{user_id}[/slack]]` | membership | List, change role, map Slack user, remove |
+| `/v1/workspaces/{workspace_id}/invitations[/{id}]` | membership (admin+) | List, invite, revoke |
+| `/v1/workspaces/{workspace_id}/installations[/available, /{id}, /{id}/sync]` | membership (admin+ to change) | Link, sync and unlink GitHub App installations |
+| `GET /v1/workspaces/{workspace_id}/repositories` | membership | Repositories of the linked installations |
+| `GET /v1/workspaces/{workspace_id}/incidents[/{incident_id}]`, `…/pipelines`, `…/deliveries` | membership | Tenant reads, filtered by the workspace's installations |
+| `POST /v1/webhooks/github` | GitHub HMAC | Ingestion |
+| `POST /v1/slack/interactions` | Slack HMAC + allowlist + workspace approver role | The only approval channel |
+| `GET /health/liveness`, `/health/readiness` | none | Probes |
+
+A workspace ID is an identifier, never a credential: non-members get 404, members without the
+role get 403. There are no global tenant read routes.
+
 ---
 
 ## 3. Strict Non-Negotiable Safety Boundaries

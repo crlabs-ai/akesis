@@ -194,12 +194,10 @@ Every run emits one `remediation_requeue` JSON event (kept by journald) with the
 
 Exit code 0 means the heartbeat is fresh and the worker is `ok`. Exit code 1 prints the reason: `heartbeat stale`, `not ready: database_unavailable`, `not ready: github_app_not_configured`, or `no readable heartbeat`.
 
-**List deliveries that need attention (authenticated, read-only):**
-
-```bash
-curl -s -H "X-Akesis-Read-Token: $READ_API_TOKEN" \
-  "http://127.0.0.1:8000/v1/webhook-deliveries?status=exhausted&status=retryable_error&limit=50"
-```
+**List deliveries that need attention (authenticated, read-only):** sign in to the console and
+open **Webhook deliveries** in the workspace that links the installation (`/app/deliveries`). The
+API route is `GET /v1/workspaces/{workspace_id}/deliveries?status=exhausted&status=retryable_error`
+and requires a signed-in member's session cookie; there is no shared operator token (ADR-0012).
 
 Each item shows `delivery_id`, `status`, `failure_code`, `last_error_code`, `attempt_count`, `max_attempts`, `next_retry_at`, `received_at`, `updated_at` and `event_type`. It never shows payloads, signatures, headers, installation identifiers or credentials. Page with the returned `next_cursor`.
 

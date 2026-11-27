@@ -1,3 +1,7 @@
+"""API security configuration: sessions replace the retired global read token (ADR-0012)."""
+
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -5,84 +9,36 @@ from pydantic import ValidationError
 from src.apps.api.main import create_app
 from src.packages.shared.config import Settings, settings
 
-
-def test_read_endpoints_accessible_in_dev_without_token() -> None:
-    """1. Read endpoints remain accessible when read_api_token is empty."""
-    custom_settings = Settings(
-        read_api_token="",
-        trusted_hosts=["testserver", "localhost", "test"],
-    )
-    app = create_app(app_settings=custom_settings)
-    client = TestClient(app)
-
-    res_incidents = client.get("/v1/incidents")
-    assert res_incidents.status_code == 200
-
-    res_pipelines = client.get("/v1/pipelines")
-    assert res_pipelines.status_code == 200
+FERNET_KEY = base64.urlsafe_b64encode(b"\x01" * 32).decode()  # synthetic, valid shape
 
 
-def test_missing_read_token_returns_401_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """2. Missing read token returns 401 when read_api_token is configured."""
-    monkeypatch.setattr(settings, "read_api_token", "secret_read_token_123")
+def test_read_token_is_gone() -> None:
+    assert "read_api_token" not in Settings.model_fields
+    default_headers = Settings.model_fields["cors_allowed_headers"].default_factory
+    assert default_headers is not None
+    assert "X-Akesis-Read-Token" not in default_headers()  # type: ignore[call-arg]
+
+
+def test_global_read_routes_no_longer_exist() -> None:
+    client = TestClient(create_app(app_settings=settings))
+    for path in ("/v1/incidents", "/v1/pipelines", "/v1/webhook-deliveries"):
+        assert client.get(path, headers={"X-Akesis-Read-Token": "anything"}).status_code == 404
+
+
+def test_tenant_routes_require_a_session_even_in_development() -> None:
+    client = TestClient(create_app(app_settings=Settings(environment="development")))
+    for path in ("incidents", "incidents/inc_x", "pipelines", "deliveries", "members"):
+        response = client.get(f"/v1/workspaces/ws_any/{path}")
+        assert response.status_code == 401
+        assert response.json() == {"detail": "not_signed_in"}
+    assert client.get("/v1/me").status_code == 401
+
+
+def test_health_endpoints_remain_accessible_independently() -> None:
+    """5. Health endpoints remain accessible without a session."""
     app = create_app(app_settings=settings)
     client = TestClient(app)
 
-    # Missing header
-    res_inc = client.get("/v1/incidents")
-    assert res_inc.status_code == 401
-    assert res_inc.json()["detail"] == "Invalid or missing read API token"
-
-    res_pipe = client.get("/v1/pipelines")
-    assert res_pipe.status_code == 401
-    assert res_pipe.json()["detail"] == "Invalid or missing read API token"
-
-    res_detail = client.get("/v1/incidents/inc_test_123")
-    assert res_detail.status_code == 401
-    assert res_detail.json()["detail"] == "Invalid or missing read API token"
-
-
-def test_incorrect_read_token_returns_401(monkeypatch: pytest.MonkeyPatch) -> None:
-    """3. Incorrect read token returns 401."""
-    monkeypatch.setattr(settings, "read_api_token", "secret_read_token_123")
-    app = create_app(app_settings=settings)
-    client = TestClient(app)
-
-    headers = {"X-Akesis-Read-Token": "wrong_token"}
-    res = client.get("/v1/incidents", headers=headers)
-    assert res.status_code == 401
-    assert res.json()["detail"] == "Invalid or missing read API token"
-    # Ensure submitted token is not echoed in error response
-    assert "wrong_token" not in res.text
-
-
-def test_valid_read_token_permits_access(monkeypatch: pytest.MonkeyPatch) -> None:
-    """4. Valid read token permits access to all read endpoints."""
-    monkeypatch.setattr(settings, "read_api_token", "secret_read_token_123")
-    app = create_app(app_settings=settings)
-    client = TestClient(app)
-
-    headers = {"X-Akesis-Read-Token": "secret_read_token_123"}
-    res_inc = client.get("/v1/incidents", headers=headers)
-    assert res_inc.status_code == 200
-
-    res_pipe = client.get("/v1/pipelines", headers=headers)
-    assert res_pipe.status_code == 200
-
-    # 404 for unknown incident (authenticated but item does not exist)
-    res_detail = client.get("/v1/incidents/inc_unknown_404", headers=headers)
-    assert res_detail.status_code == 404
-
-
-def test_health_endpoints_remain_accessible_independently(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """5. Health endpoints remain accessible independently of read authentication."""
-    monkeypatch.setattr(settings, "read_api_token", "secret_read_token_123")
-    app = create_app(app_settings=settings)
-    client = TestClient(app)
-
-    # Health endpoints do not require X-Akesis-Read-Token
     live = client.get("/health/liveness")
     assert live.status_code == 200
     assert live.json() == {"status": "ok"}
@@ -90,17 +46,6 @@ def test_health_endpoints_remain_accessible_independently(
     ready = client.get("/health/readiness")
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
-
-
-def test_production_missing_token_fails_closed() -> None:
-    """Even an incorrectly mutated settings object must not expose incident detail."""
-    custom_settings = Settings(environment="test", read_api_token="")
-    custom_settings.environment = "production"
-    app = create_app(app_settings=custom_settings)
-    client = TestClient(app)
-    assert client.get("/v1/incidents/inc_sensitive").status_code == 401
-    assert client.get("/v1/pipelines").status_code == 401
-    assert client.get("/health/liveness").status_code == 200
 
 
 def test_cors_allowed_origins() -> None:
@@ -144,24 +89,24 @@ def test_cors_preflight_handling() -> None:
     custom_settings = Settings(
         cors_allowed_origins=["http://localhost:3000"],
         cors_allowed_methods=["GET", "POST", "OPTIONS"],
-        cors_allowed_headers=["Content-Type", "X-Akesis-Read-Token"],
+        cors_allowed_headers=["Content-Type", "X-Akesis-CSRF"],
         trusted_hosts=["testserver", "localhost", "test"],
     )
     app = create_app(app_settings=custom_settings)
     client = TestClient(app)
 
     res = client.options(
-        "/v1/incidents",
+        "/v1/me",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "X-Akesis-Read-Token",
+            "Access-Control-Request-Headers": "X-Akesis-CSRF",
         },
     )
     assert res.status_code == 200
     assert res.headers.get("access-control-allow-origin") == "http://localhost:3000"
     assert "GET" in res.headers.get("access-control-allow-methods", "")
-    assert "x-akesis-read-token" in res.headers.get("access-control-allow-headers", "").lower()
+    assert "x-akesis-csrf" in res.headers.get("access-control-allow-headers", "").lower()
 
 
 def test_trusted_hosts_rejects_invalid_host() -> None:
@@ -243,47 +188,10 @@ def test_production_config_rejects_wildcard_cors_and_hosts() -> None:
     assert "TRUSTED_HOSTS must not contain wildcard" in err_str
 
 
-def test_production_config_rejects_read_token_secret_reuse() -> None:
-    """14b. Production config rejects read_api_token equaling other integration secrets."""
-    with pytest.raises(ValidationError) as exc_info:
-        Settings(
-            environment="production",
-            database_url="postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
-            github_webhook_secret="shared_secret_1234567890",
-            github_app_id=12345,
-            github_app_private_key="synthetic-app-key-material",
-            gemini_api_key="AIzaSyProdKey1234567890",
-            slack_webhook_url="https://hooks.slack.com/services/T01/B02/realprodsecret",
-            slack_signing_secret="prod_slack_sec_1234567890",
-            cors_allowed_origins=["https://dashboard.akesis.dev"],
-            trusted_hosts=["api.akesis.dev"],
-            read_api_token="shared_secret_1234567890",  # Reused secret!
-        )
-
-    err_str = str(exc_info.value)
-    assert "READ_API_TOKEN must be distinct" in err_str
-
-
 def test_production_config_valid() -> None:
     """Production config passes when all parameters are valid and distinct."""
-    prod_settings = Settings(
-        environment="production",
-        database_url="postgresql+asyncpg://prod_user:SecurePass123!@prod-db.internal:5432/akesis_prod",
-        github_webhook_secret="prod_sec_abc1234567890",
-        github_app_id=12345,
-        github_app_private_key="synthetic-app-key-material",
-        gemini_api_key="AIzaSyProdKey1234567890",
-        slack_webhook_url="https://hooks.slack.com/services/T01/B02/realprodsecret",
-        slack_signing_secret="prod_slack_sec_1234567890",
-        cors_allowed_origins=["https://dashboard.akesis.dev"],
-        trusted_hosts=["api.akesis.dev"],
-        read_api_token="prod_read_token_distinct_987654",
-        slack_approver_user_ids=["U_TEST"],
-        slack_workspace_id="T_TEST",
-        slack_channel_id="C_TEST",
-    )
+    prod_settings = Settings(**_valid_production())  # type: ignore[arg-type]
     assert prod_settings.environment == "production"
-    assert prod_settings.read_api_token == "prod_read_token_distinct_987654"
 
 
 def _valid_production(**overrides: object) -> dict[str, object]:
@@ -298,7 +206,10 @@ def _valid_production(**overrides: object) -> dict[str, object]:
         "slack_signing_secret": "prod_slack_sec_1234567890",
         "cors_allowed_origins": ["https://dashboard.akesis.dev"],
         "trusted_hosts": ["api.akesis.dev"],
-        "read_api_token": "prod_read_token_distinct_987654",
+        "github_app_client_id": "Iv1.synthetic0000",
+        "github_app_client_secret": "synthetic-client-secret-0123456789",
+        "auth_redirect_uri": "https://dashboard.akesis.dev/auth/callback",
+        "auth_token_encryption_key": FERNET_KEY,
         "slack_approver_user_ids": ["U_TEST"],
         "slack_workspace_id": "T_TEST",
         "slack_channel_id": "C_TEST",
@@ -320,10 +231,28 @@ def test_production_config_requires_github_app_credentials(overrides: dict[str, 
     )
 
 
-def test_production_config_rejects_read_token_equal_to_app_key() -> None:
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"github_app_client_id": ""}, "GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET"),
+        ({"github_app_client_secret": " "}, "GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET"),
+        ({"auth_redirect_uri": "http://dashboard.akesis.dev/auth/callback"}, "AUTH_REDIRECT_URI"),
+        ({"auth_redirect_uri": "https://dashboard.akesis.dev/elsewhere"}, "AUTH_REDIRECT_URI"),
+        ({"auth_cookie_secure": False}, "AUTH_COOKIE_SECURE must be true"),
+        ({"auth_token_encryption_key": ""}, "AUTH_TOKEN_ENCRYPTION_KEY must be a valid Fernet"),
+        ({"auth_token_encryption_key": "not-a-key"}, "AUTH_TOKEN_ENCRYPTION_KEY must be a valid"),
+        (
+            {"github_app_client_secret": "prod_slack_sec_1234567890"},
+            "Sign-in secrets must be distinct",
+        ),
+    ],
+)
+def test_production_config_requires_safe_sign_in(
+    overrides: dict[str, object], message: str
+) -> None:
     with pytest.raises(ValidationError) as exc_info:
-        Settings(**_valid_production(read_api_token="synthetic-app-key-material"))  # type: ignore[arg-type]
-    assert "READ_API_TOKEN must be distinct" in str(exc_info.value)
+        Settings(**_valid_production(**overrides))  # type: ignore[arg-type]
+    assert message in str(exc_info.value)
 
 
 def test_personal_access_token_setting_no_longer_exists() -> None:

@@ -49,14 +49,20 @@ def test_production_settings_assign_the_executor_to_the_worker_only() -> None:
         "slack_webhook_url": "",
         "github_webhook_secret": "",
         "slack_signing_secret": "",
-        "read_api_token": "",
+        "github_app_client_secret": "",
+        "auth_token_encryption_key": "",
     }
     with pytest.raises(ValueError, match="SANDBOX_EXECUTOR_URL is required in production"):
         Settings.model_validate(worker)
-    # The worker needs no webhook secret, Slack signing secret, read token, CORS or hosts.
+    # The worker needs no webhook secret, Slack signing secret, sign-in secrets, CORS or hosts.
     assert Settings.model_validate({**worker, **EXECUTOR}).service_role == "worker"
     # ...and refuses them: it verifies no inbound request and serves no read API.
-    for name in ("github_webhook_secret", "slack_signing_secret", "read_api_token"):
+    for name in (
+        "github_webhook_secret",
+        "slack_signing_secret",
+        "github_app_client_secret",
+        "auth_token_encryption_key",
+    ):
         with pytest.raises(ValueError, match=f"must not be set for the worker: {name.upper()}"):
             Settings.model_validate({**worker, **EXECUTOR, name: api[name]})
 
@@ -133,7 +139,10 @@ _API_ENV = {
     "SLACK_CHANNEL_ID": "C_TEST",
     "CORS_ALLOWED_ORIGINS": '["https://dashboard.akesis.dev"]',
     "TRUSTED_HOSTS": '["api.akesis.dev"]',
-    "READ_API_TOKEN": "prod_read_token_distinct_987654",
+    "GITHUB_APP_CLIENT_ID": "Iv1.synthetic0000",
+    "GITHUB_APP_CLIENT_SECRET": "synthetic-client-secret-0123456789",
+    "AUTH_REDIRECT_URI": "https://dashboard.akesis.dev/auth/callback",
+    "AUTH_TOKEN_ENCRYPTION_KEY": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
 }
 _WORKER_ENV = {
     "ENVIRONMENT": "production",
@@ -241,7 +250,12 @@ def test_real_worker_startup_uses_only_the_executor(tmp_path: Path) -> None:
                 {**_WORKER_ENV, name: _API_ENV[name]},
                 f"API-only credentials must not be set for the worker: {name}",
             )
-            for name in ("GITHUB_WEBHOOK_SECRET", "SLACK_SIGNING_SECRET", "READ_API_TOKEN")
+            for name in (
+                "GITHUB_WEBHOOK_SECRET",
+                "SLACK_SIGNING_SECRET",
+                "GITHUB_APP_CLIENT_SECRET",
+                "AUTH_TOKEN_ENCRYPTION_KEY",
+            )
         ),
     ],
 )
@@ -259,7 +273,8 @@ def test_real_worker_refuses_without_executor_or_worker_role_or_with_api_secrets
         ("GITHUB_APP_PRIVATE_KEY", _API_ENV["GITHUB_APP_PRIVATE_KEY"]),
         ("GITHUB_WEBHOOK_SECRET", _API_ENV["GITHUB_WEBHOOK_SECRET"]),  # API only
         ("SLACK_SIGNING_SECRET", _API_ENV["SLACK_SIGNING_SECRET"]),
-        ("READ_API_TOKEN", _API_ENV["READ_API_TOKEN"]),
+        ("GITHUB_APP_CLIENT_SECRET", _API_ENV["GITHUB_APP_CLIENT_SECRET"]),
+        ("AUTH_TOKEN_ENCRYPTION_KEY", _API_ENV["AUTH_TOKEN_ENCRYPTION_KEY"]),
         ("SANDBOX_EXECUTOR_REQUEST_KEY", "q" * 40),  # the worker's caller-side key
     ],
 )

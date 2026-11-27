@@ -1,6 +1,18 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -295,6 +307,15 @@ class PipelineModel(Base):
         nullable=False,
         doc="Target failing commit SHA",
     )
+    # Phase 2 (ADR-0012): the GitHub App installation from the run's verified provenance. It is the
+    # tenant anchor: a pipeline belongs to the workspace that has linked this installation. NULL
+    # for historical rows without verified provenance, which no workspace can see.
+    installation_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True,
+        index=True,
+        doc="Verified GitHub App installation that produced this pipeline",
+    )
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -383,3 +404,196 @@ class PipelineModel(Base):
     __table_args__ = (
         Index("ix_pipelines_repo_run", "repository_owner", "repository_name", "run_id"),
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase 2 (ADR-0012): identity, sessions and workspaces.
+# ---------------------------------------------------------------------------------------------
+
+WORKSPACE_KINDS = ("personal", "team")
+# Ordered from most to least privileged; see src/packages/shared/workspace_roles.py.
+WORKSPACE_ROLES = ("owner", "admin", "maintainer", "approver", "viewer")
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _in(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
+
+
+class UserModel(Base):
+    """A person, identified by their immutable GitHub user ID (logins can change)."""
+
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    github_login: Mapped[str] = mapped_column(String(39), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    avatar_url: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthSessionModel(Base):
+    """A server-side browser session. Only a SHA-256 digest of the cookie token is stored."""
+
+    __tablename__ = "auth_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    token_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The GitHub user-to-server token, encrypted at rest, used only server-side to verify which
+    # App installations this user can access. It dies with the session.
+    github_token_ciphertext: Mapped[str | None] = mapped_column(Text)
+    github_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OAuthLoginAttemptModel(Base):
+    """One pending GitHub sign-in: its state, PKCE verifier and browser binding. Single use."""
+
+    __tablename__ = "oauth_login_attempts"
+
+    attempt_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    state_sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    browser_binding_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    return_to: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkspaceModel(Base):
+    """A tenant. A personal workspace has exactly one owner, enforced by a unique column."""
+
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        CheckConstraint(_in("kind", WORKSPACE_KINDS), name="ck_workspaces_kind"),
+        # personal <=> personal_owner_id is set; so each user has at most one personal workspace.
+        CheckConstraint(
+            "(kind = 'personal') = (personal_owner_id IS NOT NULL)",
+            name="ck_workspaces_personal_owner",
+        ),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    personal_owner_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), unique=True
+    )
+    created_by: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class WorkspaceMembershipModel(Base):
+    """A user's role in a workspace. Deleting the row revokes access immediately."""
+
+    __tablename__ = "workspace_memberships"
+    __table_args__ = (
+        CheckConstraint(_in("role", WORKSPACE_ROLES), name="ck_workspace_memberships_role"),
+        # A Slack identity maps to at most one member per workspace (set by owners/admins only).
+        UniqueConstraint("workspace_id", "slack_user_id", name="uq_membership_slack_user"),
+    )
+
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    slack_user_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class WorkspaceInvitationModel(Base):
+    """An invitation for one GitHub account to join a team workspace with a role.
+
+    The target is the immutable numeric GitHub user ID, resolved from the username when the
+    invitation is created. `github_login` is display-only: a rename never moves an invitation."""
+
+    __tablename__ = "workspace_invitations"
+    __table_args__ = (
+        CheckConstraint(_in("role", WORKSPACE_ROLES), name="ck_workspace_invitations_role"),
+        # At most one open invitation per GitHub account per workspace.
+        Index(
+            "uq_workspace_invitations_open",
+            "workspace_id",
+            "github_user_id",
+            unique=True,
+            postgresql_where=text("accepted_at IS NULL AND revoked_at IS NULL"),
+        ),
+    )
+
+    invitation_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    github_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    github_login: Mapped[str] = mapped_column(String(39), nullable=False)  # display only
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    invited_by: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GitHubInstallationModel(Base):
+    """A GitHub App installation linked to exactly one workspace (the primary key enforces it)."""
+
+    __tablename__ = "github_installations"
+
+    installation_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    workspace_id: Mapped[str] = mapped_column(
+        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_login: Mapped[str] = mapped_column(String(39), nullable=False)
+    account_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    linked_by: Mapped[str] = mapped_column(
+        ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=False
+    )
+    linked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class WorkspaceRepositoryModel(Base):
+    """A repository reachable through a linked installation, and so owned by its workspace."""
+
+    __tablename__ = "workspace_repositories"
+
+    github_repository_id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False
+    )
+    installation_id: Mapped[int] = mapped_column(
+        ForeignKey("github_installations.installation_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    private: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

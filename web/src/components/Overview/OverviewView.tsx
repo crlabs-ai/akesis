@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiClient } from '../../services/api'
-import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import { useWorkspaceReload } from '../../hooks/useWorkspaceReload'
 import type { IncidentSummary, PipelineSummary, ReadinessResponse, WebhookDelivery } from '../../types/api'
 import { StatusBadge } from '../Common/StatusBadge'
 import { CopyButton } from '../Common/CopyButton'
@@ -86,7 +86,7 @@ export const OverviewView: React.FC = () => {
   useEffect(() => {
     void loadData()
   }, [loadData])
-  useTokenChangeReload(() => void loadData())
+  useWorkspaceReload(() => void loadData())
 
   const probeLabel =
     readinessError !== null

@@ -136,6 +136,7 @@ async def admit_verified_delivery(
         repository_name=source_name,
         run_id=provenance.run_id,
         commit_sha=provenance.head_sha,
+        installation_id=provenance.installation_id,
         status=PipelineStatus.FAILED,
         failure_reason=REMEDIATION_DISABLED_REASON,
         failure_context_json=context.model_dump_json(),

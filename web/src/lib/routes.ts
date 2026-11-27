@@ -1,4 +1,15 @@
-import { Activity, AlertOctagon, GitMerge, LayoutDashboard, Webhook, type LucideIcon } from 'lucide-react'
+import {
+  Activity,
+  AlertOctagon,
+  CheckSquare,
+  GitMerge,
+  LayoutDashboard,
+  Rocket,
+  Settings,
+  Users,
+  Webhook,
+  type LucideIcon,
+} from 'lucide-react'
 
 /** The operator console lives under /app; the public site owns /. */
 export const APP_BASE = '/app'
@@ -36,6 +47,7 @@ export const ROUTE_GROUPS: RouteGroup[] = [
       { to: appPath('/'), label: 'Overview', icon: LayoutDashboard, end: true, keywords: ['home', 'command center', 'status'] },
       { to: appPath('/incidents'), label: 'Incidents', icon: AlertOctagon, end: false, keywords: ['failures', 'investigation'] },
       { to: appPath('/pipelines'), label: 'Pipelines', icon: GitMerge, end: false, keywords: ['workflow', 'stages', 'remediation'] },
+      { to: appPath('/approvals'), label: 'Approvals', icon: CheckSquare, end: false, keywords: ['pending', 'slack', 'review'] },
     ],
   },
   {
@@ -43,6 +55,14 @@ export const ROUTE_GROUPS: RouteGroup[] = [
     routes: [
       { to: appPath('/deliveries'), label: 'Webhook deliveries', icon: Webhook, end: false, keywords: ['deliveries', 'webhook', 'retry', 'events'] },
       { to: appPath('/health'), label: 'System Health', icon: Activity, end: false, keywords: ['health', 'liveness', 'readiness', 'worker'] },
+    ],
+  },
+  {
+    label: 'Workspace',
+    routes: [
+      { to: appPath('/members'), label: 'Members', icon: Users, end: false, keywords: ['team', 'invite', 'roles', 'slack'] },
+      { to: appPath('/settings'), label: 'Settings', icon: Settings, end: false, keywords: ['profile', 'sign out', 'installations', 'repositories'] },
+      { to: appPath('/onboarding'), label: 'Get started', icon: Rocket, end: false, keywords: ['onboarding', 'setup', 'install'] },
     ],
   },
 ]

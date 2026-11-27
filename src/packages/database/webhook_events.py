@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.packages.database.models import WebhookEventModel
+from src.packages.database.tenancy import WorkspaceScope
 
 EXHAUSTED_FAILURE_CODE = "verification_retries_exhausted"
 # Scheduled states: retryable_error waits for backoff; provider_hold waits for a provider-directed
@@ -247,11 +248,19 @@ class WebhookEventRepository:
         self,
         statuses: Sequence[str],
         *,
+        scope: WorkspaceScope,
         cursor: tuple[datetime, str] | None,
         limit: int,
     ) -> Sequence[WebhookEventModel]:
-        """Keyset page of deliveries in the given statuses, newest first."""
-        stmt = select(WebhookEventModel).where(WebhookEventModel.status.in_(tuple(statuses)))
+        """Keyset page of one workspace's deliveries in the given statuses, newest first.
+
+        Deliveries carry the installation from GitHub's HMAC-signed payload, so they are scoped by
+        the workspace's linked installations.
+        """
+        stmt = select(WebhookEventModel).where(
+            WebhookEventModel.status.in_(tuple(statuses)),
+            WebhookEventModel.installation_id.in_(scope.installation_ids()),
+        )
         if cursor is not None:
             cursor_at, cursor_id = cursor
             stmt = stmt.where(
