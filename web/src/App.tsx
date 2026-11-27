@@ -6,6 +6,8 @@ import { APP_BASE, LEGACY_CONSOLE_PATHS } from './lib/routes'
 // Each surface is its own chunk: visitors to the public site never download the console.
 const LandingPage = lazy(() => import('./site/LandingPage'))
 const Console = lazy(() => import('./console/Console'))
+const LoginPage = lazy(() => import('./auth/LoginPage'))
+const AuthCallback = lazy(() => import('./auth/AuthCallback'))
 
 /** Old console URLs (/incidents/…, /health) keep working: same path, now under /app. */
 function LegacyConsoleRedirect() {
@@ -18,6 +20,8 @@ export function AppRoutes() {
     <Suspense fallback={<div className="ak" aria-busy="true" />}>
       <Routes>
         <Route path="/" element={<LandingPage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/auth/callback" element={<AuthCallback />} />
         <Route path={`${APP_BASE}/*`} element={<Console />} />
         {LEGACY_CONSOLE_PATHS.map((path) => (
           <Route key={path} path={`${path}/*`} element={<LegacyConsoleRedirect />} />

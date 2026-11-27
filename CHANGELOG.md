@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added (Phase 2: GitHub sign-in, workspaces and tenant isolation, ADR-0012)
+* **GitHub sign-in.** The Akesis GitHub App's user authorization with PKCE (Authlib), single-use browser-bound `state`, server-side HttpOnly sessions with expiry, logout and sign-out-everywhere. GitHub user tokens are encrypted at rest and never reach the browser. New settings: `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `AUTH_REDIRECT_URI`, `AUTH_SESSION_TTL_HOURS`, `AUTH_COOKIE_SECURE`, `AUTH_TOKEN_ENCRYPTION_KEY`.
+* **Workspaces.** One personal workspace per user, team workspaces with GitHub-login invitations, and OWNER/ADMIN/MAINTAINER/APPROVER/VIEWER roles with no self-escalation. GitHub App installations are linked per workspace after checking the user's access on GitHub (migration `0010_identity_workspaces`).
+* **Tenant isolation.** Incidents, pipelines and deliveries are read only through `/v1/workspaces/{workspace_id}/…`, filtered in SQL by the workspace's installations after a fresh membership check. Pipelines carry the verified `installation_id`, backfilled from verified provenance only.
+* **Approvals.** Slack remains the only approval channel; the approver must also be an owner-attested APPROVER+ member of the incident's workspace, checked at decision and again at execution. Only owners set Slack mappings, which record who attested them and when (migration `0011_slack_mapping_attestation`). Existing mappings are unattributed and must be set again by an owner.
+* **Console.** `/login`, `/auth/callback`, `/app/onboarding`, `/app/approvals` (read-only), `/app/members`, `/app/settings`, a workspace switcher, and a signed-in gate.
+
+### Removed
+* **The global read token.** `READ_API_TOKEN`, `X-Akesis-Read-Token`, the console token form and the global `/v1/incidents`, `/v1/pipelines` and `/v1/webhook-deliveries` routes.
+
 ### Fixed (sandbox container user portability)
 * **The container runs as the workspace owner.** The validation container ran as a fixed `1000:1000` against a workspace the host process creates owner-only (0700), so it could read and write the workspace only when that process was also UID 1000. On any other account, GitHub's runner (UID 1001) included, the container could not even read the code. It now runs as the numeric UID:GID that owns the workspace, read from the filesystem with `lstat`, never from a request or job. Root (UID or GID 0), a workspace this process does not own, and a non-directory are refused before any Docker call. The workspace stays 0700, and every other restriction is unchanged.
 * **The executor no longer needs UID 1000.** The deployment guide no longer pins `akesis-exec` to UID 1000, which often collides with the host's first human account.

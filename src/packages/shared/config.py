@@ -20,10 +20,23 @@ class Settings(BaseSettings):
     service_role: Literal["api", "worker"] = Field(default="api")
     log_level: str = Field(default="INFO", description="Log level: DEBUG, INFO, WARNING, ERROR")
 
-    # API Security & Authentication
-    read_api_token: str = Field(
+    # User authentication (Phase 2, ADR-0012): GitHub App user authorization + server sessions.
+    # The shared read token was retired; tenant data is read only through a signed-in session.
+    github_app_client_id: str = Field(default="", description="GitHub App OAuth client ID")
+    github_app_client_secret: str = Field(default="", repr=False)
+    auth_redirect_uri: str = Field(
+        default="http://localhost:5173/auth/callback",
+        description="Callback URL registered on the GitHub App (the web app's /auth/callback)",
+    )
+    auth_session_ttl_hours: int = Field(default=12, ge=1, le=720)
+    auth_cookie_secure: bool = Field(
+        default=True,
+        description="Send session cookies over HTTPS only (disable only for local http)",
+    )
+    auth_token_encryption_key: str = Field(
         default="",
-        description="Shared secret required for Read API access when configured",
+        repr=False,
+        description="Fernet key that encrypts GitHub user tokens at rest (server-side only)",
     )
 
     # CORS Configuration
@@ -43,13 +56,13 @@ class Settings(BaseSettings):
         description="Whether to allow credentials in CORS requests",
     )
     cors_allowed_methods: list[str] = Field(
-        default_factory=lambda: ["GET", "POST", "OPTIONS"],
+        default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         description="Allowed HTTP methods for CORS requests",
     )
     cors_allowed_headers: list[str] = Field(
         default_factory=lambda: [
             "Content-Type",
-            "X-Akesis-Read-Token",
+            "X-Akesis-CSRF",
             "X-Hub-Signature-256",
             "X-GitHub-Event",
             "X-Slack-Signature",
@@ -300,10 +313,11 @@ class Settings(BaseSettings):
         - Both: DATABASE_URL and the GitHub App. The API verifies webhook provenance with it; the
           worker uses it for verification retries, log retrieval, snapshots and mutation.
         - API: the webhook secret, the Slack signing secret and approver policy, CORS, trusted
-          hosts and the read token. It must not hold validation-executor configuration.
+          hosts and user sign-in (GitHub App OAuth client, token encryption key, secure cookies).
+          It must not hold validation-executor configuration.
         - Worker: the validation executor (it is the executor's only caller) and the approver
           allowlist (each approval is re-authorized at execution time). It must not hold the
-          webhook secret, the Slack signing secret or the read token.
+          webhook secret, the Slack signing secret or sign-in secrets.
         - GEMINI_API_KEY and SLACK_WEBHOOK_URL are used only by diagnosis and approval-card
           posting (`process_failure`), which has no caller until the condition-6 handoff. They
           are not required by either role; when set, placeholders are still rejected.
@@ -354,7 +368,12 @@ class Settings(BaseSettings):
             # it must not hold those secrets (set = non-empty and not the field default).
             api_only = [
                 name.upper()
-                for name in ("github_webhook_secret", "slack_signing_secret", "read_api_token")
+                for name in (
+                    "github_webhook_secret",
+                    "slack_signing_secret",
+                    "github_app_client_secret",
+                    "auth_token_encryption_key",
+                )
                 if getattr(self, name) not in ("", type(self).model_fields[name].default)
             ]
             if api_only:
@@ -416,19 +435,37 @@ class Settings(BaseSettings):
         elif any(host == "*" or "*" in host for host in self.trusted_hosts):
             errors.append("TRUSTED_HOSTS must not contain wildcard '*' in production.")
 
-        if not self.read_api_token.strip():
-            errors.append("READ_API_TOKEN is required in production.")
-        else:
-            secret_pool = {
-                self.github_webhook_secret,
-                self.github_app_private_key,
-                self.gemini_api_key,
-                self.slack_signing_secret,
-            }
-            if self.read_api_token in secret_pool:
-                errors.append(
-                    "READ_API_TOKEN must be distinct from GitHub, Gemini, and Slack credentials."
-                )
+        errors.extend(self._auth_production_errors())
+        return errors
+
+    def _auth_production_errors(self) -> list[str]:
+        """Sign-in must be fully configured, over HTTPS, with a valid encryption key."""
+        from urllib.parse import urlsplit
+
+        from cryptography.fernet import Fernet
+
+        errors: list[str] = []
+        if not self.github_app_client_id.strip() or not self.github_app_client_secret.strip():
+            errors.append(
+                "GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET are required in production."
+            )
+        redirect = urlsplit(self.auth_redirect_uri)
+        if redirect.scheme != "https" or not redirect.netloc or redirect.path != "/auth/callback":
+            errors.append("AUTH_REDIRECT_URI must be https://<host>/auth/callback in production.")
+        if not self.auth_cookie_secure:
+            errors.append("AUTH_COOKIE_SECURE must be true in production.")
+        other_secrets = {
+            self.github_webhook_secret,
+            self.github_app_private_key,
+            self.gemini_api_key,
+            self.slack_signing_secret,
+        }
+        if ({self.github_app_client_secret, self.auth_token_encryption_key} & other_secrets) - {""}:
+            errors.append("Sign-in secrets must be distinct from GitHub, Gemini and Slack secrets.")
+        try:
+            Fernet(self.auth_token_encryption_key.encode())
+        except Exception:
+            errors.append("AUTH_TOKEN_ENCRYPTION_KEY must be a valid Fernet key in production.")
         return errors
 
 

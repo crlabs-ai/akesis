@@ -27,6 +27,8 @@ from src.packages.shared.models import (
 )
 from src.packages.shared.persisted_provenance import semantic_key_for
 
+SEEDED_INSTALLATION_ID = 42
+
 
 @dataclass
 class Seeded:
@@ -57,7 +59,7 @@ def _provenance(
         head_branch="main",
         run_id=run_id,
         run_attempt=1,
-        installation_id=42,
+        installation_id=SEEDED_INSTALLATION_ID,
         verified_at=verified_at,
     )
 
@@ -134,6 +136,7 @@ async def seed_incident(
                 repository_name=full_name.split("/")[1],
                 run_id=run_id,
                 commit_sha=sha,
+                installation_id=provenance.installation_id,
                 status=PipelineStatus.RECEIVED,
                 failure_context_json=stored_context.model_dump_json(),
                 created_at=now,

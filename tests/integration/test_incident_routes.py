@@ -8,6 +8,7 @@ from sqlalchemy.pool import NullPool
 
 from src.apps.api.main import app
 from src.packages.database.repositories import ApprovalRepository, PipelineRepository
+from src.packages.shared.auth_service import SESSION_COOKIE
 from src.packages.shared.config import settings
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -24,8 +25,28 @@ from src.packages.shared.models import (
     ValidationStatus,
     WorkflowRunConclusion,
 )
+from tests.support.tenancy import Tenant, link_installation, reset_identity, seed_user
 
+INSTALLATION_ID = 7001
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+async def tenant() -> AsyncIterator[Tenant]:
+    """A signed-in member of the workspace that owns INSTALLATION_ID."""
+    engine = create_async_engine(settings.database_url, poolclass=NullPool, echo=False)
+    async with async_sessionmaker(bind=engine, expire_on_commit=False)() as db:
+        await reset_identity(db)
+        member = await seed_user(db, 601)
+        await link_installation(db, member.workspace_id, INSTALLATION_ID, member.user_id)
+    await engine.dispose()
+    client.cookies.set(SESSION_COOKIE, member.session_token)
+    yield member
+    client.cookies.clear()
+
+
+def _ws(tenant: Tenant) -> str:
+    return f"/v1/workspaces/{tenant.workspace_id}"
 
 
 @pytest.fixture
@@ -38,7 +59,7 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 
 @pytest.mark.asyncio
 async def test_incident_list_and_detail_routes(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tenant: Tenant
 ) -> None:
     now = datetime.now(UTC)
     unique_suffix = f"{now.timestamp():.6f}".replace(".", "_")
@@ -129,6 +150,7 @@ async def test_incident_list_and_detail_routes(
         repository_name="akesis",
         run_id=8899001122,
         commit_sha="fedcba654321",
+        installation_id=INSTALLATION_ID,
         status=PipelineStatus.AWAITING_APPROVAL,
         failure_context_json=failure_ctx.model_dump_json(),
         proposal_json=fix_prop.model_dump_json(),
@@ -147,7 +169,7 @@ async def test_incident_list_and_detail_routes(
         await pipe_repo.create_pipeline(pipe_rec)
 
     # 1. Test GET /v1/incidents (List View)
-    response = client.get("/v1/incidents?limit=10&offset=0")
+    response = client.get(f"{_ws(tenant)}/incidents?limit=10&offset=0")
     assert response.status_code == 200
     incidents = response.json()
     assert isinstance(incidents, list)
@@ -180,7 +202,7 @@ async def test_incident_list_and_detail_routes(
     assert "diff_content" not in summary
 
     # 2. Test GET /v1/incidents/{incident_id} (Detail View)
-    detail_res = client.get(f"/v1/incidents/{incident_id}")
+    detail_res = client.get(f"{_ws(tenant)}/incidents/{incident_id}")
     assert detail_res.status_code == 200
     detail = detail_res.json()
 
@@ -200,15 +222,15 @@ async def test_incident_list_and_detail_routes(
     assert detail["validation_result"]["status"] == "passed"
 
 
-def test_unknown_incident_404() -> None:
-    res = client.get("/v1/incidents/inc_nonexistent_999999")
+def test_unknown_incident_404(tenant: Tenant) -> None:
+    res = client.get(f"{_ws(tenant)}/incidents/inc_nonexistent_999999")
     assert res.status_code == 404
     assert "not found" in res.json()["detail"].lower()
 
 
 @pytest.mark.asyncio
 async def test_malformed_json_handling(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession], tenant: Tenant
 ) -> None:
     now = datetime.now(UTC)
     unique_suffix = f"{now.timestamp():.6f}".replace(".", "_")
@@ -222,6 +244,7 @@ async def test_malformed_json_handling(
         repository_name="akesis",
         run_id=9999999999,
         commit_sha="corrupted123",
+        installation_id=INSTALLATION_ID,
         status=PipelineStatus.FAILED,
         failure_context_json="{corrupted_json: true,",  # Invalid JSON
         proposal_json="invalid json diff",  # Invalid JSON
@@ -235,7 +258,7 @@ async def test_malformed_json_handling(
         await pipe_repo.create_pipeline(pipe_rec)
 
     # 1. Malformed list endpoint must NOT crash (safe deserialization)
-    res_list = client.get("/v1/incidents?limit=50&offset=0")
+    res_list = client.get(f"{_ws(tenant)}/incidents?limit=50&offset=0")
     assert res_list.status_code == 200
     matching = [i for i in res_list.json() if i["incident_id"] == incident_id]
     assert len(matching) == 1
@@ -243,7 +266,7 @@ async def test_malformed_json_handling(
     assert "diff_content" not in matching[0]
 
     # 2. Malformed detail endpoint must NOT crash (safe fallback)
-    res_detail = client.get(f"/v1/incidents/{incident_id}")
+    res_detail = client.get(f"{_ws(tenant)}/incidents/{incident_id}")
     assert res_detail.status_code == 200
     data = res_detail.json()
     assert data["incident_id"] == incident_id
@@ -253,9 +276,9 @@ async def test_malformed_json_handling(
     assert data["validation_result"] is None
 
 
-def test_pipeline_list_endpoint_and_pagination() -> None:
+def test_pipeline_list_endpoint_and_pagination(tenant: Tenant) -> None:
     # 1. Valid list
-    res = client.get("/v1/pipelines?limit=10&offset=0")
+    res = client.get(f"{_ws(tenant)}/pipelines?limit=10&offset=0")
     assert res.status_code == 200
     pipelines = res.json()
     assert isinstance(pipelines, list)
@@ -288,18 +311,24 @@ def test_pipeline_list_endpoint_and_pagination() -> None:
 
     # 2. Pagination parameter bounds validation
     # Limit too high (> 100)
-    res_over = client.get("/v1/pipelines?limit=101")
+    res_over = client.get(f"{_ws(tenant)}/pipelines?limit=101")
     assert res_over.status_code == 422
 
     # Limit too low (< 1)
-    res_under = client.get("/v1/pipelines?limit=0")
+    res_under = client.get(f"{_ws(tenant)}/pipelines?limit=0")
     assert res_under.status_code == 422
 
     # Negative offset (< 0)
-    res_neg = client.get("/v1/pipelines?offset=-1")
+    res_neg = client.get(f"{_ws(tenant)}/pipelines?offset=-1")
     assert res_neg.status_code == 422
 
     # Incidents bounds validation
-    assert client.get("/v1/incidents?limit=101").status_code == 422
-    assert client.get("/v1/incidents?limit=0").status_code == 422
-    assert client.get("/v1/incidents?offset=-5").status_code == 422
+    assert client.get(f"{_ws(tenant)}/incidents?limit=101").status_code == 422
+    assert client.get(f"{_ws(tenant)}/incidents?limit=0").status_code == 422
+    assert client.get(f"{_ws(tenant)}/incidents?offset=-5").status_code == 422
+
+
+def test_routes_require_a_session(tenant: Tenant) -> None:
+    client.cookies.clear()
+    for path in ("incidents", "incidents/inc_x", "pipelines", "deliveries"):
+        assert client.get(f"{_ws(tenant)}/{path}").status_code == 401

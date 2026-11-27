@@ -536,6 +536,11 @@ class PipelineRecord(BaseModel):
     repository_name: str = Field(..., description="Repository name")
     run_id: int = Field(..., description="GitHub workflow run identifier")
     commit_sha: str = Field(..., description="Target commit SHA")
+    installation_id: int | None = Field(
+        default=None,
+        gt=0,
+        description="Verified GitHub App installation (tenant anchor, ADR-0012)",
+    )
     status: PipelineStatus = Field(
         default=PipelineStatus.RECEIVED,
         description="Current orchestration pipeline status",

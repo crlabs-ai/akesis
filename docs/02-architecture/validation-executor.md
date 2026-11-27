@@ -115,7 +115,8 @@ Every other outcome raises a subclass of `DockerUnavailableError`, which becomes
    to start if the working directory contains `.env` (a dangling link counts), or if any of these is
    set in its environment: `DATABASE_URL`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`,
    `GITHUB_WEBHOOK_SECRET`, `GEMINI_API_KEY`, `SLACK_WEBHOOK_URL`, `SLACK_SIGNING_SECRET`,
-   `READ_API_TOKEN`, `SANDBOX_EXECUTOR_*_KEY`. Names are matched case-insensitively, and values are
+   `READ_API_TOKEN` (retired), `GITHUB_APP_CLIENT_SECRET`, `AUTH_TOKEN_ENCRYPTION_KEY`,
+   `SANDBOX_EXECUTOR_*_KEY`. Names are matched case-insensitively, and values are
    never printed.
 2. After import, the shared settings must still hold every credential field at its default.
 3. `ExecutorConfig` is read from `AKESIS_EXECUTOR_*` only (no env file).

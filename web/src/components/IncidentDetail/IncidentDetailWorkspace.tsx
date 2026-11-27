@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { apiClient, ApiError } from '../../services/api'
-import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import { useWorkspaceReload } from '../../hooks/useWorkspaceReload'
 import type { IncidentDetail } from '../../types/api'
 import { UnifiedDiffViewer } from './UnifiedDiffViewer'
 import { DockedTerminal } from './DockedTerminal'
@@ -49,7 +49,7 @@ export const IncidentDetailWorkspace: React.FC = () => {
     }
   }
 
-  useTokenChangeReload(() => void loadIncident())
+  useWorkspaceReload(() => void loadIncident())
 
   useEffect(() => {
     loadIncident()

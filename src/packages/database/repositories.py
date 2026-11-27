@@ -6,6 +6,7 @@ from sqlalchemy import exists, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.packages.database.models import ApprovalModel, MutationModel, PipelineModel
+from src.packages.database.tenancy import WorkspaceScope
 from src.packages.shared.logging import get_logger
 from src.packages.shared.models import (
     ApprovalRecord,
@@ -107,9 +108,9 @@ class PipelineRepositoryProtocol(Protocol):
         ...
 
     async def list_recent_pipelines(
-        self, limit: int = 20, offset: int = 0
+        self, *, scope: WorkspaceScope, limit: int = 20, offset: int = 0
     ) -> list[PipelineSummary]:
-        """Retrieves paginated pipeline summaries ordered deterministically by created_at."""
+        """Retrieves one workspace's pipeline summaries ordered deterministically by created_at."""
         ...
 
     async def update_pipeline_state(
@@ -134,12 +135,16 @@ class PipelineRepositoryProtocol(Protocol):
 class IncidentRepositoryProtocol(Protocol):
     """Protocol defining query operations for incident summaries and details."""
 
-    async def list_incidents(self, limit: int = 20, offset: int = 0) -> list[IncidentSummary]:
-        """Retrieves paginated incident summaries ordered deterministically by created_at."""
+    async def list_incidents(
+        self, *, scope: WorkspaceScope, limit: int = 20, offset: int = 0
+    ) -> list[IncidentSummary]:
+        """Retrieves one workspace's incident summaries ordered deterministically by created_at."""
         ...
 
-    async def get_incident(self, incident_id: str) -> IncidentDetail | None:
-        """Retrieves full incident detail by incident_id."""
+    async def get_incident(
+        self, incident_id: str, *, scope: WorkspaceScope
+    ) -> IncidentDetail | None:
+        """Retrieves full incident detail, only if it belongs to the scoped workspace."""
         ...
 
 
@@ -436,6 +441,7 @@ class PipelineRepository:
             repository_name=model.repository_name,
             run_id=model.run_id,
             commit_sha=model.commit_sha,
+            installation_id=model.installation_id,
             status=PipelineStatus(model.status),
             diagnosis_id=model.diagnosis_id,
             proposal_id=model.proposal_id,
@@ -460,6 +466,7 @@ class PipelineRepository:
             repository_name=record.repository_name,
             run_id=record.run_id,
             commit_sha=record.commit_sha,
+            installation_id=record.installation_id,
             status=record.status.value,
             diagnosis_id=record.diagnosis_id,
             proposal_id=record.proposal_id,
@@ -577,11 +584,12 @@ class PipelineRepository:
         )
 
     async def list_recent_pipelines(
-        self, limit: int = 20, offset: int = 0
+        self, *, scope: WorkspaceScope, limit: int = 20, offset: int = 0
     ) -> list[PipelineSummary]:
-        """Retrieves paginated pipeline summaries ordered deterministically by created_at."""
+        """Retrieves one workspace's pipeline summaries ordered deterministically by created_at."""
         stmt = (
             select(PipelineModel)
+            .where(PipelineModel.installation_id.in_(scope.installation_ids()))
             .order_by(PipelineModel.created_at.desc(), PipelineModel.pipeline_id.desc())
             .limit(limit)
             .offset(offset)
@@ -597,11 +605,14 @@ class IncidentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
-    async def list_incidents(self, limit: int = 20, offset: int = 0) -> list[IncidentSummary]:
-        """Retrieves paginated incident summaries ordered deterministically by created_at."""
+    async def list_incidents(
+        self, *, scope: WorkspaceScope, limit: int = 20, offset: int = 0
+    ) -> list[IncidentSummary]:
+        """Retrieves one workspace's incident summaries ordered deterministically by created_at."""
         stmt = (
             select(PipelineModel, ApprovalModel.status.label("approval_status"))
             .outerjoin(ApprovalModel, PipelineModel.approval_id == ApprovalModel.approval_id)
+            .where(PipelineModel.installation_id.in_(scope.installation_ids()))
             .order_by(PipelineModel.created_at.desc(), PipelineModel.pipeline_id.desc())
             .limit(limit)
             .offset(offset)
@@ -661,12 +672,20 @@ class IncidentRepository:
             )
         return summaries
 
-    async def get_incident(self, incident_id: str) -> IncidentDetail | None:
-        """Retrieves full incident detail by incident_id."""
+    async def get_incident(
+        self, incident_id: str, *, scope: WorkspaceScope
+    ) -> IncidentDetail | None:
+        """Retrieves full incident detail, only if it belongs to the scoped workspace.
+
+        Another workspace's incident is indistinguishable from a missing one.
+        """
         stmt = (
             select(PipelineModel, ApprovalModel.status.label("approval_status"))
             .outerjoin(ApprovalModel, PipelineModel.approval_id == ApprovalModel.approval_id)
-            .where(PipelineModel.incident_id == incident_id)
+            .where(
+                PipelineModel.incident_id == incident_id,
+                PipelineModel.installation_id.in_(scope.installation_ids()),
+            )
         )
         res = await self.session.execute(stmt)
         row = res.first()

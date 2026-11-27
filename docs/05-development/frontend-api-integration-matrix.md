@@ -13,7 +13,7 @@ frontend's own claims. Use this document to decide what the dashboard may presen
 | Routes | `/` Overview, `/incidents`, `/incidents/:incidentId`, `/pipelines`, `/health`; anything else redirects to `/` |
 | API client | `web/src/services/api.ts`: one `request` function and an `apiClient` object. Relative URLs |
 | Authentication (frontend) | None before Phase 16. The backend read endpoints required a token the frontend never sent |
-| Authentication (backend) | `verify_read_token` checks the `X-Akesis-Read-Token` header. Unset in a non-production environment means open access. Unset in production means 401 |
+| Authentication (backend) | Phase 2 (ADR-0012): GitHub sign-in sets an HttpOnly session cookie; every tenant route requires a session and workspace membership. The global read token is removed |
 | State | Local `useState` per page. `App` remounts the view on manual refresh |
 | Styling | `web/src/index.css` with CSS custom-property tokens (GitHub Dark palette). No CSS framework |
 | Environment | No `.env` in `web/`. Vite proxies `/v1` and `/health/` to the backend |
@@ -25,10 +25,12 @@ frontend's own claims. Use this document to decide what the dashboard may presen
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | GET | `/health/liveness` | none | — | `{status}` | Process responding |
 | GET | `/health/readiness` | none | — | `{status, environment}` | **Returns a constant.** It does not check the database |
-| GET | `/v1/incidents` | read token | `limit` 1–100, `offset` ≥ 0 | `IncidentSummary[]` | Derived from pipeline rows. No total count |
-| GET | `/v1/incidents/{incident_id}` | read token | path | `IncidentDetail` | 404 with `{detail}` |
-| GET | `/v1/pipelines` | read token | `limit` 1–100, `offset` ≥ 0 | `PipelineSummary[]` | No total count |
-| GET | `/v1/webhook-deliveries` | read token | `status` (repeatable: `retryable_error`, `exhausted`, `provider_hold`), `limit` 1–200, `cursor` (opaque) | `{items, next_cursor}` | Keyset on `(updated_at, delivery_id)`. Ten-field allow-list |
+| GET | `/v1/workspaces/{workspace_id}/incidents` | session + membership | `limit` 1–100, `offset` ≥ 0 | `IncidentSummary[]` | Derived from pipeline rows. No total count |
+| GET | `/v1/workspaces/{workspace_id}/incidents/{incident_id}` | session + membership | path | `IncidentDetail` | 404 with `{detail}`, also for another workspace's incident |
+| GET | `/v1/workspaces/{workspace_id}/pipelines` | session + membership | `limit` 1–100, `offset` ≥ 0 | `PipelineSummary[]` | No total count |
+| GET | `/v1/workspaces/{workspace_id}/deliveries` | session + membership | `status` (repeatable: `retryable_error`, `exhausted`, `provider_hold`), `limit` 1–200, `cursor` (opaque) | `{items, next_cursor}` | Keyset on `(updated_at, delivery_id)`. Ten-field allow-list |
+
+Phase 2 replaced the `/v1/incidents`, `/v1/pipelines` and `/v1/webhook-deliveries` paths and the read token used in the historical table below; the full route list is in `docs/02-architecture/system-architecture.md` §2.6.
 
 Error bodies are FastAPI's `{"detail": ...}`. Validation errors (422) return a list in `detail`.
 
@@ -83,7 +85,7 @@ written to the database directly.
 1. Start PostgreSQL 16 on `127.0.0.1:55432` with database `akesis_test`, then run
    `alembic upgrade head` against it.
 2. Write a `.env`-free working directory. Export `ENVIRONMENT=development`, `DATABASE_URL`,
-   `READ_API_TOKEN`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (a throwaway
+   `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` (a throwaway
    key), and the retry settings. Start `python -m tests.support.e2e_api_process` on port 8000.
 3. Start `python -m tests.support.worker_process` with the same environment, so the real worker
    works through the retryable deliveries.

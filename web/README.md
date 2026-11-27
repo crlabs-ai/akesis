@@ -42,7 +42,7 @@ In development mode, Vite is configured (`vite.config.ts`) with reverse-proxy ru
 - `/v1/*` $\rightarrow$ `http://127.0.0.1:8000/v1/*`
 - `/health/*` $\rightarrow$ `http://127.0.0.1:8000/health/*`
 
-Because browser API requests use relative paths (e.g. `/v1/incidents`), no local CORS configuration or port hardcoding is required.
+Because browser API requests use relative paths (e.g. `/v1/workspaces/{id}/incidents`), the session cookie is same-origin and no local CORS configuration or port hardcoding is required.
 
 ---
 
@@ -55,7 +55,7 @@ In production:
    - `/v1` $\rightarrow$ Akesis FastAPI backend service
    - `/health` $\rightarrow$ Akesis FastAPI backend service
 3. **No shared API secrets in static client code:**
-   - Client code must **never** bundle or store shared API secrets (`read_api_token`, `admin_api_token`, GitHub App keys, Slack signing secrets, Gemini API keys).
+   - Client code must **never** bundle or store shared API secrets (GitHub App keys or client secrets, Slack signing secrets, Gemini API keys). Sign-in uses an HttpOnly session cookie that page code cannot read (ADR-0012).
    - Any secret bundled into frontend JavaScript is publicly extractable by end users.
    - When Akesis runs behind an identity-aware proxy (IAP), SSO, or Cloudflare Access, authentication is enforced at the network/proxy layer.
 

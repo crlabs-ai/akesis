@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, Copy, Info, RefreshCw, Search, X } from 'lucide-react'
 import { ApiError, apiClient } from '../../services/api'
-import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import { useWorkspaceReload } from '../../hooks/useWorkspaceReload'
 import type { WebhookDelivery, WebhookDeliveryPage } from '../../types/api'
 import { ApiErrorPanel } from '../Common/ApiErrorPanel'
 import { Drawer } from '../Common/Drawer'
@@ -29,14 +29,14 @@ const STATUS_LABEL: Record<string, string> = {
   provider_hold: 'Provider hold',
 }
 
-/** Names the reason a refresh failed, so the operator knows whether to fix the token or the network. */
+/** Names the reason a refresh failed, so the operator knows whether to sign in again or check the network. */
 const describeFailure = (error: unknown): string => {
   if (!(error instanceof ApiError)) return 'The latest request failed.'
   switch (error.kind) {
     case 'unauthorized':
-      return 'The read token was rejected.'
+      return 'Your session ended. Sign in again.'
     case 'forbidden':
-      return 'This token may not view deliveries.'
+      return 'Your role may not view deliveries.'
     case 'network':
       return 'The backend is unreachable.'
     case 'timeout':
@@ -155,7 +155,7 @@ export const WebhookDeliveriesView: React.FC = () => {
     reloadRequested()
   }, [reloadRequested])
 
-  useTokenChangeReload(reloadRequested)
+  useWorkspaceReload(reloadRequested)
 
   // Navigation is relative to the page on screen, not the page last requested, so a failed
   // navigation cannot make the next click skip a page.

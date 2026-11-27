@@ -69,7 +69,8 @@ _CREDENTIAL_SETTINGS = (
     "gemini_api_key",
     "slack_webhook_url",
     "slack_signing_secret",
-    "read_api_token",
+    "github_app_client_secret",
+    "auth_token_encryption_key",
     "sandbox_executor_request_key",
     "sandbox_executor_response_key",
 )

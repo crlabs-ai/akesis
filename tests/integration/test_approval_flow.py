@@ -25,6 +25,9 @@ from src.packages.shared.models import (
     ValidationStatus,
     WorkflowRunConclusion,
 )
+from tests.support.tenancy import reset_identity, seed_approver_workspace
+
+FLOW_INSTALLATION_ID = 4343
 
 
 @pytest.fixture
@@ -126,11 +129,14 @@ async def test_slack_interaction_approve_endpoint(
                 repository_name=context.repository_name,
                 run_id=context.run_id,
                 commit_sha=context.commit_sha,
+                installation_id=FLOW_INSTALLATION_ID,
                 status=PipelineStatus.RECEIVED,
                 created_at=now,
                 updated_at=now,
             )
         )
+        await reset_identity(session)
+        await seed_approver_workspace(session, FLOW_INSTALLATION_ID, "U12345")
         await pipes.update_pipeline_state(
             pipeline_id,
             PipelineStatus.AWAITING_APPROVAL,

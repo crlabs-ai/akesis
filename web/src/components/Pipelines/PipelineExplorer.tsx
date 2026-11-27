@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { apiClient, ApiError } from '../../services/api'
-import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import { useWorkspaceReload } from '../../hooks/useWorkspaceReload'
 import type { PipelineSummary } from '../../types/api'
 import { PipelineStageGraph } from '../Common/PipelineStageGraph'
 import { StatusBadge } from '../Common/StatusBadge'
@@ -39,7 +39,7 @@ export const PipelineExplorer: React.FC = () => {
     }
   }
 
-  useTokenChangeReload(() => void loadPipelines())
+  useWorkspaceReload(() => void loadPipelines())
 
   useEffect(() => {
     loadPipelines()

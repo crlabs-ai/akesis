@@ -166,3 +166,68 @@ export interface WebhookDeliveryPage {
   items: WebhookDelivery[]
   next_cursor: string | null
 }
+
+// --- Phase 2: identity and workspaces (ADR-0012) ------------------------------------------
+
+export type WorkspaceRole = 'owner' | 'admin' | 'maintainer' | 'approver' | 'viewer'
+export const WORKSPACE_ROLES: WorkspaceRole[] = ['owner', 'admin', 'maintainer', 'approver', 'viewer']
+
+export interface WorkspaceSummary {
+  workspace_id: string
+  kind: 'personal' | 'team'
+  name: string
+  slug: string
+  role: WorkspaceRole
+}
+
+/** GET /v1/me. The session itself is an HttpOnly cookie that browser code never sees. */
+export interface Me {
+  user_id: string
+  github_login: string
+  display_name: string | null
+  avatar_url: string | null
+  session_expires_at: string
+  workspaces: WorkspaceSummary[]
+}
+
+export interface WorkspaceMember {
+  user_id: string
+  github_login: string
+  display_name: string | null
+  avatar_url: string | null
+  role: WorkspaceRole
+  /** Shown only to owners and admins; null otherwise. */
+  slack_user_id: string | null
+  /** The owner who attested the Slack mapping, and when (owners and admins only). */
+  slack_mapped_by_login?: string | null
+  slack_mapped_at?: string | null
+  joined_at: string
+}
+
+export interface WorkspaceInvitation {
+  invitation_id: string
+  /** The immutable GitHub account the invitation is bound to. The login is display only. */
+  github_user_id: number
+  github_login: string
+  avatar_url?: string | null
+  role: WorkspaceRole
+  created_at: string
+  expires_at: string
+  workspace_id?: string | null
+  workspace_name?: string | null
+}
+
+export interface GitHubInstallation {
+  installation_id: number
+  account_login: string
+  account_type: string
+  linked_at?: string | null
+  suspended?: boolean | null
+}
+
+export interface WorkspaceRepository {
+  github_repository_id: number
+  full_name: string
+  private: boolean
+  installation_id: number
+}

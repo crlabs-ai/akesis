@@ -1,15 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiClient } from '../services/api'
-import { authStore } from '../services/authStore'
+import { ApiError, apiClient, refreshSession, signInUrl } from '../services/api'
+import { session } from '../services/session'
+import type { Me } from '../types/api'
 
 const jsonResponse = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
-describe('apiClient authentication and failure handling', () => {
+const me = (overrides: Partial<Me> = {}): Me => ({
+  user_id: 'usr_1',
+  github_login: 'octo',
+  display_name: null,
+  avatar_url: null,
+  session_expires_at: '2026-11-28T00:00:00Z',
+  workspaces: [
+    { workspace_id: 'ws_personal', kind: 'personal', name: 'Personal', slug: 'personal-1', role: 'owner' },
+    { workspace_id: 'ws_team', kind: 'team', name: 'Team', slug: 'team-1', role: 'viewer' },
+  ],
+  ...overrides,
+})
+
+const init = (call: unknown[]): RequestInit => call[1] as RequestInit
+
+describe('apiClient sessions, workspace scope and failure handling', () => {
   let fetchMock: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    authStore.reset()
+    session.reset()
+    window.localStorage.clear()
+    session.signedIn(me())
     fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
   })
@@ -17,32 +35,66 @@ describe('apiClient authentication and failure handling', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
-    authStore.reset()
+    session.reset()
   })
 
-  it('sends no read-token header when the session holds no token', async () => {
+  it('scopes tenant reads to the selected workspace and sends the session cookie only', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []))
     await apiClient.getIncidents({ limit: 5, offset: 0 })
-    const [, init] = fetchMock.mock.calls[0]
-    expect((init as RequestInit).headers).not.toHaveProperty('X-Akesis-Read-Token')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(String(url)).toBe('/v1/workspaces/ws_personal/incidents?limit=5&offset=0')
+    expect((options as RequestInit).credentials).toBe('include')
+    expect((options as RequestInit).headers).not.toHaveProperty('X-Akesis-Read-Token')
+    expect((options as RequestInit).headers).not.toHaveProperty('X-Akesis-CSRF')
   })
 
-  it('sends the session read token as X-Akesis-Read-Token and never in the URL', async () => {
-    authStore.setToken('  session-token-value  ')
-    fetchMock.mockResolvedValue(jsonResponse(200, []))
-    await apiClient.getPipelines({ limit: 5, offset: 0 })
-    const [url, init] = fetchMock.mock.calls[0]
-    expect((init as RequestInit).headers).toMatchObject({ 'X-Akesis-Read-Token': 'session-token-value' })
-    expect(String(url)).not.toContain('session-token-value')
+  it('switching workspace switches every request path', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, { items: [], next_cursor: null }))
+    session.selectWorkspace('ws_team')
+    await apiClient.getWebhookDeliveries()
+    await apiClient.getIncidentDetail('inc/../x')
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/v1/workspaces/ws_team/deliveries')
+    expect(String(fetchMock.mock.calls[1][0])).toBe('/v1/workspaces/ws_team/incidents/inc%2F..%2Fx')
   })
 
-  it('classifies 401 as unauthorized and asks the UI for a token', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(401, { detail: 'Invalid or missing read API token' }))
-    const failure = await apiClient.getIncidents().catch((error: unknown) => error)
-    expect(failure).toBeInstanceOf(ApiError)
-    expect((failure as ApiError).kind).toBe('unauthorized')
-    expect((failure as ApiError).message).toBe('Invalid or missing read API token')
-    expect(authStore.isAuthRequired()).toBe(true)
+  it('never requests tenant data without a workspace', async () => {
+    session.signedOut(null)
+    const failure = (await apiClient.getPipelines().catch((error: unknown) => error)) as ApiError
+    expect(failure.kind).toBe('unauthorized')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('sends the CSRF header and JSON body on every state-changing request', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+    await apiClient.changeRole('usr_2', 'approver')
+    const options = init(fetchMock.mock.calls[0])
+    expect(options.method).toBe('PATCH')
+    expect(options.headers).toMatchObject({ 'X-Akesis-CSRF': '1', 'Content-Type': 'application/json' })
+    expect(options.body).toBe(JSON.stringify({ role: 'approver' }))
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/v1/workspaces/ws_personal/members/usr_2')
+  })
+
+  it('a 401 ends the client session and keeps the reason', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: 'session_expired' }))
+    const failure = (await apiClient.getIncidents().catch((error: unknown) => error)) as ApiError
+    expect(failure.kind).toBe('unauthorized')
+    expect(session.getState()).toMatchObject({ status: 'signed_out', reason: 'session_expired' })
+  })
+
+  it('refreshSession reports a missing session without throwing', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(401, { detail: 'not_signed_in' }))
+    await expect(refreshSession()).resolves.toBe(false)
+  })
+
+  it('stores no credential in browser storage; only the workspace preference', async () => {
+    session.selectWorkspace('ws_team')
+    expect(window.localStorage.getItem('akesis.workspace')).toBe('ws_team')
+    const stored = JSON.stringify({ ...window.localStorage }) + JSON.stringify({ ...window.sessionStorage })
+    expect(stored).not.toMatch(/token|session_|ghu_/i)
+  })
+
+  it('starts sign-in as a backend redirect with a same-site return path', () => {
+    expect(signInUrl('/app/members')).toBe('/v1/auth/github/login?return_to=%2Fapp%2Fmembers')
   })
 
   it('classifies a refused connection as a network failure, not an empty result', async () => {
@@ -55,9 +107,9 @@ describe('apiClient authentication and failure handling', () => {
   it('times out a request that never answers', async () => {
     vi.useFakeTimers()
     fetchMock.mockImplementation(
-      (_url: string, init: RequestInit) =>
+      (_url: string, options: RequestInit) =>
         new Promise((_resolve, reject) => {
-          init.signal?.addEventListener('abort', () =>
+          options.signal?.addEventListener('abort', () =>
             reject(new DOMException('aborted', 'AbortError'))
           )
         })
@@ -88,33 +140,10 @@ describe('apiClient authentication and failure handling', () => {
   it('repeats every requested delivery status and never sends a requeue request', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, { items: [], next_cursor: null }))
     await apiClient.getWebhookDeliveries({ status: ['exhausted', 'retryable_error'], limit: 25 })
-    const [url, init] = fetchMock.mock.calls[0]
+    const [url, options] = fetchMock.mock.calls[0]
     expect(String(url)).toContain('status=exhausted')
     expect(String(url)).toContain('status=retryable_error')
     expect(String(url)).toContain('limit=25')
-    expect((init as RequestInit).method ?? 'GET').toBe('GET')
-  })
-})
-
-describe('authStore', () => {
-  beforeEach(() => authStore.reset())
-  afterEach(() => authStore.reset())
-
-  it('keeps the token in sessionStorage only, never localStorage', () => {
-    authStore.setToken('tok-123')
-    expect(window.sessionStorage.getItem('akesis.readToken')).toBe('tok-123')
-    expect(window.localStorage.getItem('akesis.readToken')).toBeNull()
-  })
-
-  it('clears the token completely on request', () => {
-    authStore.setToken('tok-123')
-    authStore.clearToken()
-    expect(authStore.hasToken()).toBe(false)
-    expect(window.sessionStorage.getItem('akesis.readToken')).toBeNull()
-  })
-
-  it('treats a blank entry as no token', () => {
-    authStore.setToken('   ')
-    expect(authStore.hasToken()).toBe(false)
+    expect((options as RequestInit).method ?? 'GET').toBe('GET')
   })
 })

@@ -1,7 +1,7 @@
 import React from 'react'
+import { Link } from 'react-router-dom'
 import { AlertTriangle, Clock, KeyRound, ShieldAlert, WifiOff } from 'lucide-react'
 import { ApiError } from '../../services/api'
-import { TokenForm } from '../Access/TokenForm'
 
 interface ApiErrorPanelProps {
   error: unknown
@@ -14,7 +14,7 @@ interface Presentation {
   title: string
   icon: React.ReactNode
   guidance: string
-  showTokenForm?: boolean
+  showSignIn?: boolean
 }
 
 function present(error: unknown, subject: string): Presentation {
@@ -28,18 +28,17 @@ function present(error: unknown, subject: string): Presentation {
   switch (error.kind) {
     case 'unauthorized':
       return {
-        title: 'Read token required',
+        title: 'Sign in required',
         icon: <KeyRound size={16} aria-hidden="true" />,
-        guidance:
-          'The backend will not show this data without a valid read token. Enter the operator token to continue.',
-        showTokenForm: true,
+        guidance: 'Your session has ended or was signed out. Sign in with GitHub to continue.',
+        showSignIn: true,
       }
     case 'forbidden':
       return {
         title: 'Access denied',
         icon: <ShieldAlert size={16} aria-hidden="true" />,
-        guidance: 'The token in this session is not allowed to view this data. Use a different token.',
-        showTokenForm: true,
+        guidance:
+          'Your role in this workspace does not allow this. A workspace owner or admin can change it.',
       }
     case 'network':
       return {
@@ -76,7 +75,7 @@ function present(error: unknown, subject: string): Presentation {
       return {
         title: 'Not found',
         icon: <AlertTriangle size={16} aria-hidden="true" />,
-        guidance: 'The requested record does not exist.',
+        guidance: 'The record does not exist in this workspace, or you are not a member of it.',
       }
     case 'malformed':
       return {
@@ -108,8 +107,12 @@ export const ApiErrorPanel: React.FC<ApiErrorPanelProps> = ({ error, onRetry, su
       </div>
       <p className="api-error-guidance">{view.guidance}</p>
       {detail && <p className="api-error-detail mono">{detail}</p>}
-      {view.showTokenForm && <TokenForm compact onSaved={onRetry} />}
-      {onRetry && (
+      {view.showSignIn && (
+        <Link className="btn btn-sm" to="/login">
+          Sign in with GitHub
+        </Link>
+      )}
+      {onRetry && !view.showSignIn && (
         <button type="button" className="btn btn-sm" onClick={onRetry}>
           Retry
         </button>

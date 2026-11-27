@@ -38,6 +38,7 @@ from src.packages.shared.models import (
     WorkflowRunConclusion,
 )
 from src.packages.shared.remediation_orchestrator import RemediationOrchestrator
+from tests.support.tenancy import reset_identity, seed_approver_workspace, verified_provenance
 
 
 class MockIntDiagService:
@@ -187,10 +188,19 @@ class MockIntMutationService:
             return await repo.create_mutation(record)
 
 
+FLOW_INSTALLATION_ID = 4545
+
+
 @pytest.fixture(autouse=True)
-def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Phase 1.14c: resume re-authorizes the recorded approver against the allowlist."""
+async def authorized_approvers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 1.14c: resume re-authorizes the recorded approver against the allowlist, and
+    (ADR-0012) against their approver role in the workspace that owns the installation."""
     monkeypatch.setattr(settings, "slack_approver_user_ids", ["cholan"])
+    engine = create_async_engine(settings.database_url, poolclass=NullPool, echo=False)
+    async with async_sessionmaker(bind=engine, expire_on_commit=False)() as db:
+        await reset_identity(db)
+        await seed_approver_workspace(db, FLOW_INSTALLATION_ID, "cholan")
+    await engine.dispose()
 
 
 @pytest.fixture
@@ -234,6 +244,9 @@ async def test_end_to_end_orchestrator_postgres_flow(
     )
 
     context = FailureContext(
+        provenance=verified_provenance(
+            FLOW_INSTALLATION_ID, run_id=888, head_sha="c0ffee0000000000000000000000000000000000"
+        ),
         incident_id=f"inc_e2e_{uid}",
         repository_owner="crlabs-ai",
         repository_name="akesis",

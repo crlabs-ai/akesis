@@ -21,12 +21,7 @@ _DISABLED_DATABASE_URL = "postgresql+asyncpg://akesis_tests:disabled@127.0.0.1:9
 _DISPOSABLE_ENV = "AKESIS_DISPOSABLE_TEST_DATABASE_URL"
 
 # Individual tests in otherwise database-free files that read the database.
-_DATABASE_TEST_NODES = frozenset(
-    {
-        "tests/unit/test_read_api_security.py::test_read_endpoints_accessible_in_dev_without_token",
-        "tests/unit/test_read_api_security.py::test_valid_read_token_permits_access",
-    }
-)
+_DATABASE_TEST_NODES: frozenset[str] = frozenset()
 
 # Files whose tests cannot run without the disposable database.
 _DATABASE_TEST_FILES = frozenset(
@@ -39,6 +34,7 @@ _DATABASE_TEST_FILES = frozenset(
         "tests/integration/test_provenance_matrix.py",
         "tests/integration/test_snapshot_boundary.py",
         "tests/integration/test_incident_routes.py",
+        "tests/integration/test_auth_workspaces.py",
         "tests/integration/test_mutation_flow.py",
         "tests/integration/test_orchestrator_flow.py",
         "tests/integration/test_webhook_api.py",

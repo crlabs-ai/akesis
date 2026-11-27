@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { apiClient, ApiError } from '../../services/api'
-import { useTokenChangeReload } from '../../hooks/useTokenChangeReload'
+import { useWorkspaceReload } from '../../hooks/useWorkspaceReload'
 import type { IncidentSummary } from '../../types/api'
 import { StatusBadge } from '../Common/StatusBadge'
 import { TableSkeleton } from '../Common/Skeleton'
@@ -36,7 +36,7 @@ export const IncidentsList: React.FC = () => {
     }
   }
 
-  useTokenChangeReload(() => void loadIncidents())
+  useWorkspaceReload(() => void loadIncidents())
 
   useEffect(() => {
     loadIncidents()

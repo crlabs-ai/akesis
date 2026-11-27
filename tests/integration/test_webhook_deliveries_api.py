@@ -1,4 +1,4 @@
-"""Operator visibility endpoint: authorization, filtering, pagination and data leakage.
+"""Workspace delivery visibility: authorization, isolation, filtering, pagination, leakage.
 
 Requires AKESIS_DISPOSABLE_TEST_DATABASE_URL pointing at a loopback akesis_test database.
 """
@@ -8,7 +8,6 @@ import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -21,9 +20,10 @@ from src.apps.api.main import create_app
 from src.packages.database.models import WebhookEventModel
 from src.packages.database.session import get_db_session
 from src.packages.database.webhook_events import WebhookEventRepository
+from src.packages.shared.auth_service import SESSION_COOKIE
 from src.packages.shared.config import Settings
+from tests.support.tenancy import Tenant, link_installation, reset_identity, seed_user
 
-READ_TOKEN = "synthetic-read-token-0123456789abcdef"
 PAYLOAD_DIGEST = "d1g3st" * 10 + "abcd"  # synthetic, 64 characters
 SECRET_INSTALLATION_ID = 987_654_321
 SECRET_SOURCE_SHA = "9" * 40
@@ -41,6 +41,10 @@ EXPECTED_FIELDS = {
 }
 
 
+_TENANT: Tenant
+_DEFAULT = object()
+
+
 @pytest.fixture
 async def database() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     url = os.environ.get("AKESIS_DISPOSABLE_TEST_DATABASE_URL", "")
@@ -54,6 +58,10 @@ async def database() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with sessions() as db:
         await db.execute(delete(WebhookEventModel))
         await db.commit()
+        await reset_identity(db)
+        global _TENANT
+        _TENANT = await seed_user(db, 501)
+        await link_installation(db, _TENANT.workspace_id, SECRET_INSTALLATION_ID, _TENANT.user_id)
     yield sessions
     await engine.dispose()
 
@@ -61,7 +69,6 @@ async def database() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 def _app(database: async_sessionmaker[AsyncSession], **overrides: object) -> FastAPI:
     values: dict[str, object] = {
         "environment": "test",
-        "read_api_token": READ_TOKEN,
         "github_app_id": 123,
     }
     values.update(overrides)
@@ -106,54 +113,63 @@ async def _seed(
         await db.commit()
 
 
-def _headers(token: str | None = READ_TOKEN) -> dict[str, str]:
-    return {"X-Akesis-Read-Token": token} if token else {}
-
-
 async def _get(
     app: FastAPI,
     params: dict[str, str | int | list[str]] | None = None,
-    token: str | None = READ_TOKEN,
+    token: object = _DEFAULT,
+    workspace_id: str | None = None,
 ) -> httpx.Response:
+    session_token = _TENANT.session_token if token is _DEFAULT else token
+    cookies = {SESSION_COOKIE: str(session_token)} if session_token else {}
     async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="http://test",
+        transport=httpx.ASGITransport(app=app), base_url="http://test", cookies=cookies
     ) as client:
-        return await client.get("/v1/webhook-deliveries", params=params, headers=_headers(token))
+        return await client.get(
+            f"/v1/workspaces/{workspace_id or _TENANT.workspace_id}/deliveries", params=params
+        )
 
 
-# --- Authorization --------------------------------------------------------------------------
+# --- Authorization and tenant isolation -----------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_missing_token_is_rejected(database: async_sessionmaker[AsyncSession]) -> None:
+async def test_missing_session_is_rejected(database: async_sessionmaker[AsyncSession]) -> None:
     response = await _get(_app(database), token=None)
     assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_wrong_token_is_rejected(database: async_sessionmaker[AsyncSession]) -> None:
-    response = await _get(_app(database), token="not-the-token")
+async def test_unknown_session_is_rejected(database: async_sessionmaker[AsyncSession]) -> None:
+    response = await _get(_app(database), token="not-a-real-session-token-value")
     assert response.status_code == 401
-    assert READ_TOKEN not in response.text
 
 
 @pytest.mark.asyncio
-async def test_correct_token_is_accepted(database: async_sessionmaker[AsyncSession]) -> None:
+async def test_member_is_accepted(database: async_sessionmaker[AsyncSession]) -> None:
     response = await _get(_app(database))
     assert response.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_production_without_configured_token_fails_closed(
+async def test_non_member_gets_not_found(database: async_sessionmaker[AsyncSession]) -> None:
+    async with database() as db:
+        outsider = await seed_user(db, 502)
+    response = await _get(_app(database), token=outsider.session_token)
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_other_workspace_sees_no_deliveries_of_this_installation(
     database: async_sessionmaker[AsyncSession],
 ) -> None:
-    # Production Settings cannot be constructed without every production secret, so the app is
-    # built in test mode and only the settings object the auth check reads is production-like.
-    app = _app(database)
-    app.state.settings = SimpleNamespace(environment="production", read_api_token="")
-    response = await _get(app, token=None)
-    assert response.status_code == 401
+    await _seed(database, "isolated", status="exhausted")
+    async with database() as db:
+        other = await seed_user(db, 503)
+    response = await _get(
+        _app(database), token=other.session_token, workspace_id=other.workspace_id
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []
 
 
 # --- Filtering and validation ---------------------------------------------------------------
@@ -302,7 +318,7 @@ async def test_response_never_contains_sensitive_material(
         "token",
         "private",
         "Authorization",
-        READ_TOKEN,
+        _TENANT.session_token,
     ]
     for needle in forbidden:
         assert needle not in text, f"sensitive value leaked: {needle!r}"
@@ -312,10 +328,10 @@ async def test_response_never_contains_sensitive_material(
 
 
 @pytest.mark.asyncio
-async def test_error_responses_do_not_echo_the_submitted_token(
+async def test_error_responses_do_not_echo_the_submitted_session(
     database: async_sessionmaker[AsyncSession],
 ) -> None:
-    submitted = "attacker-supplied-token-value"
+    submitted = "attacker-supplied-session-value"
     response = await _get(_app(database), token=submitted)
     assert response.status_code == 401
     assert submitted not in response.text

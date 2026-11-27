@@ -6,7 +6,7 @@ import { OverviewView } from '../components/Overview/OverviewView'
 import { describeFailureCode } from '../lib/failureText'
 import { formatRelative } from '../lib/time'
 import { ApiError, apiClient } from '../services/api'
-import { authStore } from '../services/authStore'
+import { session } from '../services/session'
 import type { WebhookDelivery } from '../types/api'
 import { mockPipelineSummaryList, mockReadinessResponse, mockIncidentSummaryList } from './fixtures'
 
@@ -49,10 +49,10 @@ describe('describeFailureCode', () => {
 
 describe('Webhook deliveries workspace', () => {
   beforeEach(() => {
-    authStore.reset()
+    session.reset()
     vi.restoreAllMocks()
   })
-  afterEach(() => authStore.reset())
+  afterEach(() => session.reset())
 
   const renderView = () =>
     render(

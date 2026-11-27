@@ -56,8 +56,12 @@ GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----
 ...PKCS#8 body...
 -----END PRIVATE KEY-----"
 
-# Operator read API (GET /v1/webhook-deliveries and other read endpoints); required in production
-READ_API_TOKEN=generate_a_random_token_of_32_chars_or_more
+# GitHub sign-in (ADR-0012); all required in production. See local-development.md Step 3b.
+GITHUB_APP_CLIENT_ID=Iv1.xxxxxxxxxxxxxxxx
+GITHUB_APP_CLIENT_SECRET=generated_in_the_github_app_settings
+AUTH_REDIRECT_URI=https://akesis.example.com/auth/callback
+AUTH_COOKIE_SECURE=true
+AUTH_TOKEN_ENCRYPTION_KEY=output_of_Fernet.generate_key
 
 # Retry worker and webhook retry policy (defaults shown; see ADR-0010)
 WEBHOOK_RETRY_MAX_ATTEMPTS=5
@@ -265,7 +269,8 @@ The worker runs scheduled webhook verification retries, workflow-log retrieval a
 | :--- | :--- | :--- |
 | `DATABASE_URL` | yes | yes |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | yes (webhook provenance verification) | yes (retries, logs, snapshots, mutation) |
-| `GITHUB_WEBHOOK_SECRET`, `SLACK_SIGNING_SECRET`, `READ_API_TOKEN` | yes | **never** (startup refuses) |
+| `GITHUB_WEBHOOK_SECRET`, `SLACK_SIGNING_SECRET`, `GITHUB_APP_CLIENT_SECRET`, `AUTH_TOKEN_ENCRYPTION_KEY` | yes | **never** (startup refuses) |
+| `GITHUB_APP_CLIENT_ID`, `AUTH_REDIRECT_URI`, `AUTH_COOKIE_SECURE` | yes | no |
 | `SLACK_WORKSPACE_ID`, `SLACK_CHANNEL_ID`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS` | yes | no (not secrets; unused) |
 | `SLACK_APPROVER_USER_IDS` | yes (decision authorization) | yes (re-authorized at execution) |
 | `SANDBOX_EXECUTOR_URL`, `SANDBOX_EXECUTOR_REQUEST_KEY`, `SANDBOX_EXECUTOR_RESPONSE_KEY` | **never** (startup refuses) | yes |
